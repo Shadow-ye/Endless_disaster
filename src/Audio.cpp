@@ -1,0 +1,279 @@
+#include "Audio.h"
+
+#include <QAudioOutput>
+#include <QCoreApplication>
+#include <QDir>
+#include <QMediaPlayer>
+#include <QSoundEffect>
+#include <QUrl>
+
+#include <algorithm>
+#include <array>
+#include <vector>
+
+namespace {
+constexpr int kVoices = 3;
+
+const char* sfxFile(SfxId id) {
+    switch (id) {
+    case SfxId::Ui:
+        return "ui.wav";
+    case SfxId::Swing:
+        return "swing.wav";
+    case SfxId::Hit:
+        return "hit.wav";
+    case SfxId::Crit:
+        return "crit.wav";
+    case SfxId::Hurt:
+        return "hurt.wav";
+    case SfxId::Skill:
+        return "skill.wav";
+    case SfxId::Dodge:
+        return "dodge.wav";
+    case SfxId::Heal:
+        return "heal.wav";
+    case SfxId::Death:
+        return "death.wav";
+    case SfxId::Level:
+        return "level.wav";
+    case SfxId::Explode:
+        return "explode.wav";
+    default:
+        return "ui.wav";
+    }
+}
+
+struct AudioState {
+    std::array<std::vector<QSoundEffect*>, int(SfxId::Count)> pools{};
+    std::array<int, int(SfxId::Count)> cursor{};
+    QMediaPlayer* bgm = nullptr;
+    QAudioOutput* bgmOut = nullptr;
+};
+
+AudioState& state() {
+    static AudioState s;
+    return s;
+}
+
+QString resolveBgmDir(const QString& assetDir) {
+    const QStringList candidates = {
+        QDir(assetDir).absoluteFilePath("../BGM"),
+        QCoreApplication::applicationDirPath() + "/BGM",
+        assetDir + "/BGM",
+        QDir(assetDir).absoluteFilePath("../../BGM"),
+    };
+    for (const QString& path : candidates) {
+        const QDir dir(QDir::cleanPath(path));
+        if (dir.exists()) {
+            return dir.absolutePath();
+        }
+    }
+    return QCoreApplication::applicationDirPath() + "/BGM";
+}
+}  // namespace
+
+Audio& Audio::instance() {
+    static Audio audio;
+    return audio;
+}
+
+void Audio::load(const QString& assetDir) {
+    assetDir_ = assetDir;
+    bgmDir_ = resolveBgmDir(assetDir);
+    if (!loaded_) {
+        const QString sfxDir = assetDir + "/sfx";
+        for (int i = 0; i < int(SfxId::Count); ++i) {
+            state().pools[i].clear();
+            state().cursor[i] = 0;
+            const QUrl url = QUrl::fromLocalFile(sfxDir + "/" + sfxFile(SfxId(i)));
+            for (int v = 0; v < kVoices; ++v) {
+                auto* effect = new QSoundEffect(QCoreApplication::instance());
+                effect->setSource(url);
+                effect->setLoopCount(1);
+                state().pools[i].push_back(effect);
+            }
+        }
+        state().bgmOut = new QAudioOutput(QCoreApplication::instance());
+        state().bgm = new QMediaPlayer(QCoreApplication::instance());
+        state().bgm->setAudioOutput(state().bgmOut);
+        QObject::connect(state().bgm, &QMediaPlayer::mediaStatusChanged, state().bgm,
+            [](QMediaPlayer::MediaStatus status) {
+                if (status == QMediaPlayer::EndOfMedia) {
+                    Audio::instance().notifyBgmEnded();
+                }
+            });
+        loaded_ = true;
+    }
+    rebuildSfxVolumes();
+    rebuildBgmVolume();
+}
+
+QString Audio::bgmPath(BgmId id) const {
+    const QDir dir(bgmDir_);
+    if (!dir.exists()) {
+        return {};
+    }
+    const QString prefix = id == BgmId::Recover ? QStringLiteral("2") : QStringLiteral("1");
+    const QStringList files = dir.entryList(QStringList{"*.m4a", "*.mp3", "*.wav", "*.ogg", "*.flac"},
+        QDir::Files, QDir::Name);
+    for (const QString& name : files) {
+        if (name.startsWith(prefix) || name.startsWith(prefix + QStringLiteral("号"))) {
+            return dir.absoluteFilePath(name);
+        }
+    }
+    // 回退：按排序取第 1 / 第 2 个文件
+    if (files.size() >= 2) {
+        return dir.absoluteFilePath(files.at(id == BgmId::Recover ? 1 : 0));
+    }
+    if (!files.isEmpty() && id == BgmId::Explore) {
+        return dir.absoluteFilePath(files.first());
+    }
+    return {};
+}
+
+void Audio::setSfxEnabled(bool enabled) {
+    sfxEnabled_ = enabled;
+    rebuildSfxVolumes();
+}
+
+void Audio::setSfxVolume(int percent) {
+    sfxVolumePercent_ = std::max(0, std::min(100, percent));
+    rebuildSfxVolumes();
+}
+
+void Audio::setBgmEnabled(bool enabled) {
+    bgmEnabled_ = enabled;
+    rebuildBgmVolume();
+    if (!bgmEnabled_) {
+        if (state().bgm) {
+            state().bgm->stop();
+        }
+        recoverPlaying_ = false;
+    }
+}
+
+void Audio::setBgmVolume(int percent) {
+    bgmVolumePercent_ = std::max(0, std::min(100, percent));
+    rebuildBgmVolume();
+}
+
+void Audio::rebuildSfxVolumes() {
+    const float vol = sfxEnabled_ ? float(sfxVolumePercent_) / 100.f : 0.f;
+    for (auto& pool : state().pools) {
+        for (QSoundEffect* effect : pool) {
+            if (effect) {
+                effect->setVolume(vol);
+            }
+        }
+    }
+}
+
+void Audio::rebuildBgmVolume() {
+    if (state().bgmOut) {
+        const float vol = bgmEnabled_ ? float(bgmVolumePercent_) / 100.f : 0.f;
+        state().bgmOut->setVolume(vol);
+    }
+}
+
+void Audio::play(SfxId id) {
+    if (!loaded_ || !sfxEnabled_ || sfxVolumePercent_ <= 0) {
+        return;
+    }
+    const int index = int(id);
+    if (index < 0 || index >= int(SfxId::Count)) {
+        return;
+    }
+    auto& pool = state().pools[index];
+    if (pool.empty()) {
+        return;
+    }
+    int& cursor = state().cursor[index];
+    QSoundEffect* effect = pool[cursor % int(pool.size())];
+    cursor = (cursor + 1) % int(pool.size());
+    if (effect->isPlaying()) {
+        effect->stop();
+    }
+    effect->play();
+}
+
+void Audio::playBgm(BgmId id, bool loop) {
+    if (!loaded_ || !state().bgm) {
+        return;
+    }
+    if (!bgmEnabled_ || bgmVolumePercent_ <= 0) {
+        state().bgm->stop();
+        return;
+    }
+    const QString file = bgmPath(id);
+    if (file.isEmpty()) {
+        return;
+    }
+    currentBgm_ = id;
+    recoverPlaying_ = (id == BgmId::Recover);
+    state().bgm->setSource(QUrl::fromLocalFile(file));
+    state().bgm->setLoops(loop ? QMediaPlayer::Infinite : 1);
+    rebuildBgmVolume();
+    state().bgm->play();
+}
+
+void Audio::startBgmLoop() {
+    playBgm(BgmId::Explore, true);
+}
+
+void Audio::ensureBgmLoop() {
+    if (!loaded_ || !bgmEnabled_ || bgmVolumePercent_ <= 0 || !state().bgm) {
+        return;
+    }
+    if (!recoverPlaying_ && currentBgm_ == BgmId::Explore
+        && state().bgm->playbackState() == QMediaPlayer::PlayingState) {
+        return;
+    }
+    startBgmLoop();
+}
+
+void Audio::playRecoverBgm() {
+    if (!loaded_ || !bgmEnabled_) {
+        return;
+    }
+    if (recoverPlaying_) {
+        return;
+    }
+    playBgm(BgmId::Recover, false);
+}
+
+void Audio::stopBgm() {
+    recoverPlaying_ = false;
+    if (state().bgm) {
+        state().bgm->stop();
+    }
+}
+
+void Audio::setBgmPaused(bool paused) {
+    if (!state().bgm || !bgmEnabled_) {
+        return;
+    }
+    if (paused) {
+        state().bgm->pause();
+    } else if (state().bgm->playbackState() == QMediaPlayer::PausedState) {
+        state().bgm->play();
+    } else if (state().bgm->playbackState() != QMediaPlayer::PlayingState) {
+        if (recoverPlaying_) {
+            playBgm(BgmId::Recover, false);
+        } else {
+            startBgmLoop();
+        }
+    }
+}
+
+void Audio::notifyBgmEnded() {
+    if (!recoverPlaying_) {
+        return;
+    }
+    recoverPlaying_ = false;
+    startBgmLoop();
+}
+
+void Audio::applyFromSettings() {
+    rebuildSfxVolumes();
+    rebuildBgmVolume();
+}
