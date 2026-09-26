@@ -10,6 +10,7 @@
 #include <QDir>
 #include <QFile>
 #include <QFocusEvent>
+#include <QFontMetrics>
 #include <QHBoxLayout>
 #include <QKeyEvent>
 #include <QLabel>
@@ -800,6 +801,20 @@ void GameWidget::drawWorld(QPainter& painter) {
                 const bool flip = anim->dirs() < 4 && player.facingX < 0.f;
                 const float heroScale = anim->dirs() >= 8 ? 1.f : 1.25f;
                 anim->draw(painter, frameIndex(*anim, player.animT, loop, fps), player.x, player.y, flip, heroScale, lift, QColor(), dir);
+                // 头顶昵称（三种职业同一逻辑）
+                const float nameTop = player.y - lift - 40.f * heroScale;
+                QFont nameFont(QStringLiteral("Microsoft YaHei UI"), 8);
+                nameFont.setBold(true);
+                painter.setFont(nameFont);
+                const QFontMetrics fm(nameFont);
+                const QString nick = QStringLiteral("玩家");
+                const int tw = fm.horizontalAdvance(nick);
+                const QRectF nameBox(player.x - tw * 0.5f - 3.f, nameTop - fm.height() - 1.f, tw + 6.f, fm.height() + 2.f);
+                painter.setPen(Qt::NoPen);
+                painter.setBrush(QColor(8, 6, 5, 150));
+                painter.drawRoundedRect(nameBox, 2, 2);
+                painter.setPen(QColor(242, 230, 216));
+                painter.drawText(nameBox, Qt::AlignCenter, nick);
             }
             if (player.guardT > 0.f) {
                 painter.setPen(QPen(QColor(64, 148, 255, 220), 2));
