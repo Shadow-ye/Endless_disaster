@@ -13,7 +13,18 @@
 - **技能自选**：出发前为键位装配技能（战士/剑客三选三键；法师四键自选）  
 - **引擎**：Qt6 Widgets + Multimedia  
 
-本仓库默认 **不包含** `build/` 可执行文件。要直接游玩，请按下方自行编译；或等待 Releases 发布打包版。
+本仓库默认 **不包含** `build/` 可执行文件。
+
+### 直接游玩（推荐）
+
+下载最新 Windows 打包：  
+**[Releases · v0.1.0 Windows 可玩包](https://github.com/Shadow-ye/Endless_disaster/releases/tag/v0.1.0)**
+
+1. 下载 `EndlessDisaster-windows-x64.zip`  
+2. 解压到任意目录  
+3. 双击 `EndlessDisaster.exe`
+
+也可按下方自行从源码编译。
 
 ## 环境配置
 

@@ -17,3 +17,7 @@ Thumbs.db
 *.pdb
 _layout_preview.jpg
 _char_preview/
+
+dist/
+*.zip
+
