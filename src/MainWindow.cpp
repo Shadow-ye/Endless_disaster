@@ -860,7 +860,7 @@ void MainWindow::loadSettingsUi() {
 }
 
 void MainWindow::saveSettingsUi() {
-    AppSettings settings;
+    AppSettings settings = Storage::loadSettings();
     settings.sfxEnabled = sfxCheck_->isChecked();
     settings.sfxVolume = sfxSlider_->value();
     settings.bgmEnabled = bgmCheck_->isChecked();

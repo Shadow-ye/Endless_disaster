@@ -45,7 +45,7 @@ protected:
     void resizeEvent(QResizeEvent* event) override;
 
 private:
-    enum class TouchControl { None, Stick, Attack, Dodge, Jump, Guard, Heal, SkillR, SkillF, SkillC, SkillV, Guide, Pause };
+    enum class TouchControl { None, Stick, Attack, Dodge, Jump, Guard, Heal, SkillR, SkillF, SkillC, SkillV, Guide, Pause, AutoAim };
     struct TouchButton {
         TouchControl control = TouchControl::None;
         QPointF center;
@@ -79,6 +79,9 @@ private:
     void releaseBinding(int id);
     void pressTouch(TouchControl control, bool down);
     void releaseAllTouches();
+    void toggleAutoAim();
+    void updateAimTarget();
+    const Monster* aimTarget() const;
     const QImage& touchSprite(qreal radius, const QColor& rim, const QColor& fill, const QString& label, int fontPx, const QColor& textColor);
     void drawTouchControls(QPainter& painter);
     void drawShadow(QPainter& painter, float x, float y);
@@ -105,6 +108,8 @@ private:
     QPointF stickCenter_;
     QPointF stickOffset_;
     QPointF aimDir_{1.0, 0.0};
+    bool autoAim_ = true;
+    int aimTargetId_ = -1;
     QHash<QString, QImage> touchSprites_;
 
     QWidget* pausePanel_ = nullptr;

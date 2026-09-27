@@ -13,6 +13,7 @@ struct AppSettings {
     int sfxVolume = 70;
     bool bgmEnabled = true;
     int bgmVolume = 55;
+    bool autoAim = true;
 };
 
 class Storage {

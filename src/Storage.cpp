@@ -87,6 +87,7 @@ AppSettings Storage::loadSettings() {
     settings.sfxVolume = std::clamp(obj.value("sfxVolume").toInt(70), 0, 100);
     settings.bgmEnabled = obj.value("bgmEnabled").toBool(true);
     settings.bgmVolume = std::clamp(obj.value("bgmVolume").toInt(55), 0, 100);
+    settings.autoAim = obj.value("autoAim").toBool(true);
     return settings;
 }
 
@@ -96,6 +97,7 @@ void Storage::saveSettings(const AppSettings& settings) {
     obj.insert("sfxVolume", std::clamp(settings.sfxVolume, 0, 100));
     obj.insert("bgmEnabled", settings.bgmEnabled);
     obj.insert("bgmVolume", std::clamp(settings.bgmVolume, 0, 100));
+    obj.insert("autoAim", settings.autoAim);
     QSaveFile file(dir() + "/settings.json");
     if (!file.open(QIODevice::WriteOnly)) {
         return;

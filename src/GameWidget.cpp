@@ -232,6 +232,7 @@ GameWidget::GameWidget(QWidget* parent) : QWidget(parent) {
         Audio::instance().setSfxVolume(settings.sfxVolume);
         Audio::instance().setBgmEnabled(settings.bgmEnabled);
         Audio::instance().setBgmVolume(settings.bgmVolume);
+        autoAim_ = settings.autoAim;
     }
 
     pausePanel_ = new QWidget(this);
@@ -643,6 +644,7 @@ void GameWidget::tick() {
     const float frame = std::min(0.05f, float(elapsedNs) / 1e9f);
     toastTime_ = std::max(0.f, toastTime_ - frame);
     if (running_ && !session_.paused() && !session_.ended()) {
+        updateAimTarget();
         const QPointF world = mouseWorld();
         // 按真实帧间隔推进：固定步长又不插值时，定时器与屏幕刷新错拍会出现 0 步 / 2 步交替的顿挫
         const int steps = std::max(1, int(std::ceil(frame / kSimDt - 0.05f)));
@@ -688,6 +690,10 @@ QRect GameWidget::viewRect() const {
 QPointF GameWidget::mouseWorld() const {
     const Player& player = session_.player();
     if (touchUi_) {
+        // 只决定朝向（攻击 / 技能方向）；闪避方向仍取摇杆的移动方向
+        if (const Monster* target = aimTarget()) {
+            return QPointF(target->x, target->y);
+        }
         return QPointF(player.x + aimDir_.x() * 48.0, player.y + aimDir_.y() * 48.0);
     }
     const QRect view = viewRect();
@@ -892,6 +898,7 @@ QVector<GameWidget::TouchButton> GameWidget::touchButtons() const {
     const qreal top = u * 0.045;
     buttons.push_back({TouchControl::Pause, QPointF(w - u * 0.075, u * 0.075), top, QStringLiteral("暂停")});
     buttons.push_back({TouchControl::Guide, QPointF(w - u * 0.185, u * 0.075), top, QStringLiteral("说明")});
+    buttons.push_back({TouchControl::AutoAim, QPointF(w - u * 0.295, u * 0.075), top, QStringLiteral("索敌")});
     return buttons;
 }
 
@@ -942,6 +949,9 @@ void GameWidget::handleTouch(QTouchEvent* event) {
                 touchBindings_.insert(id, hit);
             } else if (session_.paused()) {
                 break;
+            } else if (hit == TouchControl::AutoAim) {
+                touchBindings_.insert(id, hit);
+                toggleAutoAim();
             } else if (hit != TouchControl::None) {
                 touchBindings_.insert(id, hit);
                 pressTouch(hit, true);
@@ -1092,6 +1102,60 @@ void GameWidget::releaseAllTouches() {
     input_.clearHeld();
 }
 
+void GameWidget::toggleAutoAim() {
+    autoAim_ = !autoAim_;
+    aimTargetId_ = -1;
+    AppSettings settings = Storage::loadSettings();
+    settings.autoAim = autoAim_;
+    Storage::saveSettings(settings);
+    toast_ = autoAim_ ? QStringLiteral("自动索敌：开") : QStringLiteral("自动索敌：关");
+    toastTime_ = 1.2f;
+}
+
+void GameWidget::updateAimTarget() {
+    constexpr float kLockRange = 160.f;
+    if (!touchUi_ || !autoAim_) {
+        aimTargetId_ = -1;
+        return;
+    }
+    const Player& player = session_.player();
+    const Monster* current = nullptr;
+    float currentDist = 0.f;
+    const Monster* nearest = nullptr;
+    float nearestDist = kLockRange;
+    for (const Monster& monster : session_.monsters()) {
+        if (monster.state == ActorState::Dead) {
+            continue;
+        }
+        const float dist = std::hypot(monster.x - player.x, monster.y - player.y);
+        if (monster.id == aimTargetId_) {
+            current = &monster;
+            currentDist = dist;
+        }
+        if (dist < nearestDist) {
+            nearest = &monster;
+            nearestDist = dist;
+        }
+    }
+    // 两个敌人距离相近时不来回跳：新目标要明显更近才换
+    if (current && currentDist <= kLockRange * 1.15f && (!nearest || nearestDist > currentDist * 0.8f)) {
+        return;
+    }
+    aimTargetId_ = nearest ? nearest->id : -1;
+}
+
+const Monster* GameWidget::aimTarget() const {
+    if (!touchUi_ || !autoAim_ || aimTargetId_ < 0) {
+        return nullptr;
+    }
+    for (const Monster& monster : session_.monsters()) {
+        if (monster.id == aimTargetId_) {
+            return monster.state == ActorState::Dead ? nullptr : &monster;
+        }
+    }
+    return nullptr;
+}
+
 const QImage& GameWidget::touchSprite(qreal radius, const QColor& rim, const QColor& fill, const QString& label, int fontPx, const QColor& textColor) {
     const QString key = QStringLiteral("%1|%2|%3|%4|%5|%6")
         .arg(qRound(radius * 4.0)).arg(rim.rgba()).arg(fill.rgba()).arg(fontPx).arg(textColor.rgba()).arg(label);
@@ -1187,7 +1251,7 @@ void GameWidget::drawTouchControls(QPainter& painter) {
             break;
         }
 
-        const bool pressed = held.contains(button.control);
+        const bool pressed = held.contains(button.control) || (button.control == TouchControl::AutoAim && autoAim_);
         const QRectF circle(button.center.x() - button.radius, button.center.y() - button.radius,
             button.radius * 2.0, button.radius * 2.0);
         const bool cooling = remain > 0.05f && maxCd > 0.01f;
@@ -1299,6 +1363,14 @@ void GameWidget::drawWorld(QPainter& painter) {
                 painter.drawEllipse(prop);
             }
         }
+    }
+
+    if (const Monster* target = aimTarget()) {
+        // 画在角色之前，落在脚下不挡贴图
+        const float pulse = 0.5f + 0.5f * std::sin(player.animT * 8.f);
+        painter.setBrush(Qt::NoBrush);
+        painter.setPen(QPen(QColor(255, 90, 60, int(140 + 100 * pulse)), 1));
+        painter.drawEllipse(QRectF(target->x - 11.f, target->y - 5.f, 22.f, 10.f));
     }
 
     struct DrawItem {
@@ -1831,7 +1903,12 @@ void GameWidget::paintEvent(QPaintEvent* event) {
     talentLine(3, "熟练", float(player.skillCasts), 12.f);
     painter.setPen(QColor(228, 212, 188));
     painter.drawText(QRect(originX, originY + 10, viewW, 22), Qt::AlignHCenter | Qt::AlignTop, formatTime(session_.time()));
-    painter.drawText(QRect(originX, originY + 10, viewW - 16, 22), Qt::AlignRight | Qt::AlignTop, QString("SCORE %1").arg(session_.score()));
+    if (touchUi_) {
+        // 右上角留给「索敌 / 说明 / 暂停」按钮
+        painter.drawText(QRect(originX, originY + 30, viewW, 22), Qt::AlignHCenter | Qt::AlignTop, QString("SCORE %1").arg(session_.score()));
+    } else {
+        painter.drawText(QRect(originX, originY + 10, viewW - 16, 22), Qt::AlignRight | Qt::AlignTop, QString("SCORE %1").arg(session_.score()));
+    }
     drawRadar(painter, view);
     struct Chip {
         QString key;
