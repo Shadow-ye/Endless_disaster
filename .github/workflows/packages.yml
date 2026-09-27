@@ -141,11 +141,24 @@ jobs:
         run: eval "$REPORT_FAILURE"
 
   android:
-    name: Android APK (arm64)
+    name: Android APK (${{ matrix.abi }})
     runs-on: ubuntu-22.04
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          # 发布给手机的正式包
+          - abi: arm64
+            qt_arch: android_arm64_v8a
+            artifact: apk
+          # 仅供 CI 模拟器冒烟测试（x86_64 模拟器翻译 ARM 指令不可靠）
+          - abi: x86_64
+            qt_arch: android_x86_64
+            artifact: apk-x86_64
     env:
       QT_VERSION: '6.8.3'
       NDK_VERSION: '26.1.10909125'
+      APK_NAME: EndlessDisaster-android-${{ matrix.abi }}.apk
     steps:
       - uses: actions/checkout@v4
 
@@ -178,7 +191,7 @@ jobs:
           version: ${{ env.QT_VERSION }}
           host: all_os
           target: android
-          arch: android_arm64_v8a
+          arch: ${{ matrix.qt_arch }}
           modules: 'qtmultimedia'
           cache: true
 
@@ -194,7 +207,7 @@ jobs:
             pass="$KEYSTORE_PASS"
             alias="${KEY_ALIAS:-endless}"
           else
-            echo "::warning title=Android signing::未配置 ANDROID_KEYSTORE_BASE64，本次使用临时签名；升级安装需先卸载旧版"
+            [ "${{ matrix.abi }}" = arm64 ] && echo "::warning title=Android signing::未配置 ANDROID_KEYSTORE_BASE64，本次使用临时签名；升级安装需先卸载旧版"
             pass="$(openssl rand -hex 16)"
             alias=endless
             keytool -genkeypair -keystore "$ks" -storepass "$pass" -keypass "$pass" -alias "$alias" \
@@ -224,22 +237,22 @@ jobs:
           } 2>&1 | tee "$RUNNER_TEMP/build.log"
           apk=$(find build-android -name "*-signed.apk" | head -n 1)
           if [ -z "$apk" ]; then find build-android -name "*.apk" | tee -a "$RUNNER_TEMP/build.log"; echo "signed apk not found" >> "$RUNNER_TEMP/build.log"; exit 1; fi
-          cp "$apk" EndlessDisaster-android-arm64.apk
+          cp "$apk" "$APK_NAME"
 
       - name: Inspect APK
         run: |
           tools="$ANDROID_SDK_ROOT/build-tools/34.0.0"
-          ls -la EndlessDisaster-android-arm64.apk
-          "$tools/apksigner" verify EndlessDisaster-android-arm64.apk
-          "$tools/aapt" dump badging EndlessDisaster-android-arm64.apk | grep -E "^(package|application-label|sdkVersion|targetSdkVersion|native-code)"
-          info=$("$tools/aapt" dump badging EndlessDisaster-android-arm64.apk | grep -E "^(package|application-label|native-code)" | tr '\n' ' ')
-          orient=$("$tools/aapt" dump xmltree EndlessDisaster-android-arm64.apk AndroidManifest.xml | grep -A0 -i "screenOrientation" | tr -s ' ' | tr '\n' ' ')
-          echo "::notice title=APK info::$info | $orient | size $(du -h EndlessDisaster-android-arm64.apk | cut -f1)"
+          ls -la "$APK_NAME"
+          "$tools/apksigner" verify "$APK_NAME"
+          "$tools/aapt" dump badging "$APK_NAME" | grep -E "^(package|application-label|sdkVersion|targetSdkVersion|native-code)"
+          info=$("$tools/aapt" dump badging "$APK_NAME" | grep -E "^(package|application-label|native-code)" | tr '\n' ' ')
+          orient=$("$tools/aapt" dump xmltree "$APK_NAME" AndroidManifest.xml | grep -A0 -i "screenOrientation" | tr -s ' ' | tr '\n' ' ')
+          echo "::notice title=APK info (${{ matrix.abi }})::$info | $orient | size $(du -h "$APK_NAME" | cut -f1)"
 
       - uses: actions/upload-artifact@v4
         with:
-          name: apk
-          path: EndlessDisaster-android-arm64.apk
+          name: ${{ matrix.artifact }}
+          path: ${{ env.APK_NAME }}
 
       - name: Report failure
         if: failure()
@@ -253,7 +266,7 @@ jobs:
     steps:
       - uses: actions/download-artifact@v4
         with:
-          name: apk
+          name: apk-x86_64
 
       - name: Enable KVM
         run: |
@@ -265,7 +278,7 @@ jobs:
         run: |
           cat > smoke.sh <<'EOF'
           pkg=io.github.shadowye.endlessdisaster
-          adb install -r EndlessDisaster-android-arm64.apk || { echo "::error title=Android smoke::adb install failed"; exit 1; }
+          adb install -r EndlessDisaster-android-x86_64.apk || { echo "::error title=Android smoke::adb install failed"; exit 1; }
           adb logcat -c
           adb shell monkey -p "$pkg" -c android.intent.category.LAUNCHER 1
           sleep 40
