@@ -51,6 +51,13 @@ E2:FA:50:5B:D0:1C:95:83:E4:E8:30:6C:7C:50:7E:0F:E0:57:CB:0B:02:8A:CC:60:9E:77:19
    - `ANDROID_KEYSTORE_PASSWORD`：密码；
    - `ANDROID_KEY_ALIAS`：`endless`。
 
+以上三项已于 2026-09-27 通过 GitHub CLI 配置完成（`E:\Tools\gh\bin\gh.exe`，配置目录 `E:\Tools\gh\config`，登录凭据在 Windows 凭据管理器）。需要重新写入时：
+
+```powershell
+$env:GH_CONFIG_DIR = "E:\Tools\gh\config"
+E:\Tools\gh\bin\gh.exe secret list --repo Shadow-ye/Endless_disaster
+```
+
 工作流的行为：
 
 - 推送 `v*` 标签发布时，**未配置密钥会直接失败**，保证发出去的 APK 一定能被后续版本覆盖；
