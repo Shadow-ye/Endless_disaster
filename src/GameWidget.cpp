@@ -6,6 +6,7 @@
 #include "Storage.h"
 #include "TileMap.h"
 
+#include <QAbstractButton>
 #include <QCheckBox>
 #include <QCoreApplication>
 #include <QDir>
@@ -16,7 +17,6 @@
 #include <QHBoxLayout>
 #include <QKeyEvent>
 #include <QLabel>
-#include <QMessageBox>
 #include <QMouseEvent>
 #include <QFrame>
 #include <QPainter>
@@ -27,6 +27,7 @@
 #include <QScrollArea>
 #include <QScroller>
 #include <QRandomGenerator>
+#include <QSet>
 #include <QShortcut>
 #include <QSignalBlocker>
 #include <QSlider>
@@ -207,11 +208,23 @@ GameWidget::GameWidget(QWidget* parent) : QWidget(parent) {
     setFocusPolicy(Qt::StrongFocus);
     setContextMenuPolicy(Qt::PreventContextMenu);
     setAttribute(Qt::WA_AcceptTouchEvents, true);
+    // paintEvent 会铺满整个控件；不声明的话每帧都要先重画父窗口背景
+    setAttribute(Qt::WA_OpaquePaintEvent, true);
     touchUi_ = Platform::touchUi();
     if (!touchUi_) {
         setMinimumSize(960, 540);
     }
     spritesOk_ = sprites_.load(findAssets());
+    canvas_ = QImage(kViewW, kViewH, QImage::Format_RGB32);
+    vignette_ = QImage(kViewW, kViewH, QImage::Format_ARGB32_Premultiplied);
+    vignette_.fill(Qt::transparent);
+    {
+        QPainter vig(&vignette_);
+        QRadialGradient gradient(kViewW * 0.5, kViewH * 0.5, kViewW * 0.72);
+        gradient.setColorAt(0.42, QColor(0, 0, 0, 0));
+        gradient.setColorAt(1.0, QColor(0, 0, 0, 150));
+        vig.fillRect(vignette_.rect(), gradient);
+    }
     {
         const AppSettings settings = Storage::loadSettings();
         Audio::instance().load(findAssets());
@@ -222,8 +235,15 @@ GameWidget::GameWidget(QWidget* parent) : QWidget(parent) {
     }
 
     pausePanel_ = new QWidget(this);
-    auto* pauseLayout = new QVBoxLayout(pausePanel_);
-    pauseLayout->setContentsMargins(18, 18, 18, 18);
+    // 手机横屏高度不够，技能说明放到右栏
+    auto* pauseRoot = new QBoxLayout(touchUi_ ? QBoxLayout::LeftToRight : QBoxLayout::TopToBottom, pausePanel_);
+    pauseRoot->setContentsMargins(18, 18, 18, 18);
+    if (touchUi_) {
+        pauseRoot->setSpacing(18);
+    }
+    auto* pauseLayout = new QVBoxLayout();
+    pauseLayout->setContentsMargins(0, 0, 0, 0);
+    pauseRoot->addLayout(pauseLayout);
     auto* pauseTitle = new QLabel("暂停", pausePanel_);
     pauseTitle->setAlignment(Qt::AlignCenter);
     pauseLayout->addWidget(pauseTitle);
@@ -322,9 +342,12 @@ GameWidget::GameWidget(QWidget* parent) : QWidget(parent) {
     if (touchUi_) {
         QScroller::grabGesture(guideScroll_->viewport(), QScroller::LeftMouseButtonGesture);
     }
-    pauseLayout->addWidget(guideScroll_);
+    if (touchUi_) {
+        pauseLayout->addStretch(1);
+    }
+    pauseRoot->addWidget(guideScroll_);
     pausePanel_->setObjectName("panel");
-    pausePanel_->setStyleSheet("QWidget#panel { background: #14110f; border: 1px solid #5c3a32; } QLabel { background: transparent; color: #d7c7b4; border: none; }");
+    pausePanel_->setStyleSheet("QWidget#panel { background: #14110f; border: 1px solid #5c3a32; } QLabel { background: transparent; color: #d7c7b4; border: none; } QCheckBox { color: #d7c7b4; }");
     pausePanel_->hide();
 
     resultPanel_ = new QWidget(this);
@@ -339,6 +362,36 @@ GameWidget::GameWidget(QWidget* parent) : QWidget(parent) {
     resultPanel_->setObjectName("panel");
     resultPanel_->setStyleSheet("QWidget#panel { background: #14110f; border: 1px solid #5c3a32; } QLabel { background: transparent; color: #d7c7b4; border: none; }");
     resultPanel_->hide();
+
+    // 不用 QMessageBox：安卓上它是独立窗口，点击经常收不到
+    confirmPanel_ = new QWidget(this);
+    auto* confirmLayout = new QVBoxLayout(confirmPanel_);
+    confirmLayout->setContentsMargins(18, 18, 18, 18);
+    auto* confirmText = new QLabel("结束本局并记下用时和积分？", confirmPanel_);
+    confirmText->setAlignment(Qt::AlignCenter);
+    confirmLayout->addWidget(confirmText);
+    auto* confirmRow = new QHBoxLayout();
+    auto* confirmNo = new QPushButton("取消", confirmPanel_);
+    auto* confirmYes = new QPushButton("结算", confirmPanel_);
+    confirmRow->addWidget(confirmNo);
+    confirmRow->addWidget(confirmYes);
+    confirmLayout->addLayout(confirmRow);
+    connect(confirmNo, &QPushButton::clicked, this, [this] {
+        confirmPanel_->hide();
+        if (session_.paused() && !session_.ended()) {
+            pausePanel_->show();
+            pausePanel_->raise();
+            layoutOverlays();
+        }
+    });
+    connect(confirmYes, &QPushButton::clicked, this, [this] {
+        confirmPanel_->hide();
+        session_.settle();
+        commitEnd();
+    });
+    confirmPanel_->setObjectName("panel");
+    confirmPanel_->setStyleSheet("QWidget#panel { background: #14110f; border: 1px solid #5c3a32; } QLabel { background: transparent; color: #d7c7b4; border: none; }");
+    confirmPanel_->hide();
 
     auto* esc = new QShortcut(QKeySequence(Qt::Key_Escape), this);
     esc->setContext(Qt::WidgetWithChildrenShortcut);
@@ -364,6 +417,7 @@ GameWidget::GameWidget(QWidget* parent) : QWidget(parent) {
 #endif
 
     timer_ = new QTimer(this);
+    timer_->setTimerType(Qt::PreciseTimer);
     connect(timer_, &QTimer::timeout, this, [this] { tick(); });
     timer_->start(16);
     clock_.start();
@@ -375,6 +429,8 @@ void GameWidget::leaveToMenu() {
     Audio::instance().ensureBgmLoop();
     pausePanel_->hide();
     resultPanel_->hide();
+    confirmPanel_->hide();
+    releaseAllTouches();
     emit returnedToMenu();
 }
 
@@ -451,10 +507,11 @@ void GameWidget::startNew(HeroClass hero, int skillD, int skillF, int skillC, in
     const uint32_t runId = uint32_t(QRandomGenerator::global()->generate());
     session_.newGame(seed == 0 ? 1u : seed, runId == 0 ? 1u : runId, hero, skillD, skillF, skillC, skillV);
     endCommitted_ = false;
-    accumulator_ = 0.f;
-    input_.clearHeld();
+    clock_.restart();
+    releaseAllTouches();
     pausePanel_->hide();
     resultPanel_->hide();
+    confirmPanel_->hide();
     Audio::instance().startBgmLoop();
     setFocus();
 }
@@ -463,10 +520,11 @@ void GameWidget::startContinue(const QJsonObject& game) {
     running_ = true;
     session_.loadFrom(game);
     endCommitted_ = false;
-    accumulator_ = 0.f;
-    input_.clearHeld();
+    clock_.restart();
+    releaseAllTouches();
     pausePanel_->hide();
     resultPanel_->hide();
+    confirmPanel_->hide();
     Audio::instance().startBgmLoop();
     setFocus();
 }
@@ -476,6 +534,7 @@ void GameWidget::setPaused(bool paused) {
         return;
     }
     session_.setPaused(paused);
+    confirmPanel_->hide();
     pausePanel_->setVisible(paused);
     Audio::instance().setBgmPaused(paused);
     if (paused) {
@@ -523,12 +582,13 @@ void GameWidget::saveGame() {
 }
 
 void GameWidget::askSettle() {
-    const auto answer = QMessageBox::question(this, "结算", "结束本局并记下用时和积分？");
-    if (answer != QMessageBox::Yes) {
+    if (session_.ended()) {
         return;
     }
-    session_.settle();
-    commitEnd();
+    pausePanel_->hide();
+    confirmPanel_->show();
+    confirmPanel_->raise();
+    layoutOverlays();
 }
 
 void GameWidget::commitEnd() {
@@ -538,6 +598,8 @@ void GameWidget::commitEnd() {
     endCommitted_ = true;
     session_.setPaused(false);
     pausePanel_->hide();
+    confirmPanel_->hide();
+    releaseAllTouches();
     Records records = Storage::loadRecords();
     if (session_.time() > records.bestTime) {
         records.bestTime = session_.time();
@@ -556,36 +618,44 @@ void GameWidget::commitEnd() {
 
 void GameWidget::layoutOverlays() {
     constexpr int kGuideHeight = 280;
-    guideScroll_->setFixedHeight(kGuideHeight);
-    pausePanel_->adjustSize();
-    const int overflow = pausePanel_->height() - (height() - 16);
-    if (overflow > 0) {
-        guideScroll_->setFixedHeight(std::max(80, kGuideHeight - overflow));
+    if (touchUi_) {
+        guideScroll_->setFixedHeight(std::max(120, height() - 16 - 36));
         pausePanel_->adjustSize();
+    } else {
+        guideScroll_->setFixedHeight(kGuideHeight);
+        pausePanel_->adjustSize();
+        const int overflow = pausePanel_->height() - (height() - 16);
+        if (overflow > 0) {
+            guideScroll_->setFixedHeight(std::max(80, kGuideHeight - overflow));
+            pausePanel_->adjustSize();
+        }
     }
     pausePanel_->move((width() - pausePanel_->width()) / 2, (height() - pausePanel_->height()) / 2);
     resultPanel_->adjustSize();
     resultPanel_->move((width() - resultPanel_->width()) / 2, (height() - resultPanel_->height()) / 2);
+    confirmPanel_->adjustSize();
+    confirmPanel_->move((width() - confirmPanel_->width()) / 2, (height() - confirmPanel_->height()) / 2);
 }
 
 void GameWidget::tick() {
-    const float frame = std::min(0.05f, float(clock_.restart()) / 1000.f);
+    const qint64 elapsedNs = clock_.nsecsElapsed();
+    clock_.restart();
+    const float frame = std::min(0.05f, float(elapsedNs) / 1e9f);
     toastTime_ = std::max(0.f, toastTime_ - frame);
     if (running_ && !session_.paused() && !session_.ended()) {
         const QPointF world = mouseWorld();
-        accumulator_ += frame;
-        int steps = 0;
-        while (accumulator_ >= kSimDt && steps < 5) {
-            session_.update(kSimDt, input_, float(world.x()), float(world.y()));
+        // 按真实帧间隔推进：固定步长又不插值时，定时器与屏幕刷新错拍会出现 0 步 / 2 步交替的顿挫
+        const int steps = std::max(1, int(std::ceil(frame / kSimDt - 0.05f)));
+        const float dt = frame / float(steps);
+        for (int i = 0; i < steps; ++i) {
+            session_.update(dt, input_, float(world.x()), float(world.y()));
             for (SfxId id : session_.drainSfx()) {
                 Audio::instance().play(id);
             }
             if (session_.consumeRecoverBgm()) {
                 Audio::instance().playRecoverBgm();
             }
-            accumulator_ -= kSimDt;
             input_.clearEdges();
-            steps += 1;
         }
     }
     if (session_.ended()) {
@@ -825,13 +895,34 @@ QVector<GameWidget::TouchButton> GameWidget::touchButtons() const {
     return buttons;
 }
 
+QAbstractButton* GameWidget::overlayButtonAt(const QPointF& pos) const {
+    for (QWidget* widget = childAt(pos.toPoint()); widget && widget != this; widget = widget->parentWidget()) {
+        if (auto* button = qobject_cast<QAbstractButton*>(widget)) {
+            return button->isEnabled() ? button : nullptr;
+        }
+    }
+    return nullptr;
+}
+
 void GameWidget::handleTouch(QTouchEvent* event) {
     const bool playing = running_ && !session_.ended();
+    QSet<int> alive;
     for (const QEventPoint& point : event->points()) {
         const int id = point.id();
         const QPointF pos = point.position();
+        if (point.state() != QEventPoint::Released) {
+            alive.insert(id);
+        }
         switch (point.state()) {
         case QEventPoint::Pressed: {
+            // 同一 id 再次按下说明上一次的抬起没收到
+            releaseBinding(id);
+            overlayPresses_.remove(id);
+            // 已有其他手指按着时，新触点不会被 Qt 转成鼠标事件，面板按钮只能在这里自己点
+            if (QAbstractButton* button = overlayButtonAt(pos)) {
+                overlayPresses_.insert(id, button);
+                break;
+            }
             if (!playing) {
                 break;
             }
@@ -867,17 +958,46 @@ void GameWidget::handleTouch(QTouchEvent* event) {
             }
             break;
         case QEventPoint::Released: {
-            const TouchControl control = touchBindings_.take(id);
-            if (control == TouchControl::Stick) {
-                releaseStick();
-            } else if (control != TouchControl::Guide && control != TouchControl::Pause) {
-                pressTouch(control, false);
+            if (overlayPresses_.contains(id)) {
+                const QPointer<QAbstractButton> button = overlayPresses_.take(id);
+                if (button && button == overlayButtonAt(pos)) {
+                    button->click();
+                }
+                break;
             }
+            releaseBinding(id);
             break;
         }
         default:
             break;
         }
+    }
+
+    // 抬起事件在安卓上偶尔会丢（系统手势抢走触点等），摇杆就会一直朝一个方向走。
+    // 每个触摸事件都带着所有仍按住的触点（含静止的），不在其中的绑定按已抬起处理
+    const QList<int> bound = touchBindings_.keys();
+    for (int id : bound) {
+        if (!alive.contains(id)) {
+            releaseBinding(id);
+        }
+    }
+    if (stickTouchId_ >= 0 && !touchBindings_.contains(stickTouchId_)) {
+        releaseStick();
+    }
+    const QList<int> pressed = overlayPresses_.keys();
+    for (int id : pressed) {
+        if (!alive.contains(id)) {
+            overlayPresses_.remove(id);
+        }
+    }
+}
+
+void GameWidget::releaseBinding(int id) {
+    const TouchControl control = touchBindings_.take(id);
+    if (control == TouchControl::Stick) {
+        releaseStick();
+    } else if (control != TouchControl::None && control != TouchControl::Guide && control != TouchControl::Pause) {
+        pressTouch(control, false);
     }
 }
 
@@ -950,8 +1070,40 @@ void GameWidget::pressTouch(TouchControl control, bool down) {
 
 void GameWidget::releaseAllTouches() {
     touchBindings_.clear();
+    overlayPresses_.clear();
     releaseStick();
     input_.clearHeld();
+}
+
+const QImage& GameWidget::touchSprite(qreal radius, const QColor& rim, const QColor& fill, const QString& label, int fontPx, const QColor& textColor) {
+    const QString key = QStringLiteral("%1|%2|%3|%4|%5|%6")
+        .arg(qRound(radius * 4.0)).arg(rim.rgba()).arg(fill.rgba()).arg(fontPx).arg(textColor.rgba()).arg(label);
+    auto it = touchSprites_.find(key);
+    if (it != touchSprites_.end()) {
+        return it.value();
+    }
+    const qreal dpr = devicePixelRatioF();
+    const qreal side = std::ceil((radius + 2.0) * 2.0);
+    QImage image(QSize(int(std::ceil(side * dpr)), int(std::ceil(side * dpr))), QImage::Format_ARGB32_Premultiplied);
+    image.setDevicePixelRatio(dpr);
+    image.fill(Qt::transparent);
+    {
+        QPainter p(&image);
+        p.setRenderHint(QPainter::Antialiasing, true);
+        const QPointF center(side * 0.5, side * 0.5);
+        p.setPen(rim.alpha() > 0 ? QPen(rim, 2) : QPen(Qt::NoPen));
+        p.setBrush(fill);
+        p.drawEllipse(center, radius, radius);
+        if (!label.isEmpty()) {
+            QFont font(Platform::uiFontFamily());
+            font.setBold(true);
+            font.setPixelSize(fontPx);
+            p.setFont(font);
+            p.setPen(textColor);
+            p.drawText(QRectF(center.x() - radius, center.y() - radius, radius * 2.0, radius * 2.0), Qt::AlignCenter, label);
+        }
+    }
+    return touchSprites_.insert(key, image).value();
 }
 
 void GameWidget::drawTouchControls(QPainter& painter) {
@@ -960,17 +1112,18 @@ void GameWidget::drawTouchControls(QPainter& painter) {
     const float mul = session_.cooldownMul();
     painter.save();
     painter.setRenderHint(QPainter::Antialiasing, true);
+    // 圆底和文字预渲染成贴图：每帧重新光栅化十几个抗锯齿半透明圆在手机上要占掉大半帧时间
+    auto blit = [&painter](const QImage& image, const QPointF& center) {
+        const QSizeF size = image.deviceIndependentSize();
+        painter.drawImage(QPointF(center.x() - size.width() * 0.5, center.y() - size.height() * 0.5), image);
+    };
 
     const bool stickActive = stickTouchId_ >= 0;
     const QPointF base = stickActive ? stickCenter_ : stickHome();
     const qreal baseRadius = u * 0.12;
     const qreal knobRadius = u * 0.055;
-    painter.setPen(QPen(QColor(228, 212, 188, stickActive ? 120 : 70), 2));
-    painter.setBrush(QColor(12, 10, 9, stickActive ? 110 : 70));
-    painter.drawEllipse(base, baseRadius, baseRadius);
-    painter.setPen(Qt::NoPen);
-    painter.setBrush(QColor(196, 92, 72, stickActive ? 200 : 120));
-    painter.drawEllipse(base + stickOffset_, knobRadius, knobRadius);
+    blit(touchSprite(baseRadius, QColor(228, 212, 188, stickActive ? 120 : 70), QColor(12, 10, 9, stickActive ? 110 : 70), {}, 0, {}), base);
+    blit(touchSprite(knobRadius, QColor(0, 0, 0, 0), QColor(196, 92, 72, stickActive ? 200 : 120), {}, 0, {}), base + stickOffset_);
 
     const QList<TouchControl> held = touchBindings_.values();
     for (const TouchButton& button : touchButtons()) {
@@ -1020,9 +1173,16 @@ void GameWidget::drawTouchControls(QPainter& painter) {
         const bool pressed = held.contains(button.control);
         const QRectF circle(button.center.x() - button.radius, button.center.y() - button.radius,
             button.radius * 2.0, button.radius * 2.0);
-        painter.setPen(QPen(pressed ? QColor(236, 170, 140, 230) : QColor(150, 100, 86, 200), 2));
-        painter.setBrush(pressed ? QColor(196, 92, 72, 180) : QColor(12, 10, 9, 150));
-        painter.drawEllipse(circle);
+        const bool cooling = remain > 0.05f && maxCd > 0.01f;
+        const bool withSub = !sub.isEmpty() && !cooling;
+        const int labelPx = std::max(9, int(button.radius * (button.label.size() > 2 ? 0.42 : 0.52)));
+        const QColor rim = pressed ? QColor(236, 170, 140, 230) : QColor(150, 100, 86, 200);
+        const QColor fill = pressed ? QColor(196, 92, 72, 180) : QColor(12, 10, 9, 150);
+        if (cooling || withSub) {
+            blit(touchSprite(button.radius, rim, fill, {}, 0, {}), button.center);
+        } else {
+            blit(touchSprite(button.radius, rim, fill, button.label, labelPx, QColor(240, 228, 212)), button.center);
+        }
 
         if (button.control == TouchControl::Attack && player.heavyCharge > 0.f) {
             const float charge = std::clamp(player.heavyCharge / 0.42f, 0.f, 1.f);
@@ -1030,7 +1190,9 @@ void GameWidget::drawTouchControls(QPainter& painter) {
             painter.setBrush(Qt::NoBrush);
             painter.drawArc(circle.adjusted(3, 3, -3, -3), 90 * 16, -int(360 * 16 * charge));
         }
-        const bool cooling = remain > 0.05f && maxCd > 0.01f;
+        if (!cooling && !withSub) {
+            continue;
+        }
         if (cooling) {
             painter.setPen(Qt::NoPen);
             painter.setBrush(QColor(0, 0, 0, 150));
@@ -1039,10 +1201,9 @@ void GameWidget::drawTouchControls(QPainter& painter) {
 
         QFont font(Platform::uiFontFamily());
         font.setBold(true);
-        font.setPixelSize(std::max(9, int(button.radius * (button.label.size() > 2 ? 0.42 : 0.52))));
+        font.setPixelSize(labelPx);
         painter.setFont(font);
         painter.setPen(cooling ? QColor(170, 158, 146) : QColor(240, 228, 212));
-        const bool withSub = !sub.isEmpty() && !cooling;
         const QString text = cooling ? QString::number(remain, 'f', 1) : button.label;
         painter.drawText(withSub ? circle.adjusted(0, 0, 0, -button.radius * 0.5) : circle, Qt::AlignCenter, text);
         if (withSub) {
@@ -1062,6 +1223,7 @@ void GameWidget::focusOutEvent(QFocusEvent* event) {
 
 void GameWidget::resizeEvent(QResizeEvent* event) {
     QWidget::resizeEvent(event);
+    touchSprites_.clear();
     layoutOverlays();
 }
 
@@ -1590,32 +1752,28 @@ void GameWidget::drawRadar(QPainter& painter, const QRect& view) {
 void GameWidget::paintEvent(QPaintEvent* event) {
     Q_UNUSED(event);
     QPainter painter(this);
-    painter.fillRect(rect(), QColor(8, 7, 6));
     const QRect view = viewRect();
+    for (const QRect& bar : QRegion(rect()).subtracted(view)) {
+        painter.fillRect(bar, QColor(8, 7, 6));
+    }
     const int originX = view.x();
     const int originY = view.y();
     const int viewW = view.width();
     const int viewH = view.height();
 
-    QImage canvas(kViewW, kViewH, QImage::Format_ARGB32);
-    canvas.fill(QColor(16, 14, 12));
+    canvas_.fill(QColor(16, 14, 12));
     {
-        QPainter world(&canvas);
+        QPainter world(&canvas_);
         world.setRenderHint(QPainter::SmoothPixmapTransform, false);
         drawWorld(world);
-    }
-    {
-        QPainter grade(&canvas);
-        grade.setCompositionMode(QPainter::CompositionMode_Multiply);
-        grade.fillRect(canvas.rect(), QColor(128, 112, 98));
-        QRadialGradient vig(kViewW * 0.5, kViewH * 0.5, kViewW * 0.72);
-        vig.setColorAt(0.42, QColor(0, 0, 0, 0));
-        vig.setColorAt(1.0, QColor(0, 0, 0, 150));
-        grade.setCompositionMode(QPainter::CompositionMode_SourceOver);
-        grade.fillRect(canvas.rect(), vig);
+        world.resetTransform();
+        world.setCompositionMode(QPainter::CompositionMode_Multiply);
+        world.fillRect(canvas_.rect(), QColor(128, 112, 98));
+        world.setCompositionMode(QPainter::CompositionMode_SourceOver);
+        world.drawImage(0, 0, vignette_);
     }
     painter.setRenderHint(QPainter::SmoothPixmapTransform, false);
-    painter.drawImage(view, canvas);
+    painter.drawImage(view, canvas_);
 
     painter.setPen(QColor(90, 58, 50));
     painter.drawRect(view.adjusted(0, 0, -1, -1));

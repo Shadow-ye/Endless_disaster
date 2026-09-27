@@ -11,6 +11,7 @@ class QButtonGroup;
 class QCheckBox;
 class QComboBox;
 class QGraphicsOpacityEffect;
+class QGridLayout;
 class QLabel;
 class QPushButton;
 class QSlider;
@@ -40,6 +41,8 @@ private:
     void loadSettingsUi();
     void saveSettingsUi();
     void fillSkillBox(QComboBox* box, const int* pool, int poolSize, int selected);
+    QPushButton* makeSkillPickButton(QComboBox* box, QWidget* parent);
+    void openSkillPicker(QComboBox* box);
     void onWarriorSkillPicked(int slot);
     void onMageSkillPicked(int slot);
     void layoutMenuBackground();
@@ -80,6 +83,12 @@ private:
     QWidget* warriorPickRow_ = nullptr;
     QWidget* magePickRow_ = nullptr;
     QLabel* skillHint_ = nullptr;
+    QLabel* glossary_ = nullptr;
+    std::array<QPushButton*, 3> warriorSkillButtons_{};
+    std::array<QPushButton*, 4> mageSkillButtons_{};
+    QWidget* skillPicker_ = nullptr;
+    QLabel* skillPickerTitle_ = nullptr;
+    QGridLayout* skillPickerGrid_ = nullptr;
     std::array<QComboBox*, 3> warriorSkillBoxes_{};
     std::array<int, 3> warriorSkillPrev_{
         kSkillSpin, kSkillSwordQi, kSkillThrust};

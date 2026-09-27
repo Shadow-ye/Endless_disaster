@@ -7,12 +7,14 @@
 #include <QElapsedTimer>
 #include <QHash>
 #include <QJsonObject>
+#include <QPointer>
 #include <QPointF>
 #include <QVector>
 #include <QWidget>
 
 class QPainter;
 
+class QAbstractButton;
 class QCheckBox;
 class QLabel;
 class QScrollArea;
@@ -70,10 +72,13 @@ private:
     QPointF stickHome() const;
     QVector<TouchButton> touchButtons() const;
     void handleTouch(QTouchEvent* event);
+    QAbstractButton* overlayButtonAt(const QPointF& pos) const;
     void updateStick(const QPointF& pos);
     void releaseStick();
+    void releaseBinding(int id);
     void pressTouch(TouchControl control, bool down);
     void releaseAllTouches();
+    const QImage& touchSprite(qreal radius, const QColor& rim, const QColor& fill, const QString& label, int fontPx, const QColor& textColor);
     void drawTouchControls(QPainter& painter);
     void drawShadow(QPainter& painter, float x, float y);
     void drawAnim(QPainter& painter, const SpriteAnim& anim, ActorState state, float animT, float x, float y, bool flip, bool moving);
@@ -82,9 +87,10 @@ private:
     Session session_;
     SpriteSet sprites_;
     bool spritesOk_ = false;
+    QImage canvas_;
+    QImage vignette_;
     QTimer* timer_ = nullptr;
     QElapsedTimer clock_;
-    float accumulator_ = 0.f;
     float toastTime_ = 0.f;
     QString toast_;
     InputState input_;
@@ -93,10 +99,12 @@ private:
 
     bool touchUi_ = false;
     QHash<int, TouchControl> touchBindings_;
+    QHash<int, QPointer<QAbstractButton>> overlayPresses_;
     int stickTouchId_ = -1;
     QPointF stickCenter_;
     QPointF stickOffset_;
     QPointF aimDir_{1.0, 0.0};
+    QHash<QString, QImage> touchSprites_;
 
     QWidget* pausePanel_ = nullptr;
     QCheckBox* pauseSfxCheck_ = nullptr;
@@ -109,4 +117,5 @@ private:
     QScrollArea* guideScroll_ = nullptr;
     QWidget* resultPanel_ = nullptr;
     QLabel* resultText_ = nullptr;
+    QWidget* confirmPanel_ = nullptr;
 };

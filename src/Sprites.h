@@ -1,6 +1,7 @@
 #pragma once
 
 #include <QColor>
+#include <QHash>
 #include <QImage>
 #include <QString>
 
@@ -18,8 +19,7 @@ private:
     QImage image_;
     int frames_ = 0;
     int dirs_ = 1;
-    mutable QImage tinted_;
-    mutable QRgb tintKey_ = 0;
+    mutable QHash<QRgb, QImage> tinted_;
 };
 
 class SpriteSet {

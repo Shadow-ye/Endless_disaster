@@ -11,7 +11,9 @@ bool SpriteAnim::load(const QString& path) {
     if (image.isNull()) {
         return false;
     }
-    image_ = image.convertToFormat(QImage::Format_ARGB32);
+    // 预乘格式是 QPainter 的快速路径，非预乘每次绘制都要逐像素转换
+    image_ = image.convertToFormat(QImage::Format_ARGB32_Premultiplied);
+    tinted_.clear();
     frames_ = std::max(1, image_.width() / kFrame);
     dirs_ = std::max(1, image_.height() / kFrame);
     return true;
@@ -26,11 +28,12 @@ void SpriteAnim::draw(QPainter& painter, int frame, float x, float y, bool flip,
     const QImage* sourceImage = &image_;
     if (tint.isValid()) {
         const QRgb key = tint.rgba();
-        if (tinted_.isNull() || tintKey_ != key) {
-            tinted_ = image_;
-            for (int py = 0; py < tinted_.height(); ++py) {
-                auto* line = reinterpret_cast<QRgb*>(tinted_.scanLine(py));
-                for (int px = 0; px < tinted_.width(); ++px) {
+        auto it = tinted_.find(key);
+        if (it == tinted_.end()) {
+            QImage tinted = image_.convertToFormat(QImage::Format_ARGB32);
+            for (int py = 0; py < tinted.height(); ++py) {
+                auto* line = reinterpret_cast<QRgb*>(tinted.scanLine(py));
+                for (int px = 0; px < tinted.width(); ++px) {
                     const int alpha = qAlpha(line[px]);
                     if (alpha == 0) {
                         continue;
@@ -38,9 +41,9 @@ void SpriteAnim::draw(QPainter& painter, int frame, float x, float y, bool flip,
                     line[px] = qRgba((qRed(line[px]) + tint.red()) / 2, (qGreen(line[px]) + tint.green()) / 2, (qBlue(line[px]) + tint.blue()) / 2, alpha);
                 }
             }
-            tintKey_ = key;
+            it = tinted_.insert(key, tinted.convertToFormat(QImage::Format_ARGB32_Premultiplied));
         }
-        sourceImage = &tinted_;
+        sourceImage = &it.value();
     }
     const int size = int(kFrame * scale);
     painter.save();
@@ -78,6 +81,6 @@ bool SpriteSet::load(const QString& assetDir) {
         && flyerAttack.load(assetDir + "/flyer/attack.png")
         && flyerHurt.load(assetDir + "/flyer/hurt.png")
         && flyerDeath.load(assetDir + "/flyer/death.png");
-    tiles = QImage(assetDir + "/tiles/tilemaps.png");
+    tiles = QImage(assetDir + "/tiles/tilemaps.png").convertToFormat(QImage::Format_ARGB32_Premultiplied);
     return warrior && sword && mage && slime && skeleton && mushroom && flyer && !tiles.isNull();
 }
