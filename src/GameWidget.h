@@ -73,6 +73,7 @@ private:
     QVector<TouchButton> touchButtons() const;
     void handleTouch(QTouchEvent* event);
     QAbstractButton* overlayButtonAt(const QPointF& pos) const;
+    QPointF clampStickCenter(const QPointF& pos) const;
     void updateStick(const QPointF& pos);
     void releaseStick();
     void releaseBinding(int id);

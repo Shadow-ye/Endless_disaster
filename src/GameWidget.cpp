@@ -926,11 +926,15 @@ void GameWidget::handleTouch(QTouchEvent* event) {
             if (!playing) {
                 break;
             }
+            // 左半屏只归摇杆，右半屏只归按键：两只手的触点互不抢占
+            const bool stickZone = pos.x() < width() * 0.5;
             TouchControl hit = TouchControl::None;
-            for (const TouchButton& button : touchButtons()) {
-                if (QLineF(pos, button.center).length() <= button.radius * 1.2) {
-                    hit = button.control;
-                    break;
+            if (!stickZone) {
+                for (const TouchButton& button : touchButtons()) {
+                    if (QLineF(pos, button.center).length() <= button.radius * 1.2) {
+                        hit = button.control;
+                        break;
+                    }
                 }
             }
             if (hit == TouchControl::Guide || hit == TouchControl::Pause) {
@@ -941,18 +945,19 @@ void GameWidget::handleTouch(QTouchEvent* event) {
             } else if (hit != TouchControl::None) {
                 touchBindings_.insert(id, hit);
                 pressTouch(hit, true);
-            } else if (stickTouchId_ < 0 && pos.x() < width() * 0.5) {
-                // 左半屏任意位置按下即出现摇杆
-                const qreal radius = touchUnit() * 0.12;
+            } else if (stickZone && stickTouchId_ < 0) {
+                // 左半屏任意位置按下即出现摇杆；摇杆已被占用时左半屏的其他手指一律忽略
                 stickTouchId_ = id;
                 touchBindings_.insert(id, TouchControl::Stick);
-                stickCenter_ = QPointF(std::clamp(pos.x(), radius + 8.0, width() * 0.5),
-                    std::clamp(pos.y(), radius + 8.0, height() - radius - 8.0));
+                stickCenter_ = clampStickCenter(pos);
                 updateStick(pos);
             }
             break;
         }
         case QEventPoint::Updated:
+        case QEventPoint::Stationary:
+            // 安卓只拿本次事件内的历史采样判断是否移动：别的手指按下 / 抬起 / 滑动时，
+            // 摇杆手指常被标成 Stationary，但坐标已经是新的，不跟上摇杆就会卡住或跳变
             if (id == stickTouchId_) {
                 updateStick(pos);
             }
@@ -1001,10 +1006,22 @@ void GameWidget::releaseBinding(int id) {
     }
 }
 
+QPointF GameWidget::clampStickCenter(const QPointF& pos) const {
+    const qreal radius = touchUnit() * 0.12;
+    return QPointF(std::clamp(pos.x(), radius + 8.0, std::max(radius + 8.0, width() * 0.5)),
+        std::clamp(pos.y(), radius + 8.0, std::max(radius + 8.0, height() - radius - 8.0)));
+}
+
 void GameWidget::updateStick(const QPointF& pos) {
     const qreal radius = touchUnit() * 0.12;
-    const QPointF delta = pos - stickCenter_;
-    const qreal dist = std::hypot(delta.x(), delta.y());
+    QPointF delta = pos - stickCenter_;
+    qreal dist = std::hypot(delta.x(), delta.y());
+    if (dist > radius) {
+        // 手指拖出底座时底座跟着走，反向时不必先划回原来的圆心
+        stickCenter_ = clampStickCenter(pos - delta * (radius / dist));
+        delta = pos - stickCenter_;
+        dist = std::hypot(delta.x(), delta.y());
+    }
     stickOffset_ = dist > radius ? delta * (radius / dist) : delta;
     const qreal dead = radius * 0.18;
     if (dist <= dead) {
