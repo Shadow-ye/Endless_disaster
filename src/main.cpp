@@ -1,4 +1,5 @@
 #include "MainWindow.h"
+#include "Platform.h"
 
 #include <QApplication>
 #include <QCoreApplication>
@@ -9,14 +10,15 @@
 namespace {
 QString findGameIcon() {
     const QString appDir = QCoreApplication::applicationDirPath();
-    const QStringList candidates = {
-        appDir + QStringLiteral("/游戏图标.jpg"),
-        appDir + QStringLiteral("/assets/ui/游戏图标.jpg"),
-        appDir + QStringLiteral("/assets/ui/game_icon.jpg"),
-        QDir(appDir).absoluteFilePath(QStringLiteral("../assets/ui/游戏图标.jpg")),
-        QDir(appDir).absoluteFilePath(QStringLiteral("../assets/ui/game_icon.jpg")),
-        QDir(appDir).absoluteFilePath(QStringLiteral("../build/游戏图标.jpg")),
-    };
+    QStringList candidates;
+    for (const QString& root : Platform::dataRoots()) {
+        candidates << root + QStringLiteral("/游戏图标.jpg")
+                   << root + QStringLiteral("/assets/ui/游戏图标.jpg")
+                   << root + QStringLiteral("/assets/ui/game_icon.jpg");
+    }
+    candidates << QDir(appDir).absoluteFilePath(QStringLiteral("../assets/ui/游戏图标.jpg"))
+               << QDir(appDir).absoluteFilePath(QStringLiteral("../assets/ui/game_icon.jpg"))
+               << QDir(appDir).absoluteFilePath(QStringLiteral("../build/游戏图标.jpg"));
     for (const QString& path : candidates) {
         if (QFile::exists(path)) {
             return path;
@@ -35,7 +37,8 @@ int main(int argc, char* argv[]) {
         app.setWindowIcon(QIcon(iconPath));
     }
     app.setStyleSheet(
-        "QWidget { background: #0c0a09; color: #cbbfae; font-family: 'Microsoft YaHei UI'; font-size: 15px; }"
+        QStringLiteral("QWidget { background: #0c0a09; color: #cbbfae; font-family: '%1'; font-size: 15px; }")
+            .arg(Platform::uiFontFamily()) +
         "QFrame#panel { background: #14110f; border: 1px solid #5c3a32; }"
         "QLabel { background: transparent; }"
         "QLabel#dim { color: #8a7b70; }"

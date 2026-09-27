@@ -17,12 +17,24 @@
 
 ### 直接游玩（推荐）
 
-下载最新 Windows 打包：  
+#### Windows
+
 **[Releases · v0.1.0 Windows 可玩包](https://github.com/Shadow-ye/Endless_disaster/releases/tag/v0.1.0)**
 
 1. 下载 `EndlessDisaster-windows-x64.zip`  
 2. 解压到任意目录  
 3. 双击 `EndlessDisaster.exe`
+
+#### Linux
+
+**[Releases · 最新 Linux 包](https://github.com/Shadow-ye/Endless_disaster/releases/latest)**
+
+- **AppImage（万能包，推荐）**：下载 `EndlessDisaster-x86_64.AppImage`，然后  
+  `chmod +x EndlessDisaster-x86_64.AppImage && ./EndlessDisaster-x86_64.AppImage`  
+  自带 Qt 与音频解码，适用于 glibc ≥ 2.35 的 x86_64 发行版（Ubuntu 22.04+、Debian 12+、Fedora 36+ 等）。缺少 FUSE 时安装 `libfuse2`，或设置 `APPIMAGE_EXTRACT_AND_RUN=1` 再运行。
+- **Debian / Ubuntu**：下载 `endless-disaster_*_amd64.deb`，执行 `sudo apt install ./endless-disaster_*_amd64.deb`，之后从应用菜单打开「无尽之灾」或运行 `endless-disaster`。
+
+中文出现方块字时，请安装系统中文字体（如 `fonts-noto-cjk`）。
 
 也可按下方自行从源码编译。
 
@@ -78,6 +90,23 @@ build/EndlessDisaster.exe
 ```
 
 若缺少 DLL，请确认 `PATH` 含 Qt 的 `bin`，或重新完整编译一次以触发部署步骤。
+
+### Linux 编译与打包
+
+以 Ubuntu 22.04+ / Debian 12+ 为例：
+
+```bash
+sudo apt install cmake ninja-build g++ qt6-base-dev qt6-multimedia-dev libgl1-mesa-dev \
+  gstreamer1.0-libav gstreamer1.0-plugins-good fonts-noto-cjk
+cmake -S . -B build -G Ninja -DCMAKE_BUILD_TYPE=Release -DCMAKE_INSTALL_PREFIX=/usr
+cmake --build build
+./build/endless-disaster            # 直接运行
+(cd build && cpack -G DEB)          # 生成 build/endless-disaster_<版本>_amd64.deb
+```
+
+安装后程序位于 `/usr/bin/endless-disaster`，资源位于 `/usr/share/endless-disaster/`。
+
+推送 `v*` 标签时，GitHub Actions（`.github/workflows/linux.yml`）会自动编译 `.deb` 与 AppImage 并发布到 Release。
 
 ## 游玩方法
 

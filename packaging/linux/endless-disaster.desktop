@@ -1,0 +1,12 @@
+[Desktop Entry]
+Type=Application
+Name=Endless Disaster
+Name[zh_CN]=无尽之灾
+GenericName=Roguelike Action Game
+GenericName[zh_CN]=肉鸽动作生存游戏
+Comment=Survive endless waves of monsters
+Comment[zh_CN]=怪物入侵世界，而你要做的是活下去
+Exec=endless-disaster
+Icon=endless-disaster
+Terminal=false
+Categories=Game;ActionGame;

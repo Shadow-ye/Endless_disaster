@@ -3,6 +3,7 @@
 #include "Audio.h"
 #include "Codex.h"
 #include "GameWidget.h"
+#include "Platform.h"
 #include "Storage.h"
 
 #include <QApplication>
@@ -48,13 +49,14 @@ constexpr const char* kSlotKeys[4] = {"R", "F", "C", "V"};
 
 QString findStoryBackground() {
     const QString appDir = QCoreApplication::applicationDirPath();
-    const QStringList candidates = {
-        appDir + QStringLiteral("/故事背景.png"),
-        appDir + QStringLiteral("/assets/ui/story_bg.png"),
-        appDir + QStringLiteral("/assets/故事背景.png"),
-        QDir(appDir).absoluteFilePath(QStringLiteral("../assets/ui/story_bg.png")),
-        QDir(appDir).absoluteFilePath(QStringLiteral("../故事背景.png")),
-    };
+    QStringList candidates;
+    for (const QString& root : Platform::dataRoots()) {
+        candidates << root + QStringLiteral("/故事背景.png")
+                   << root + QStringLiteral("/assets/ui/story_bg.png")
+                   << root + QStringLiteral("/assets/故事背景.png");
+    }
+    candidates << QDir(appDir).absoluteFilePath(QStringLiteral("../assets/ui/story_bg.png"))
+               << QDir(appDir).absoluteFilePath(QStringLiteral("../故事背景.png"));
     for (const QString& path : candidates) {
         if (QFile::exists(path)) {
             return path;
@@ -65,12 +67,13 @@ QString findStoryBackground() {
 
 QString findCharacterImage(const QString& fileName) {
     const QString appDir = QCoreApplication::applicationDirPath();
-    const QStringList candidates = {
-        appDir + QStringLiteral("/character-img/") + fileName,
-        appDir + QStringLiteral("/assets/character-img/") + fileName,
-        QDir(appDir).absoluteFilePath(QStringLiteral("../assets/character-img/") + fileName),
-        QDir(appDir).absoluteFilePath(QStringLiteral("../build/character-img/") + fileName),
-    };
+    QStringList candidates;
+    for (const QString& root : Platform::dataRoots()) {
+        candidates << root + QStringLiteral("/character-img/") + fileName
+                   << root + QStringLiteral("/assets/character-img/") + fileName;
+    }
+    candidates << QDir(appDir).absoluteFilePath(QStringLiteral("../assets/character-img/") + fileName)
+               << QDir(appDir).absoluteFilePath(QStringLiteral("../build/character-img/") + fileName);
     for (const QString& path : candidates) {
         if (QFile::exists(path)) {
             return path;
@@ -549,10 +552,7 @@ void MainWindow::layoutMenuTitle() {
     // 目标最大 500px；受窗口宽度限制，尽量撑满。
     const int maxPx = 500;
     const QString text = QStringLiteral("无尽之灾");
-    QFont font(QStringLiteral("KaiTi"));
-    if (!font.exactMatch()) {
-        font = QFont(QStringLiteral("STKaiti"));
-    }
+    QFont font(Platform::titleFontFamily());
     font.setBold(true);
     font.setStyleStrategy(QFont::PreferAntialias);
 
@@ -580,12 +580,12 @@ void MainWindow::layoutMenuTitle() {
         "QLabel#menuHeroTitle {"
         "  color: #0a0807;"
         "  background: transparent;"
-        "  font-family: 'KaiTi';"
+        "  font-family: '%3';"
         "  font-weight: 700;"
         "  font-size: %1px;"
         "  letter-spacing: %2px;"
         "  padding: 4px 8px;"
-        "}").arg(best).arg(qMax(4, int(best * 0.06))));
+        "}").arg(best).arg(qMax(4, int(best * 0.06))).arg(Platform::titleFontFamily()));
     const QFontMetrics fm(font);
     menuTitle_->setFixedHeight(fm.height() + 20);
 }

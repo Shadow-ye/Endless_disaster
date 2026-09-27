@@ -2,6 +2,7 @@
 
 #include "Audio.h"
 #include "Codex.h"
+#include "Platform.h"
 #include "Storage.h"
 #include "TileMap.h"
 
@@ -49,6 +50,11 @@ QString formatTime(float t) {
 }
 
 QString findAssets() {
+    for (const QString& root : Platform::dataRoots()) {
+        if (QFile::exists(root + "/assets/hero_warrior/idle.png")) {
+            return root + "/assets";
+        }
+    }
     QDir dir(QCoreApplication::applicationDirPath());
     for (int i = 0; i < 6; ++i) {
         if (QFile::exists(dir.filePath("assets/hero_warrior/idle.png"))) {
@@ -803,7 +809,7 @@ void GameWidget::drawWorld(QPainter& painter) {
                 anim->draw(painter, frameIndex(*anim, player.animT, loop, fps), player.x, player.y, flip, heroScale, lift, QColor(), dir);
                 // 头顶昵称（三种职业同一逻辑）
                 const float nameTop = player.y - lift - 40.f * heroScale;
-                QFont nameFont(QStringLiteral("Microsoft YaHei UI"), 8);
+                QFont nameFont(Platform::uiFontFamily(), 8);
                 nameFont.setBold(true);
                 painter.setFont(nameFont);
                 const QFontMetrics fm(nameFont);
@@ -903,7 +909,7 @@ void GameWidget::drawWorld(QPainter& painter) {
                 painter.fillRect(QRectF(barX, barY - 3, barW * std::clamp(monster.shield / monster.maxShield, 0.f, 1.f), 2), QColor(140, 180, 220));
             }
             painter.fillRect(QRectF(barX, barY + barH + 1, barW * std::clamp(monster.poise / std::max(1.f, monster.maxPoise), 0.f, 1.f), 2), QColor(210, 170, 70));
-            painter.setFont(QFont("Microsoft YaHei UI", 8, QFont::Bold));
+            painter.setFont(QFont(Platform::uiFontFamily(), 8, QFont::Bold));
             const int hpShown = monster.hp <= 0.f ? 0 : int(std::ceil(monster.hp));
             const QString label = QString("Lv%1  %2").arg(monster.level).arg(hpShown);
             painter.setPen(QColor(0, 0, 0, 200));
@@ -1065,7 +1071,7 @@ void GameWidget::drawWorld(QPainter& painter) {
     for (const FloatText& text : session_.floatTexts()) {
         const int shown = text.amount <= 0.f ? 0 : int(std::ceil(text.amount));
         const QString label = text.crit ? QString("暴击 %1").arg(shown) : QString::number(shown);
-        painter.setFont(QFont("Microsoft YaHei UI", text.crit ? 11 : 8, text.crit ? QFont::Bold : QFont::Normal));
+        painter.setFont(QFont(Platform::uiFontFamily(), text.crit ? 11 : 8, text.crit ? QFont::Bold : QFont::Normal));
         painter.setPen(QColor(0, 0, 0, 180));
         painter.drawText(QRectF(text.x - 28, text.y - 7, 56, 14), Qt::AlignCenter, label);
         painter.setPen(text.crit ? QColor(255, 220, 40) : QColor(255, 245, 230));
@@ -1176,7 +1182,7 @@ void GameWidget::drawRadar(QPainter& painter, int originX, int originY, int scal
 
     painter.setBrush(Qt::NoBrush);
     painter.setPen(QColor(228, 212, 188));
-    painter.setFont(QFont("Microsoft YaHei UI", 11));
+    painter.setFont(QFont(Platform::uiFontFamily(), 11));
     painter.setRenderHint(QPainter::Antialiasing, false);
 }
 
@@ -1212,7 +1218,7 @@ void GameWidget::paintEvent(QPaintEvent* event) {
     painter.drawRect(QRect(originX, originY, kViewW * scale - 1, kViewH * scale - 1));
     const Player& player = session_.player();
     auto shown = [](float value) { return value <= 0.f ? 0 : int(std::ceil(value)); };
-    painter.setFont(QFont("Microsoft YaHei UI", 11));
+    painter.setFont(QFont(Platform::uiFontFamily(), 11));
     auto stat = [&](int row, const QString& name, float value, float maximum, const QColor& color) {
         const QRect plate(originX + 14, originY + 12 + row * 20, 210, 18);
         painter.fillRect(plate, QColor(12, 10, 9, 190));
@@ -1345,7 +1351,7 @@ void GameWidget::paintEvent(QPaintEvent* event) {
     const int rowW = int(chips.size()) * chipW + int(chips.size() - 1) * gap;
     int chipX = originX + (kViewW * scale - rowW) / 2;
     const int chipY = originY + kViewH * scale - chipH - 10;
-    painter.setFont(QFont("Microsoft YaHei UI", 10));
+    painter.setFont(QFont(Platform::uiFontFamily(), 10));
     painter.setBrush(Qt::NoBrush);
     for (const Chip& chip : chips) {
         painter.fillRect(QRect(chipX, chipY, chipW, chipH), QColor(12, 10, 9, 200));

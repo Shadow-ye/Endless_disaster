@@ -1,0 +1,146 @@
+name: Linux packages
+
+on:
+  push:
+    branches: [main]
+    tags: ['v*']
+  pull_request:
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  deb:
+    name: Debian package (.deb)
+    runs-on: ubuntu-22.04
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Install build dependencies
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y --no-install-recommends \
+            cmake ninja-build g++ dpkg-dev file \
+            qt6-base-dev qt6-multimedia-dev libgl1-mesa-dev
+
+      - name: Build
+        run: |
+          cmake -S . -B build -G Ninja -DCMAKE_BUILD_TYPE=Release -DCMAKE_INSTALL_PREFIX=/usr
+          cmake --build build
+
+      - name: Package
+        run: |
+          cd build
+          cpack -G DEB
+          dpkg-deb --info endless-disaster_*.deb
+          dpkg-deb --contents endless-disaster_*.deb
+
+      - name: Smoke test
+        run: |
+          sudo apt-get install -y ./build/endless-disaster_*.deb
+          test -f /usr/share/endless-disaster/assets/hero_warrior/idle.png
+          test -d /usr/share/endless-disaster/BGM
+          code=0
+          QT_QPA_PLATFORM=offscreen timeout 8 endless-disaster || code=$?
+          if [ "$code" -ne 124 ]; then echo "endless-disaster exited early with code $code"; exit 1; fi
+
+      - uses: actions/upload-artifact@v4
+        with:
+          name: deb
+          path: build/endless-disaster_*.deb
+
+  appimage:
+    name: AppImage (universal Linux)
+    runs-on: ubuntu-22.04
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Install system dependencies
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y --no-install-recommends \
+            ninja-build file patchelf desktop-file-utils libfuse2 \
+            libgl1-mesa-dev libegl1 libfontconfig1 libpulse0 \
+            libxkbcommon-x11-0 libxcb-cursor0 libxcb-icccm4 libxcb-image0 \
+            libxcb-keysyms1 libxcb-randr0 libxcb-render-util0 libxcb-shape0 \
+            libxcb-xinerama0 libxcb-xkb1
+
+      - uses: jurplel/install-qt-action@v4
+        with:
+          version: '6.8.*'
+          modules: 'qtmultimedia'
+          cache: true
+
+      - name: Build
+        run: |
+          cmake -S . -B build -G Ninja -DCMAKE_BUILD_TYPE=Release -DCMAKE_INSTALL_PREFIX=/usr
+          cmake --build build
+          DESTDIR="$PWD/AppDir" cmake --install build
+
+      - name: Download linuxdeploy
+        run: |
+          base=https://github.com/linuxdeploy
+          wget -q "$base/linuxdeploy/releases/download/continuous/linuxdeploy-x86_64.AppImage"
+          wget -q "$base/linuxdeploy-plugin-qt/releases/download/continuous/linuxdeploy-plugin-qt-x86_64.AppImage"
+          chmod +x linuxdeploy*.AppImage
+
+      - name: Build AppImage
+        env:
+          APPIMAGE_EXTRACT_AND_RUN: 1
+          EXTRA_PLATFORM_PLUGINS: libqoffscreen.so
+          LDAI_OUTPUT: EndlessDisaster-x86_64.AppImage
+          OUTPUT: EndlessDisaster-x86_64.AppImage
+        run: |
+          export QMAKE="$QT_ROOT_DIR/bin/qmake"
+          export LD_LIBRARY_PATH="$QT_ROOT_DIR/lib:${LD_LIBRARY_PATH:-}"
+          # 只打包 Qt 自带的 FFmpeg 后端，播放 m4a 不依赖系统 GStreamer
+          mkdir -p AppDir/usr/plugins/multimedia
+          cp "$QT_ROOT_DIR"/plugins/multimedia/libffmpegmediaplugin.so AppDir/usr/plugins/multimedia/
+          ./linuxdeploy-x86_64.AppImage --appdir AppDir \
+            --desktop-file AppDir/usr/share/applications/endless-disaster.desktop \
+            --icon-file AppDir/usr/share/icons/hicolor/256x256/apps/endless-disaster.png \
+            --deploy-deps-only AppDir/usr/plugins/multimedia \
+            --plugin qt --output appimage
+          ls -la *.AppImage
+
+      - name: Smoke test
+        run: |
+          chmod +x EndlessDisaster-x86_64.AppImage
+          code=0
+          QT_QPA_PLATFORM=offscreen APPIMAGE_EXTRACT_AND_RUN=1 timeout 8 ./EndlessDisaster-x86_64.AppImage || code=$?
+          if [ "$code" -ne 124 ]; then echo "AppImage exited early with code $code"; exit 1; fi
+
+      - uses: actions/upload-artifact@v4
+        with:
+          name: appimage
+          path: EndlessDisaster-x86_64.AppImage
+
+  release:
+    name: Publish GitHub Release
+    if: startsWith(github.ref, 'refs/tags/v')
+    needs: [deb, appimage]
+    runs-on: ubuntu-latest
+    permissions:
+      contents: write
+    steps:
+      - uses: actions/download-artifact@v4
+        with:
+          path: dist
+          merge-multiple: true
+
+      - uses: softprops/action-gh-release@v2
+        with:
+          files: dist/*
+          body: |
+            ## Linux 版本
+
+            - **`EndlessDisaster-x86_64.AppImage`**：万能 Linux 包，自带 Qt 与音频解码，适用于大多数 x86_64 发行版（glibc ≥ 2.35，例如 Ubuntu 22.04+、Debian 12+、Fedora 36+）。
+              下载后执行 `chmod +x EndlessDisaster-x86_64.AppImage && ./EndlessDisaster-x86_64.AppImage`。
+              若提示缺少 FUSE，可安装 `libfuse2`，或加环境变量 `APPIMAGE_EXTRACT_AND_RUN=1` 运行。
+            - **`endless-disaster_*_amd64.deb`**：Debian / Ubuntu 安装包（Ubuntu 22.04+、Debian 12+）。
+              安装：`sudo apt install ./endless-disaster_*_amd64.deb`，之后在应用菜单中打开「无尽之灾」，或在终端运行 `endless-disaster`。
+
+            中文显示依赖系统中文字体，如出现方块字请安装 `fonts-noto-cjk`（或发行版对应的 Noto Sans CJK 字体包）。
+
+            Windows 可玩包见 [v0.1.0](https://github.com/Shadow-ye/Endless_disaster/releases/tag/v0.1.0)。
