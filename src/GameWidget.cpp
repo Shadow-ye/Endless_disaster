@@ -89,6 +89,20 @@ float skillCooldownMax(int skill, float mul) {
         return 20.f * mul;
     case kSkillBerserk:
         return 8.f * mul;
+    case kSkillOverload:
+        return 20.f * mul;
+    case kSkillMagField:
+        return 10.f * mul;
+    case kSkillMedkit:
+        return 16.f * mul;
+    case kSkillScatter:
+        return 2.4f * mul;
+    case kSkillMissile:
+        return 4.5f * mul;
+    case kSkillBoost:
+        return 3.f * mul;
+    case kSkillSwarm:
+        return 7.f * mul;
     case kSkillSwordQi:
         return 1.5f * mul;
     case kSkillThrust:
@@ -472,7 +486,7 @@ void GameWidget::refreshGuide() {
                 ? QString("层数 %1/3　回层 %2").arg(player.stacksThrust).arg(cdText(player.cdThrustStack))
                 : QString("层数 %1/3").arg(player.stacksThrust);
         }
-        if (skill == kSkillFlight) {
+        if (skill == kSkillFlight || skill == kSkillJetpack) {
             return player.flying ? QString("飞行中") : QString("关");
         }
         if (skill == kSkillMirror) {
@@ -480,10 +494,13 @@ void GameWidget::refreshGuide() {
                 ? QString("吸收 %1/%2　剩余 %3s").arg(int(player.mirrorAbsorbed)).arg(int(player.mirrorCap)).arg(player.mirrorT, 0, 'f', 1)
                 : "冷却 " + cdText(cd);
         }
-        if (skill == kSkillBerserk) {
-            return player.berserkT > 0.f
-                ? QString("狂化中　剩余 %1s").arg(player.berserkT, 0, 'f', 1)
-                : "冷却 " + cdText(cd);
+        const float active = skill == kSkillBerserk ? player.berserkT
+            : skill == kSkillOverload              ? player.overloadT
+            : skill == kSkillMagField              ? player.fieldT
+            : skill == kSkillMedkit                ? player.medkitT
+                                                   : 0.f;
+        if (active > 0.f) {
+            return QString("%1中　剩余 %2s　冷却 %3").arg(skillText(skill).name).arg(active, 0, 'f', 1).arg(cdText(cd));
         }
         return "冷却 " + cdText(cd);
     };
@@ -1219,7 +1236,7 @@ void GameWidget::drawTouchControls(QPainter& painter) {
                     remain = skill == kSkillSwordQi ? player.cdQiStack : player.cdThrustStack;
                     maxCd = skillCooldownMax(skill, mul);
                 }
-            } else if (skill == kSkillFlight) {
+            } else if (skill == kSkillFlight || skill == kSkillJetpack) {
                 sub = player.flying ? QStringLiteral("开") : QStringLiteral("关");
             } else {
                 remain = cd;
@@ -1247,6 +1264,11 @@ void GameWidget::drawTouchControls(QPainter& painter) {
         case TouchControl::SkillV:
             slot(player.skillV, player.cdV);
             break;
+        case TouchControl::Attack:
+            if (player.hero == HeroClass::Robot) {
+                sub = player.ammo > 0 ? QString("%1/%2").arg(player.ammo).arg(kRobotMagazine) : QStringLiteral("长按换弹");
+            }
+            break;
         default:
             break;
         }
@@ -1256,7 +1278,8 @@ void GameWidget::drawTouchControls(QPainter& painter) {
             button.radius * 2.0, button.radius * 2.0);
         const bool cooling = remain > 0.05f && maxCd > 0.01f;
         const bool withSub = !sub.isEmpty() && !cooling;
-        const int labelPx = std::max(9, int(button.radius * (button.label.size() > 2 ? 0.42 : 0.52)));
+        const double labelScale = button.label.size() > 4 ? 0.34 : (button.label.size() > 2 ? 0.42 : 0.52);
+        const int labelPx = std::max(9, int(button.radius * labelScale));
         const QColor rim = pressed ? QColor(236, 170, 140, 230) : QColor(150, 100, 86, 200);
         const QColor fill = pressed ? QColor(196, 92, 72, 180) : QColor(12, 10, 9, 150);
         if (cooling || withSub) {
@@ -1391,28 +1414,30 @@ void GameWidget::drawWorld(QPainter& painter) {
             if (player.invuln > 0.f && int(player.animT * 24.f) % 2 == 0 && player.state != ActorState::Dead) {
                 continue;
             }
-            const SpriteAnim* anim = &sprites_.warriorIdle;
+            struct HeroAnims {
+                const SpriteAnim* idle;
+                const SpriteAnim* run;
+                const SpriteAnim* attack;
+                const SpriteAnim* hurt;
+                const SpriteAnim* death;
+            };
+            HeroAnims set{&sprites_.warriorIdle, &sprites_.warriorRun, &sprites_.warriorAttack, &sprites_.warriorHurt, &sprites_.warriorDeath};
             if (player.hero == HeroClass::Sword) {
-                anim = &sprites_.swordIdle;
+                set = {&sprites_.swordIdle, &sprites_.swordRun, &sprites_.swordAttack, &sprites_.swordHurt, &sprites_.swordDeath};
             } else if (player.hero == HeroClass::Mage) {
-                anim = &sprites_.mageIdle;
+                set = {&sprites_.mageIdle, &sprites_.mageRun, &sprites_.mageAttack, &sprites_.mageHurt, &sprites_.mageDeath};
+            } else if (player.hero == HeroClass::Robot) {
+                set = {&sprites_.robotIdle, &sprites_.robotRun, &sprites_.robotAttack, &sprites_.robotHurt, &sprites_.robotDeath};
             }
+            const SpriteAnim* anim = set.idle;
             if (player.state == ActorState::Dead) {
-                anim = player.hero == HeroClass::Sword ? &sprites_.swordDeath
-                    : player.hero == HeroClass::Mage ? &sprites_.mageDeath
-                                                     : &sprites_.warriorDeath;
+                anim = set.death;
             } else if (player.state == ActorState::Attack) {
-                anim = player.hero == HeroClass::Sword ? &sprites_.swordAttack
-                    : player.hero == HeroClass::Mage ? &sprites_.mageAttack
-                                                     : &sprites_.warriorAttack;
+                anim = set.attack;
             } else if (player.state == ActorState::Hurt) {
-                anim = player.hero == HeroClass::Sword ? &sprites_.swordHurt
-                    : player.hero == HeroClass::Mage ? &sprites_.mageHurt
-                                                     : &sprites_.warriorHurt;
+                anim = set.hurt;
             } else if (player.state == ActorState::Run || player.state == ActorState::Dodge) {
-                anim = player.hero == HeroClass::Sword ? &sprites_.swordRun
-                    : player.hero == HeroClass::Mage ? &sprites_.mageRun
-                                                     : &sprites_.warriorRun;
+                anim = set.run;
             }
             const float lift = (player.jumpT > 0.f ? std::sin(player.jumpT / 0.34f * 3.14159f) * 14.f : 0.f)
                 + (player.flying ? 12.f : 0.f);
@@ -1454,9 +1479,32 @@ void GameWidget::drawWorld(QPainter& painter) {
                 const int dir = anim->dirs() >= 4 ? facingDir(player.facingX, player.facingY, anim->dirs()) : 0;
                 const bool flip = anim->dirs() < 4 && player.facingX < 0.f;
                 const float heroScale = anim->dirs() >= 8 ? 1.f : 1.25f;
-                anim->draw(painter, frameIndex(*anim, player.animT, loop, fps), player.x, player.y, flip, heroScale, lift, QColor(), dir);
-                // 头顶昵称（三种职业同一逻辑）
-                const float nameTop = player.y - lift - 40.f * heroScale;
+                // 机甲人贴图整体下沉 5% 帧高，枪口高度见 Session 的 kRobotMuzzleLift
+                const float sink = player.hero == HeroClass::Robot ? anim->size() * 0.05f : 0.f;
+                anim->draw(painter, frameIndex(*anim, player.animT, loop, fps), player.x, player.y + sink, flip, heroScale, lift, QColor(), dir);
+                if (player.hero == HeroClass::Robot && player.flying) {
+                    const float footY = player.y + sink - lift;
+                    painter.setPen(Qt::NoPen);
+                    painter.setBrush(QColor(255, 150, 50, 50));
+                    painter.drawEllipse(QRectF(player.x - 9.f, player.y - 3.f, 18.f, 6.f));
+                    for (int side = -1; side <= 1; side += 2) {
+                        const float fx = player.x + float(side) * 4.f;
+                        const float len = 8.f + 5.f * (0.5f + 0.5f * std::sin(player.animT * 40.f + float(side) * 1.7f));
+                        const float top = footY - 4.f;
+                        QPolygonF outer;
+                        outer << QPointF(fx - 4.f, top) << QPointF(fx + 4.f, top) << QPointF(fx + 1.5f, top + len * 0.7f) << QPointF(fx, top + len)
+                              << QPointF(fx - 1.5f, top + len * 0.7f);
+                        painter.setBrush(QColor(255, 120, 30, 210));
+                        painter.drawPolygon(outer);
+                        QPolygonF inner;
+                        inner << QPointF(fx - 2.f, top) << QPointF(fx + 2.f, top) << QPointF(fx, top + len * 0.6f);
+                        painter.setBrush(QColor(255, 240, 170, 235));
+                        painter.drawPolygon(inner);
+                    }
+                }
+                // 头顶昵称（各职业同一逻辑）
+                // 机甲人朝上举枪时枪管会顶到默认高度的昵称
+                const float nameTop = player.y + sink - lift - (player.hero == HeroClass::Robot ? 50.f : 40.f * heroScale);
                 QFont nameFont(Platform::uiFontFamily(), 8);
                 nameFont.setBold(true);
                 painter.setFont(nameFont);
@@ -1482,6 +1530,44 @@ void GameWidget::drawWorld(QPainter& painter) {
                 painter.drawEllipse(QRectF(guardCx - 18, guardCy - 18, 36, 36));
                 painter.setPen(QPen(QColor(255, 120, 255, 160), 1));
                 painter.drawEllipse(QRectF(guardCx - 12, guardCy - 12, 24, 24));
+            }
+            if (player.overloadT > 0.f) {
+                const float pulse = 0.5f + 0.5f * std::sin(player.animT * 14.f);
+                painter.setPen(QPen(QColor(255, 140, 40, int(120 + 100 * pulse)), 2));
+                painter.setBrush(QColor(255, 90, 20, int(30 + 30 * pulse)));
+                painter.drawEllipse(QRectF(player.x - 16.f, player.y - 5.f, 32.f, 10.f));
+                painter.setPen(Qt::NoPen);
+                painter.setBrush(QColor(255, 200, 80, 220));
+                for (int i = 0; i < 4; ++i) {
+                    const float t = std::fmod(player.animT * 1.4f + float(i) * 0.25f, 1.f);
+                    const float sx = player.x + std::sin(float(i) * 2.1f + player.animT * 3.f) * 11.f;
+                    painter.drawRect(QRectF(sx - 1.f, player.y - 4.f - t * 30.f, 2.f, 2.f));
+                }
+            }
+            if (player.fieldT > 0.f && (player.fieldT > 1.f || int(player.fieldT * 10.f) % 2 == 0)) {
+                constexpr float kFieldR = 28.f;
+                const float spin = player.animT * 240.f;
+                painter.setPen(QPen(QColor(90, 200, 255, 200), 2));
+                painter.setBrush(QColor(60, 150, 255, 40));
+                painter.drawEllipse(QRectF(guardCx - kFieldR, guardCy - kFieldR, kFieldR * 2.f, kFieldR * 2.f));
+                painter.setPen(QPen(QColor(200, 245, 255, 230), 2));
+                painter.setBrush(Qt::NoBrush);
+                const QRectF arcBox(guardCx - kFieldR + 3.f, guardCy - kFieldR + 3.f, kFieldR * 2.f - 6.f, kFieldR * 2.f - 6.f);
+                for (int i = 0; i < 3; ++i) {
+                    painter.drawArc(arcBox, int((spin + i * 120.f) * 16.f), 40 * 16);
+                }
+            }
+            if (player.medkitT > 0.f) {
+                const float rise = std::fmod(player.animT * 1.2f, 1.f);
+                const float cy = guardCy - 24.f - rise * 12.f;
+                const int alpha = int(230 * (1.f - rise));
+                painter.setPen(Qt::NoPen);
+                painter.setBrush(QColor(90, 230, 110, alpha));
+                painter.drawRect(QRectF(guardCx - 1.5f, cy - 5.f, 3.f, 10.f));
+                painter.drawRect(QRectF(guardCx - 5.f, cy - 1.5f, 10.f, 3.f));
+                painter.setPen(QPen(QColor(90, 230, 110, 120), 1));
+                painter.setBrush(Qt::NoBrush);
+                painter.drawEllipse(QRectF(player.x - 14.f, player.y - 4.f, 28.f, 8.f));
             }
             drawFacingMarker(painter, guardCx, guardCy, player.facingX, player.facingY, kGuardR, attackMarkerColor(player));
         } else {
@@ -1509,6 +1595,15 @@ void GameWidget::drawWorld(QPainter& painter) {
                     anim = &sprites_.mushroomJump;
                 } else {
                     anim = &sprites_.mushroomIdle;
+                }
+            } else if (monster.kind == MonsterKind::Killbot) {
+                scale = 1.2f;
+                if (monster.state == ActorState::Dead) {
+                    anim = &sprites_.killbotDeath;
+                } else if (monster.state == ActorState::Attack) {
+                    anim = &sprites_.killbotAttack;
+                } else {
+                    anim = &sprites_.killbotWalk;
                 }
             } else if (monster.kind == MonsterKind::Flyer) {
                 lift = 12.f;
@@ -1542,7 +1637,9 @@ void GameWidget::drawWorld(QPainter& painter) {
                 if (monster.hurtT > 0.1f) {
                     tint = QColor(255, 220, 80);  // 暴击/重创闪白黄
                 }
-                anim->draw(painter, frameIndex(*anim, monster.animT, loop, 10.f), monster.x, monster.y, monster.flip, scale, lift, tint);
+                const int dir = anim->dirs() >= 4 ? facingDir(monster.facingX, monster.facingY, anim->dirs()) : 0;
+                const bool flip = anim->dirs() < 4 && monster.flip;
+                anim->draw(painter, frameIndex(*anim, monster.animT, loop, 10.f), monster.x, monster.y, flip, scale, lift, tint, dir);
             }
             // 清晰血条：黑底描边 + 亮红 + 等级
             const float barW = 30.f;
@@ -1711,9 +1808,63 @@ void GameWidget::drawWorld(QPainter& painter) {
             painter.drawEllipse(QRectF(bolt.x - 5, bolt.y - 5, 10, 10));
             painter.setBrush(QColor(head.red(), head.green(), head.blue(), 80));
             painter.drawEllipse(QRectF(bolt.x - 8, bolt.y - 8, 16, 16));
+        } else if (bolt.robot) {
+            const float speed = std::max(1.f, std::sqrt(bolt.vx * bolt.vx + bolt.vy * bolt.vy));
+            const float by = bolt.y - bolt.lift;
+            const QColor core = bolt.hostile ? QColor(255, 70, 60) : (bolt.crit ? QColor(255, 220, 80) : QColor(110, 230, 255));
+            if (bolt.blast > 0.f) {
+                const float pulse = 0.5f + 0.5f * std::sin(bolt.age * 30.f);
+                painter.setBrush(QColor(255, 140, 40, int(90 + 80 * pulse)));
+                painter.drawEllipse(QRectF(bolt.x - 6, by - 6, 12, 12));
+                painter.setBrush(QColor(255, 235, 160));
+                painter.drawEllipse(QRectF(bolt.x - 3, by - 3, 6, 6));
+            } else {
+                const bool big = !bolt.hostile;
+                const float tail = big ? 14.f : 9.f;
+                const float head = big ? 3.f : 1.5f;
+                const QPointF from(bolt.x - bolt.vx / speed * tail, by - bolt.vy / speed * tail);
+                QPen pen(core);
+                pen.setCapStyle(Qt::RoundCap);
+                if (big) {
+                    pen.setColor(QColor(core.red(), core.green(), core.blue(), 90));
+                    pen.setWidthF(7.f);
+                    painter.setPen(pen);
+                    painter.drawLine(from, QPointF(bolt.x, by));
+                    pen.setColor(core);
+                }
+                pen.setWidthF(big ? 3.5f : 2.f);
+                painter.setPen(pen);
+                painter.drawLine(from, QPointF(bolt.x, by));
+                painter.setPen(Qt::NoPen);
+                painter.setBrush(QColor(255, 255, 255, 230));
+                painter.drawEllipse(QRectF(bolt.x - head, by - head, head * 2.f, head * 2.f));
+            }
         } else {
             painter.setBrush(bolt.hostile ? QColor(126, 72, 148) : (bolt.crit ? QColor(255, 200, 60) : QColor(214, 196, 160)));
             painter.drawEllipse(QRectF(bolt.x - 3, bolt.y - 3, 6, 6));
+        }
+    }
+    constexpr float kDroneLift = 16.f;
+    constexpr int kDroneFrame = 16;
+    for (const Drone& drone : session_.drones()) {
+        painter.setPen(Qt::NoPen);
+        painter.setBrush(QColor(0, 0, 0, 70));
+        painter.drawEllipse(QRectF(drone.x - 5.f, drone.y - 2.f, 10.f, 4.f));
+        // 自毁前一秒半闪烁提示
+        if (drone.life < 1.5f && int(drone.life * 10.f) % 2 == 0) {
+            continue;
+        }
+        const float dy = drone.y - kDroneLift + std::sin(drone.age * 9.f + float(drone.slot)) * 1.5f;
+        if (!sprites_.drone.isNull()) {
+            const int frames = std::max(1, sprites_.drone.width() / kDroneFrame);
+            const int frame = int(drone.age * 24.f) % frames;
+            painter.drawImage(QRectF(drone.x - kDroneFrame / 2, dy - kDroneFrame / 2, kDroneFrame, kDroneFrame),
+                sprites_.drone, QRect(frame * kDroneFrame, 0, kDroneFrame, kDroneFrame));
+        } else {
+            painter.setBrush(QColor(96, 108, 124));
+            painter.drawRect(QRectF(drone.x - 3.f, dy - 3.f, 6.f, 6.f));
+            painter.setBrush(QColor(110, 230, 255));
+            painter.drawRect(QRectF(drone.x - 1.f, dy, 2.f, 1.f));
         }
     }
     for (const FloatText& text : session_.floatTexts()) {
@@ -1782,6 +1933,8 @@ void GameWidget::drawRadar(QPainter& painter, const QRect& view) {
             return QColor(120, 190, 255);
         case MonsterKind::Caster:
             return QColor(180, 110, 220);
+        case MonsterKind::Killbot:
+            return QColor(255, 150, 60);
         default:
             return QColor(220, 80, 70);
         }
@@ -1936,16 +2089,26 @@ void GameWidget::paintEvent(QPaintEvent* event) {
             chip.sub = player.stacksThrust < 3
                 ? QString("%1/3 %2s").arg(player.stacksThrust).arg(std::max(0.f, player.cdThrustStack), 0, 'f', 1)
                 : QString("%1/3").arg(player.stacksThrust);
-        } else if (skill == kSkillFlight) {
+        } else if (skill == kSkillFlight || skill == kSkillJetpack) {
             chip.sub = player.flying ? QString("飞行中") : QString("关");
         } else if (skill == kSkillMirror && player.mirrorT > 0.f) {
             chip.sub = QString("%1/%2").arg(int(player.mirrorAbsorbed)).arg(int(player.mirrorCap));
             chip.remain = player.mirrorT;
             chip.maxCd = 10.f;
         } else if (skill == kSkillBerserk && player.berserkT > 0.f) {
-            chip.sub = QString("狂化 %1s").arg(player.berserkT, 0, 'f', 1);
+            chip.sub = QString("%1 %2s").arg(skillText(skill).name).arg(player.berserkT, 0, 'f', 1);
             chip.remain = player.berserkT;
             chip.maxCd = 3.f;
+        } else if ((skill == kSkillOverload && player.overloadT > 0.f) || (skill == kSkillMagField && player.fieldT > 0.f)
+            || (skill == kSkillMedkit && player.medkitT > 0.f)) {
+            const float active = skill == kSkillOverload ? player.overloadT : skill == kSkillMagField ? player.fieldT : player.medkitT;
+            chip.remain = std::max(0.f, slotCd);
+            chip.maxCd = skillCdMax(skill);
+            chip.sub = QString("生效 %1s").arg(active, 0, 'f', 1);
+        } else if (skill == kSkillSwarm && !session_.drones().empty()) {
+            chip.remain = std::max(0.f, slotCd);
+            chip.maxCd = skillCdMax(skill);
+            chip.sub = QString("%1架 %2s").arg(session_.drones().size()).arg(chip.remain, 0, 'f', 1);
         } else {
             chip.remain = std::max(0.f, slotCd);
             chip.maxCd = skillCdMax(skill);
@@ -1953,6 +2116,15 @@ void GameWidget::paintEvent(QPaintEvent* event) {
         }
         chips.push_back(chip);
     };
+    if (player.hero == HeroClass::Robot) {
+        Chip ammo;
+        ammo.key = "弹";
+        ammo.name = "弹匣";
+        ammo.remain = float(kRobotMagazine - player.ammo);
+        ammo.maxCd = float(kRobotMagazine);
+        ammo.sub = player.ammo > 0 ? QString("%1/%2").arg(player.ammo).arg(kRobotMagazine) : QString("空 长按换弹");
+        chips.push_back(ammo);
+    }
     {
         Chip q;
         q.key = "Q";
@@ -1995,7 +2167,14 @@ void GameWidget::paintEvent(QPaintEvent* event) {
         painter.setPen(QColor(196, 92, 72));
         painter.drawText(QRect(chipX + 4, chipY + 2, 18, 14), Qt::AlignLeft | Qt::AlignVCenter, chip.key);
         painter.setPen(QColor(228, 212, 188));
+        const bool longName = painter.fontMetrics().horizontalAdvance(chip.name) > chipW - 26;
+        if (longName) {
+            painter.setFont(QFont(Platform::uiFontFamily(), 8));
+        }
         painter.drawText(QRect(chipX + 22, chipY + 2, chipW - 26, 14), Qt::AlignLeft | Qt::AlignVCenter, chip.name);
+        if (longName) {
+            painter.setFont(QFont(Platform::uiFontFamily(), 10));
+        }
         painter.setPen(QColor(138, 148, 120));
         painter.drawText(QRect(chipX + 4, chipY + 16, chipW - 8, 14), Qt::AlignLeft | Qt::AlignVCenter, chip.sub);
         if (chip.maxCd > 0.01f) {

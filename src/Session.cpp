@@ -49,6 +49,11 @@ void setupMonster(Monster& monster, int level) {
         monster.maxShield = 8.f;
         monster.maxPoise = 10.f;
         break;
+    case MonsterKind::Killbot:
+        monster.maxHp = 34.f;
+        monster.maxShield = 12.f;
+        monster.maxPoise = 14.f;
+        break;
     case MonsterKind::Slime:
         monster.maxHp = 16.f;
         monster.maxShield = 0.f;
@@ -78,6 +83,9 @@ int scoreFor(MonsterKind kind, int level) {
         break;
     case MonsterKind::Caster:
         base = 30;
+        break;
+    case MonsterKind::Killbot:
+        base = 35;
         break;
     case MonsterKind::Slime:
         base = 10;
@@ -169,6 +177,20 @@ void Session::newGame(uint32_t seed, uint32_t runId, HeroClass hero, int skillD,
         if (isMageSkill(skillV)) {
             player_.skillV = skillV;
         }
+    } else if (hero == HeroClass::Robot) {
+        player_.skillD = kSkillScatter;
+        player_.skillF = kSkillMissile;
+        player_.skillC = kSkillBoost;
+        player_.skillV = -1;
+        if (isRobotSkill(skillD)) {
+            player_.skillD = skillD;
+        }
+        if (isRobotSkill(skillF)) {
+            player_.skillF = skillF;
+        }
+        if (isRobotSkill(skillC)) {
+            player_.skillC = skillC;
+        }
     } else {
         player_.skillD = kSkillSpin;
         player_.skillF = kSkillSwordQi;
@@ -201,6 +223,10 @@ void Session::newGame(uint32_t seed, uint32_t runId, HeroClass hero, int skillD,
         baseMaxMp_ = 85.f;
         player_.speedBonus = 16.f;
         player_.critBonus = 10;
+    } else if (hero == HeroClass::Robot) {
+        baseMaxHp_ = 105.f;
+        baseArmor_ = 12.f;
+        baseMaxMp_ = 90.f;
     } else {
         baseMaxHp_ = 78.f;
         baseArmor_ = 4.f;
@@ -219,6 +245,7 @@ void Session::newGame(uint32_t seed, uint32_t runId, HeroClass hero, int skillD,
     hpTrack_ = player_.maxHp;
     monsters_.clear();
     bolts_.clear();
+    drones_.clear();
     drops_.clear();
     floats_.clear();
     attackFx_.clear();
@@ -251,7 +278,7 @@ bool Session::loadFrom(const QJsonObject& game) {
     const uint32_t seed = uint32_t(game.value("seed").toDouble());
     const uint32_t runId = uint32_t(game.value("runId").toDouble());
     const QJsonObject savedPlayer = game.value("player").toObject();
-    const HeroClass hero = HeroClass(std::clamp(savedPlayer.value("hero").toInt(), 0, 2));
+    const HeroClass hero = HeroClass(std::clamp(savedPlayer.value("hero").toInt(), 0, int(HeroClass::Robot)));
     newGame(seed == 0 ? 1u : seed, runId == 0 ? 1u : runId, hero,
         savedPlayer.value("skillD").toInt(0), savedPlayer.value("skillF").toInt(1),
         savedPlayer.value("skillC").toInt(2), savedPlayer.value("skillV").toInt(-1));
@@ -268,6 +295,7 @@ bool Session::loadFrom(const QJsonObject& game) {
     player_.mp = float(p.value("mp").toDouble(player_.maxMp));
     player_.maxMp = float(p.value("maxMp").toDouble(80));
     player_.stamina = float(p.value("stamina").toDouble(100));
+    player_.ammo = std::clamp(p.value("ammo").toInt(kRobotMagazine), 0, kRobotMagazine);
     player_.shield = float(p.value("shield").toDouble(player_.maxShield));
     player_.maxShield = float(p.value("maxShield").toDouble(25));
     player_.level = std::max(1, p.value("level").toInt(1));
@@ -328,6 +356,8 @@ bool Session::loadFrom(const QJsonObject& game) {
             monster.kind = MonsterKind::Flyer;
         } else if (kind == 4) {
             monster.kind = MonsterKind::Caster;
+        } else if (kind == 5) {
+            monster.kind = MonsterKind::Killbot;
         }
         setupMonster(monster, std::max(1, m.value("level").toInt(1)));
         monster.x = float(m.value("x").toDouble());
@@ -359,6 +389,7 @@ QJsonObject Session::toJson() const {
     p.insert("mp", player_.mp);
     p.insert("maxMp", player_.maxMp);
     p.insert("stamina", player_.stamina);
+    p.insert("ammo", player_.ammo);
     p.insert("shield", player_.shield);
     p.insert("maxShield", player_.maxShield);
     p.insert("level", player_.level);
@@ -419,6 +450,8 @@ QJsonObject Session::toJson() const {
             kind = 3;
         } else if (m.kind == MonsterKind::Caster) {
             kind = 4;
+        } else if (m.kind == MonsterKind::Killbot) {
+            kind = 5;
         }
         obj.insert("kind", kind);
         obj.insert("level", m.level);
@@ -484,6 +517,9 @@ float Session::atkSpeedMul() const {
     if (player_.berserkT > 0.f) {
         mul *= 2.f;  // 攻速 +100%
     }
+    if (player_.overloadT > 0.f) {
+        mul *= 1.6f;
+    }
     return mul;
 }
 
@@ -494,6 +530,9 @@ float Session::rollDamage(float base, bool* critOut) {
     }
     if (player_.berserkT > 0.f) {
         damage *= 2.f;
+    }
+    if (player_.overloadT > 0.f) {
+        damage *= 1.4f;
     }
     if (player_.hero == HeroClass::Mage) {
         damage *= 0.9f;
@@ -557,6 +596,9 @@ void Session::hurtPlayer(float damage, Monster* source) {
     }
     if (player_.guardT > 0.f) {
         damage *= 0.35f;
+    }
+    if (player_.fieldT > 0.f) {
+        damage *= 0.05f;
     }
     damage *= 40.f / (40.f + player_.armor);
     if (player_.shield > 0.f) {
@@ -731,7 +773,7 @@ void Session::castHeavySwordQi() {
 }
 
 void Session::slashHostileBolts() {
-    if (player_.state != ActorState::Attack || player_.hero == HeroClass::Mage) {
+    if (player_.state != ActorState::Attack || rangedHero()) {
         return;
     }
     const float reach = player_.heavy ? 42.f : 34.f;
@@ -750,6 +792,14 @@ void Session::slashHostileBolts() {
             bolt.life = 0.f;
         }
     }
+}
+
+int Session::playerPass() const {
+    if (player_.jumpT > 0.f || player_.flying) {
+        return 1;
+    }
+    // 飞行或跳跃结束时落在岩石/灌木上，放行到走出来为止，否则会卡死
+    return map_.blockedAt(player_.x, player_.y, kPlayerRadius, 0) ? 1 : 0;
 }
 
 void Session::tryMove(float& x, float& y, float vx, float vy, float dt, float radius, int pass, float* moved) {
@@ -786,7 +836,7 @@ void Session::castSlot(int skill, float& cooldown) {
         castThrustStack();
         return;
     }
-    if (skill == kSkillFlight) {
+    if (skill == kSkillFlight || skill == kSkillJetpack) {
         toggleFlight();
         return;
     }
@@ -803,7 +853,19 @@ void Session::castSlot(int skill, float& cooldown) {
         return;
     }
     if (skill == kSkillBerserk) {
-        castBerserk(cooldown);
+        castBerserk(cooldown, "狂化");
+        return;
+    }
+    if (skill == kSkillOverload) {
+        castOverload(cooldown);
+        return;
+    }
+    if (skill == kSkillMagField) {
+        castMagField(cooldown);
+        return;
+    }
+    if (skill == kSkillMedkit) {
+        castMedkit(cooldown);
         return;
     }
     if (cooldown > 0.f) {
@@ -820,8 +882,21 @@ void Session::castSlot(int skill, float& cooldown) {
     } else if (skill == kSkillSpin) {
         cost = 16.f;
         wait = 2.8f;
+    } else if (skill == kSkillScatter) {
+        cost = 14.f;
+        wait = 2.4f;
+    } else if (skill == kSkillMissile) {
+        cost = 20.f;
+        wait = 4.5f;
+    } else if (skill == kSkillBoost) {
+        cost = 12.f;
+        wait = 3.f;
+    } else if (skill == kSkillSwarm) {
+        cost = 22.f;
+        wait = 7.f;
     }
     wait *= cdMul();
+    cost *= skillCostMul();
     if (player_.mp < cost) {
         return;
     }
@@ -834,8 +909,312 @@ void Session::castSlot(int skill, float& cooldown) {
         castBolt();
     } else if (skill == kSkillNova) {
         castNova();
+    } else if (skill == kSkillScatter) {
+        castScatter();
+    } else if (skill == kSkillMissile) {
+        castMissile();
+    } else if (skill == kSkillBoost) {
+        castBoost();
+    } else if (skill == kSkillSwarm) {
+        castSwarm();
     }
     checkTalents();
+}
+
+namespace {
+// 枪口离地高度，与 GameWidget 里机甲人贴图下沉量一起调
+constexpr float kRobotMuzzleLift = 18.8f;
+constexpr float kRobotShotGap = 0.15f;
+constexpr float kRobotReloadHold = 0.42f;
+
+constexpr int kDroneCount = 6;
+constexpr float kDroneLife = 12.f;
+constexpr float kDroneBlast = 26.f;
+constexpr float kDroneSeekRange = 240.f;
+constexpr float kDroneOrbitRadius = 26.f;
+constexpr float kDroneIdleSpeed = 150.f;
+constexpr float kDroneAttackSpeed = 230.f;
+constexpr float kDroneMaxAccel = 900.f;
+constexpr float kDroneNeighbor = 36.f;
+constexpr float kDroneSeparation = 12.f;
+}
+
+void Session::fireRobotShot(float angleOffset, float baseDamage) {
+    const float a = std::atan2(player_.facingY, player_.facingX) + angleOffset;
+    const float dx = std::cos(a);
+    const float dy = std::sin(a);
+    Bolt bolt;
+    bolt.x = player_.x + dx * 14.f;
+    bolt.y = player_.y + dy * 14.f;
+    bolt.lift = kRobotMuzzleLift;
+    bolt.vx = dx * 320.f;
+    bolt.vy = dy * 320.f;
+    bolt.life = 0.5f;
+    bolt.robot = true;
+    bolt.damage = rollDamage(baseDamage, &bolt.crit);
+    bolts_.push_back(bolt);
+}
+
+void Session::castScatter() {
+    player_.state = ActorState::Attack;
+    player_.attackT = 0.3f / atkSpeedMul();
+    player_.heavy = true;
+    player_.animT = 0.f;
+    player_.attackId += 1;
+    for (int i = -2; i <= 2; ++i) {
+        fireRobotShot(float(i) * 0.18f, 9.f);
+    }
+    pushFx(AttackFxKind::Cone, 30.f, 0.4f, 0.16f);
+    queueSfx(SfxId::Skill);
+}
+
+void Session::castMissile() {
+    player_.state = ActorState::Attack;
+    player_.attackT = 0.34f / atkSpeedMul();
+    player_.heavy = true;
+    player_.animT = 0.f;
+    player_.attackId += 1;
+    Bolt bolt;
+    bolt.x = player_.x + player_.facingX * 14.f;
+    bolt.y = player_.y + player_.facingY * 14.f;
+    bolt.lift = kRobotMuzzleLift;
+    bolt.vx = player_.facingX * 190.f;
+    bolt.vy = player_.facingY * 190.f;
+    bolt.life = 0.8f;
+    bolt.robot = true;
+    bolt.blast = 44.f;
+    bolt.damage = rollDamage(26.f, &bolt.crit);
+    bolts_.push_back(bolt);
+    queueSfx(SfxId::Skill);
+}
+
+void Session::explodeBolt(const Bolt& bolt) {
+    AttackFx fx;
+    fx.kind = AttackFxKind::Pulse;
+    fx.x = bolt.x;
+    fx.y = bolt.y - 8.f;
+    fx.radius = bolt.blast;
+    fx.life = 0.3f;
+    fx.maxLife = 0.3f;
+    attackFx_.push_back(fx);
+    queueSfx(SfxId::Explode);
+    for (Monster& monster : monsters_) {
+        if (monster.state != ActorState::Dead && lengthOf(monster.x - bolt.x, monster.y - bolt.y) <= bolt.blast) {
+            hurtMonster(monster, bolt.damage, 16.f, bolt.crit, 18.f);
+        }
+    }
+}
+
+void Session::castSwarm() {
+    bool taken[kDroneCount]{};
+    for (Drone& drone : drones_) {
+        drone.life = kDroneLife;
+        taken[std::clamp(drone.slot, 0, kDroneCount - 1)] = true;
+    }
+    for (int slot = 0; slot < kDroneCount; ++slot) {
+        if (taken[slot]) {
+            continue;
+        }
+        const float a = 6.2831853f * float(slot) / float(kDroneCount);
+        Drone drone;
+        drone.x = player_.x + std::cos(a) * 10.f;
+        drone.y = player_.y + std::sin(a) * 10.f;
+        drone.vx = std::cos(a) * 80.f;
+        drone.vy = std::sin(a) * 80.f;
+        drone.life = kDroneLife;
+        drone.slot = slot;
+        drone.damage = rollDamage(11.f, &drone.crit);
+        drones_.push_back(drone);
+    }
+    pushFx(AttackFxKind::Ring, 22.f, 0.7f, 0.25f);
+    queueSfx(SfxId::Skill);
+}
+
+// 鸟群算法：分离 + 对齐 + 聚拢，再叠加目标牵引（有怪追最近的怪，没怪绕玩家盘旋）
+void Session::updateDrones(float dt) {
+    if (drones_.empty()) {
+        return;
+    }
+    const Monster* target = nullptr;
+    float best = kDroneSeekRange;
+    for (const Monster& monster : monsters_) {
+        if (monster.state == ActorState::Dead) {
+            continue;
+        }
+        const float dist = lengthOf(monster.x - player_.x, monster.y - player_.y);
+        if (dist < best) {
+            best = dist;
+            target = &monster;
+        }
+    }
+
+    const size_t count = drones_.size();
+    std::vector<float> accX(count, 0.f);
+    std::vector<float> accY(count, 0.f);
+    std::vector<char> attacking(count, 0);
+    for (size_t i = 0; i < count; ++i) {
+        const Drone& drone = drones_[i];
+        float sepX = 0.f, sepY = 0.f, aliX = 0.f, aliY = 0.f, cohX = 0.f, cohY = 0.f;
+        int neighbors = 0;
+        for (size_t j = 0; j < count; ++j) {
+            if (i == j) {
+                continue;
+            }
+            const Drone& other = drones_[j];
+            const float dx = drone.x - other.x;
+            const float dy = drone.y - other.y;
+            const float dist = lengthOf(dx, dy);
+            if (dist >= kDroneNeighbor) {
+                continue;
+            }
+            neighbors += 1;
+            aliX += other.vx;
+            aliY += other.vy;
+            cohX += other.x;
+            cohY += other.y;
+            if (dist < kDroneSeparation) {
+                const float push = (kDroneSeparation - dist) / kDroneSeparation;
+                if (dist > 0.01f) {
+                    sepX += dx / dist * push;
+                    sepY += dy / dist * push;
+                } else {
+                    const float a = 6.2831853f * float(drone.slot) / float(kDroneCount);
+                    sepX += std::cos(a) * push;
+                    sepY += std::sin(a) * push;
+                }
+            }
+        }
+        float ax = sepX * 700.f;
+        float ay = sepY * 700.f;
+        if (neighbors > 0) {
+            ax += (aliX / neighbors - drone.vx) * 1.5f + (cohX / neighbors - drone.x) * 3.f;
+            ay += (aliY / neighbors - drone.vy) * 1.5f + (cohY / neighbors - drone.y) * 3.f;
+        }
+        // 按编号错开出击，看起来是一架接一架扑出去
+        const bool attack = target && drone.age > 0.25f + 0.12f * float(drone.slot);
+        attacking[i] = attack ? 1 : 0;
+        float gx = 0.f;
+        float gy = 0.f;
+        float speed = kDroneAttackSpeed;
+        if (attack) {
+            gx = target->x - drone.x;
+            gy = target->y - drone.y;
+        } else {
+            const float a = time_ * 1.6f + 6.2831853f * float(drone.slot) / float(kDroneCount);
+            gx = player_.x + std::cos(a) * kDroneOrbitRadius - drone.x;
+            gy = player_.y + std::sin(a) * kDroneOrbitRadius - drone.y;
+            speed = std::min(kDroneIdleSpeed, lengthOf(gx, gy) * 5.f);
+        }
+        const float goalLen = lengthOf(gx, gy);
+        if (goalLen > 0.01f) {
+            ax += (gx / goalLen * speed - drone.vx) * 5.f;
+            ay += (gy / goalLen * speed - drone.vy) * 5.f;
+        }
+        const float accLen = lengthOf(ax, ay);
+        if (accLen > kDroneMaxAccel) {
+            ax *= kDroneMaxAccel / accLen;
+            ay *= kDroneMaxAccel / accLen;
+        }
+        accX[i] = ax;
+        accY[i] = ay;
+    }
+
+    for (size_t i = 0; i < count; ++i) {
+        Drone& drone = drones_[i];
+        drone.vx += accX[i] * dt;
+        drone.vy += accY[i] * dt;
+        const float maxSpeed = attacking[i] ? kDroneAttackSpeed : kDroneIdleSpeed;
+        const float speed = lengthOf(drone.vx, drone.vy);
+        if (speed > maxSpeed) {
+            drone.vx *= maxSpeed / speed;
+            drone.vy *= maxSpeed / speed;
+        }
+        drone.x += drone.vx * dt;
+        drone.y += drone.vy * dt;
+        drone.age += dt;
+        drone.life -= dt;
+        if (drone.life <= 0.f) {
+            explodeDrone(drone, false);
+            continue;
+        }
+        for (Bolt& bolt : bolts_) {
+            if (bolt.hostile && bolt.life > 0.f && lengthOf(bolt.x - drone.x, bolt.y - drone.y) < 9.f) {
+                bolt.life = 0.f;
+                drone.life = 0.f;
+                explodeDrone(drone, false);
+                break;
+            }
+        }
+        if (drone.life <= 0.f) {
+            continue;
+        }
+        for (const Monster& monster : monsters_) {
+            if (monster.state != ActorState::Dead && lengthOf(monster.x - drone.x, monster.y - drone.y) < 12.f) {
+                drone.life = 0.f;
+                break;
+            }
+        }
+        if (drone.life <= 0.f) {
+            explodeDrone(drone, true);
+        }
+    }
+    drones_.erase(std::remove_if(drones_.begin(), drones_.end(), [](const Drone& drone) { return drone.life <= 0.f; }), drones_.end());
+}
+
+void Session::explodeDrone(const Drone& drone, bool harmful) {
+    AttackFx fx;
+    fx.kind = AttackFxKind::Pulse;
+    fx.x = drone.x;
+    fx.y = drone.y - 12.f;
+    fx.radius = harmful ? kDroneBlast : 10.f;
+    fx.life = harmful ? 0.3f : 0.2f;
+    fx.maxLife = fx.life;
+    attackFx_.push_back(fx);
+    if (!harmful) {
+        queueSfx(SfxId::Hit);
+        return;
+    }
+    queueSfx(SfxId::Explode);
+    for (Monster& monster : monsters_) {
+        if (monster.state == ActorState::Dead) {
+            continue;
+        }
+        float kx = monster.x - drone.x;
+        float ky = monster.y - drone.y;
+        float kd = lengthOf(kx, ky);
+        if (kd > kDroneBlast) {
+            continue;
+        }
+        hurtMonster(monster, drone.damage, 10.f, drone.crit);
+        // 击退方向以爆点为圆心，而不是 hurtMonster 默认的以玩家为圆心
+        if (kd < 0.01f) {
+            kx = drone.vx;
+            ky = drone.vy;
+            kd = lengthOf(kx, ky);
+        }
+        if (kd > 0.01f) {
+            const int pass = monster.kind == MonsterKind::Flyer ? 2 : 0;
+            tryMove(monster.x, monster.y, kx / kd * 22.f, ky / kd * 22.f, 1.f, kMonsterRadius, pass, nullptr);
+        }
+    }
+}
+
+void Session::castBoost() {
+    player_.state = ActorState::Dodge;
+    player_.dodgeT = 0.22f;
+    player_.dodgeX = player_.facingX;
+    player_.dodgeY = player_.facingY;
+    player_.invuln = 0.26f;
+    player_.attackId += 1;
+    player_.animT = 0.f;
+    pushFx(AttackFxKind::Ring, 36.f, 0.f, 0.26f);
+    queueSfx(SfxId::Dodge);
+    for (Monster& monster : monsters_) {
+        if (monster.state != ActorState::Dead && lengthOf(monster.x - player_.x, monster.y - player_.y) < 36.f) {
+            bool crit = false;
+            hurtMonster(monster, rollDamage(10.f, &crit), 8.f, crit, 20.f);
+        }
+    }
 }
 
 void Session::castSpin() {
@@ -1029,7 +1408,7 @@ void Session::castMageHeal(float& cooldown) {
     checkTalents();
 }
 
-void Session::castBerserk(float& cooldown) {
+void Session::castBerserk(float& cooldown, const QString& name) {
     if (cooldown > 0.f || player_.mp < 18.f) {
         return;
     }
@@ -1039,17 +1418,88 @@ void Session::castBerserk(float& cooldown) {
     player_.berserkT = 3.f;
     pushFx(AttackFxKind::Pulse, 36.f, 0.f, 0.4f);
     queueSfx(SfxId::Skill);
-    note("狂化");
+    note(name);
     checkTalents();
 }
 
+void Session::castOverload(float& cooldown) {
+    if (cooldown > 0.f || player_.mp < 18.f) {
+        return;
+    }
+    player_.mp -= 18.f;
+    cooldown = 20.f * cdMul();
+    player_.skillCasts += 1;
+    player_.overloadT = 10.f;
+    pushFx(AttackFxKind::Pulse, 36.f, 0.f, 0.4f);
+    queueSfx(SfxId::Skill);
+    note("过载");
+    checkTalents();
+}
+
+void Session::castMagField(float& cooldown) {
+    const float cost = 20.f * skillCostMul();
+    if (cooldown > 0.f || player_.mp < cost) {
+        return;
+    }
+    player_.mp -= cost;
+    cooldown = 10.f * cdMul();
+    player_.skillCasts += 1;
+    player_.fieldT = 6.f;
+    player_.fieldTick = 0.f;
+    pushFx(AttackFxKind::Ring, 28.f, 0.7f, 0.3f);
+    queueSfx(SfxId::Skill);
+    note("磁力场");
+    checkTalents();
+}
+
+void Session::castMedkit(float& cooldown) {
+    const float cost = 16.f * skillCostMul();
+    if (cooldown > 0.f || player_.mp < cost) {
+        return;
+    }
+    player_.mp -= cost;
+    cooldown = 16.f * cdMul();
+    player_.skillCasts += 1;
+    player_.medkitT = 3.f;
+    queueSfx(SfxId::Heal);
+    note("战术医疗包");
+    checkTalents();
+}
+
+void Session::updateRobotBuffs(float dt) {
+    player_.overloadT = std::max(0.f, player_.overloadT - dt);
+    if (player_.medkitT > 0.f) {
+        const float step = std::min(dt, player_.medkitT);
+        player_.medkitT -= step;
+        player_.hp = std::min(player_.maxHp, player_.hp + player_.maxHp * 0.24f / 3.f * step);
+    }
+    if (player_.fieldT <= 0.f) {
+        return;
+    }
+    player_.fieldT = std::max(0.f, player_.fieldT - dt);
+    player_.fieldTick -= dt;
+    if (player_.fieldTick > 0.f) {
+        return;
+    }
+    player_.fieldTick = 0.4f;
+    // 要盖住近战怪的出手距离（28），否则贴身怪碰不到磁场
+    constexpr float kFieldRadius = 30.f;
+    for (Monster& monster : monsters_) {
+        if (monster.state != ActorState::Dead && lengthOf(monster.x - player_.x, monster.y - player_.y) <= kFieldRadius) {
+            bool crit = false;
+            hurtMonster(monster, rollDamage(8.f, &crit), 4.f, crit, 4.f);
+        }
+    }
+}
+
 void Session::toggleFlight() {
-    if (player_.hero != HeroClass::Mage) {
+    const bool jet = player_.hero == HeroClass::Robot;
+    if (player_.hero != HeroClass::Mage && !jet) {
         return;
     }
     if (player_.flying) {
         player_.flying = false;
-        note("落地");
+        note(jet ? "关闭喷气背包" : "落地");
         return;
     }
     if (player_.stamina < 5.f && player_.mp < 5.f) {
@@ -1057,7 +1507,10 @@ void Session::toggleFlight() {
     }
     player_.flying = true;
     player_.skillCasts += 1;
-    note("飞行");
+    note(jet ? "喷气背包" : "飞行");
+    if (jet) {
+        queueSfx(SfxId::Dodge);
+    }
     checkTalents();
 }
 
@@ -1076,7 +1529,7 @@ void Session::updateFlight(float dt) {
         } else {
             player_.mp = 0.f;
             player_.flying = false;
-            note("体力耗尽，落地");
+            note(player_.hero == HeroClass::Robot ? "燃料耗尽，落地" : "体力耗尽，落地");
         }
     }
 }
@@ -1119,6 +1572,7 @@ void Session::update(float dt, const InputState& input, float mouseX, float mous
         pathTileY_ = ty;
     }
     updateMonsters(dt);
+    updateDrones(dt);
     updateBolts(dt);
     updateFloats(dt);
     updateAttackFx(dt);
@@ -1143,6 +1597,9 @@ void Session::updatePlayer(float dt, const InputState& input, float mouseX, floa
     player_.cdV = std::max(0.f, player_.cdV - dt);
     player_.burialT = std::max(0.f, player_.burialT - dt);
     player_.berserkT = std::max(0.f, player_.berserkT - dt);
+    if (player_.state != ActorState::Dead) {
+        updateRobotBuffs(dt);
+    }
     if (player_.mirrorT > 0.f) {
         player_.mirrorT -= dt;
         if (player_.mirrorT <= 0.f) {
@@ -1170,7 +1627,7 @@ void Session::updatePlayer(float dt, const InputState& input, float mouseX, floa
 
     if (player_.state == ActorState::Dodge) {
         player_.dodgeT -= dt;
-        const int pass = (player_.jumpT > 0.f || player_.flying) ? 1 : 0;
+        const int pass = playerPass();
         tryMove(player_.x, player_.y, player_.dodgeX * 260.f, player_.dodgeY * 260.f, dt, kPlayerRadius, pass, &player_.distanceMoved);
         if (player_.dodgeT <= 0.f) {
             player_.state = ActorState::Idle;
@@ -1217,7 +1674,7 @@ void Session::updatePlayer(float dt, const InputState& input, float mouseX, floa
             const float fromX = player_.x;
             const float fromY = player_.y;
             constexpr float kBlinkDist = 64.f;
-            const int pass = (player_.jumpT > 0.f || player_.flying) ? 1 : 0;
+            const int pass = playerPass();
             const int steps = 8;
             for (int i = 0; i < steps; ++i) {
                 tryMove(player_.x, player_.y, player_.dodgeX * kBlinkDist, player_.dodgeY * kBlinkDist,
@@ -1271,11 +1728,18 @@ void Session::updatePlayer(float dt, const InputState& input, float mouseX, floa
         note("恢复");
         queueSfx(SfxId::Heal);
     }
+    // 突进类技能进入 Dodge 后本帧不再处理移动，否则会被改回 Run
     if (input.rEdge) {
         castSlot(player_.skillD, player_.cdD);
+        if (player_.state == ActorState::Dodge) {
+            return;
+        }
     }
     if (input.fEdge) {
         castSlot(player_.skillF, player_.cdF);
+        if (player_.state == ActorState::Dodge) {
+            return;
+        }
     }
     if (input.cEdge) {
         castSlot(player_.skillC, player_.cdC);
@@ -1295,6 +1759,19 @@ void Session::updatePlayer(float dt, const InputState& input, float mouseX, floa
             player_.state = ActorState::Idle;
             player_.heavy = false;
         }
+    } else if (input.lmb && player_.hero == HeroClass::Robot) {
+        if (!player_.reloadLatch) {
+            player_.heavyCharge += dt;
+            if (player_.heavyCharge >= kRobotReloadHold) {
+                player_.heavyCharge = 0.f;
+                player_.reloadLatch = true;
+                if (player_.ammo < kRobotMagazine) {
+                    player_.ammo = kRobotMagazine;
+                    note("换弹完成");
+                    queueSfx(SfxId::Ui);
+                }
+            }
+        }
     } else if (input.lmb) {
         player_.heavyCharge += dt * as;
         if (player_.heavyCharge >= 0.42f && player_.stamina >= 30.f) {
@@ -1307,21 +1784,36 @@ void Session::updatePlayer(float dt, const InputState& input, float mouseX, floa
             }
         }
     }
-    if (input.lmbUp && player_.attackT <= 0.f && player_.heavyCharge > 0.f) {
-        player_.state = ActorState::Attack;
-        player_.attackT = 0.36f / as;
-        player_.heavy = false;
-        player_.animT = 0.f;
-        player_.attackId += 1;
+    if (input.lmbUp && player_.reloadLatch) {
+        player_.reloadLatch = false;
         player_.heavyCharge = 0.f;
-        if (player_.hero == HeroClass::Mage) {
-            fireMageBolt(false);
+    }
+    if (input.lmbUp && player_.attackT <= 0.f && player_.heavyCharge > 0.f) {
+        if (player_.hero == HeroClass::Robot && player_.ammo <= 0) {
+            player_.heavyCharge = 0.f;
+            note("弹匣已空，长按左键换弹");
         } else {
-            queueSfx(SfxId::Swing);
+            const bool robot = player_.hero == HeroClass::Robot;
+            player_.state = ActorState::Attack;
+            player_.attackT = (robot ? kRobotShotGap : 0.36f) / as;
+            player_.heavy = false;
+            player_.animT = 0.f;
+            player_.attackId += 1;
+            player_.heavyCharge = 0.f;
+            if (player_.hero == HeroClass::Mage) {
+                fireMageBolt(false);
+            } else if (robot) {
+                player_.ammo -= 1;
+                fireRobotShot(0.f, 10.f);
+                queueSfx(SfxId::Swing);
+            } else {
+                queueSfx(SfxId::Swing);
+            }
         }
     }
     if (!input.lmb) {
         player_.heavyCharge = 0.f;
+        player_.reloadLatch = false;
     }
 
     float vx = 0.f;
@@ -1351,10 +1843,13 @@ void Session::updatePlayer(float dt, const InputState& input, float mouseX, floa
         speed += 18.f;
     }
     speed += player_.speedBonus;
+    if (player_.overloadT > 0.f) {
+        speed *= 1.25f;
+    }
     if (player_.state == ActorState::Attack) {
         speed *= 0.45f;
     }
-    const int pass = (player_.jumpT > 0.f || player_.flying) ? 1 : 0;
+    const int pass = playerPass();
     if (moving) {
         tryMove(player_.x, player_.y, vx * speed, vy * speed, dt, kPlayerRadius, pass, &player_.distanceMoved);
         if (player_.state != ActorState::Attack && player_.hurtT <= 0.f && player_.guardT <= 0.f) {
@@ -1434,7 +1929,9 @@ void Session::spawn(float dt) {
     }
     MonsterKind kind = MonsterKind::Slime;
     const uint32_t roll = nextRand() % 100u;
-    if (time_ > 20.f && roll < 16u) {
+    if (time_ > 30.f && roll >= 86u) {
+        kind = MonsterKind::Killbot;
+    } else if (time_ > 20.f && roll < 16u) {
         kind = MonsterKind::Caster;
     } else if (time_ > 25.f && roll < 32u) {
         kind = MonsterKind::Mushroom;
@@ -1446,8 +1943,16 @@ void Session::spawn(float dt) {
 
 void Session::updateBolts(float dt) {
     for (Bolt& bolt : bolts_) {
+        // 本帧已被无人机拦下的子弹
+        if (bolt.life <= 0.f) {
+            continue;
+        }
         bolt.life -= dt;
         bolt.age += dt;
+        if (bolt.life <= 0.f && bolt.blast > 0.f) {
+            explodeBolt(bolt);
+            continue;
+        }
         bolt.x += bolt.vx * dt;
         bolt.y += bolt.vy * dt;
         if (bolt.mage) {
@@ -1469,6 +1974,9 @@ void Session::updateBolts(float dt) {
             }
         }
         if (map_.blocks(tileOf(bolt.x), tileOf(bolt.y), 0)) {
+            if (bolt.blast > 0.f) {
+                explodeBolt(bolt);
+            }
             bolt.life = 0.f;
             continue;
         }
@@ -1484,7 +1992,11 @@ void Session::updateBolts(float dt) {
                 continue;
             }
             if (lengthOf(monster.x - bolt.x, monster.y - bolt.y) < 14.f) {
-                hurtMonster(monster, bolt.damage, 6.f, bolt.crit, 16.f);
+                if (bolt.blast > 0.f) {
+                    explodeBolt(bolt);
+                } else {
+                    hurtMonster(monster, bolt.damage, 6.f, bolt.crit, 16.f);
+                }
                 bolt.life = 0.f;
                 break;
             }
@@ -1523,7 +2035,7 @@ void Session::updateMonsters(float dt) {
         faceToward(monster.facingX, monster.facingY, monster.flip, dx, dy);
         const int pass = monster.kind == MonsterKind::Flyer ? 2 : 0;
 
-        if (player_.hero != HeroClass::Mage && player_.state == ActorState::Attack && !player_.heavy && player_.attackT > 0.12f && player_.attackT < 0.30f && monster.lastHitBy != player_.attackId) {
+        if (!rangedHero() && player_.state == ActorState::Attack && !player_.heavy && player_.attackT > 0.12f && player_.attackT < 0.30f && monster.lastHitBy != player_.attackId) {
             if (dist < 34.f && dist > 0.01f) {
                 const float dot = (-dx / dist) * player_.facingX + (-dy / dist) * player_.facingY;
                 if (dot > 0.35f) {
@@ -1590,6 +2102,11 @@ void Session::updateMonsters(float dt) {
                     }
                 }
             }
+            continue;
+        }
+
+        if (monster.kind == MonsterKind::Killbot) {
+            updateKillbot(monster, dt, dist);
             continue;
         }
 
@@ -1722,6 +2239,73 @@ void Session::updateMonsters(float dt) {
     monsters_.erase(std::remove_if(monsters_.begin(), monsters_.end(), [](const Monster& monster) {
         return monster.state == ActorState::Dead && monster.animT > 0.7f;
     }), monsters_.end());
+}
+
+// 机器人小兵：保持中距离绕玩家横移，定时点射；contactCd 兼作射击冷却
+void Session::updateKillbot(Monster& monster, float dt, float dist) {
+    const bool playerAlive = player_.state != ActorState::Dead;
+    if (monster.attackT > 0.f) {
+        monster.attackT -= dt;
+        monster.state = ActorState::Attack;
+        if (!monster.attackApplied && monster.attackT <= 0.2f) {
+            monster.attackApplied = true;
+            if (playerAlive) {
+                Bolt bolt;
+                bolt.hostile = true;
+                bolt.robot = true;
+                bolt.x = monster.x + monster.facingX * 8.f;
+                bolt.y = monster.y + monster.facingY * 8.f;
+                bolt.lift = 12.f;
+                bolt.vx = monster.facingX * 180.f;
+                bolt.vy = monster.facingY * 180.f;
+                bolt.life = 1.0f;
+                bolt.damage = scaledMonsterDamage(monster, 8.f);
+                bolts_.push_back(bolt);
+            }
+        }
+        if (monster.attackT <= 0.f) {
+            monster.state = ActorState::Idle;
+        }
+        return;
+    }
+    if (playerAlive && dist < 140.f && dist > 24.f && monster.contactCd <= 0.f) {
+        monster.attackT = 0.45f;
+        monster.attackApplied = false;
+        monster.contactCd = 1.5f + float(monster.id % 3) * 0.2f;
+        monster.animT = 0.f;
+        monster.state = ActorState::Attack;
+        return;
+    }
+    float mx = 0.f;
+    float my = 0.f;
+    float speed = 38.f;
+    if (dist > 96.f) {
+        float gx = player_.x;
+        float gy = player_.y;
+        int nx = 0;
+        int ny = 0;
+        if (paths_.nextTile(tileOf(monster.x), tileOf(monster.y), nx, ny)) {
+            gx = (nx + 0.5f) * kTile;
+            gy = (ny + 0.5f) * kTile;
+        }
+        mx = gx - monster.x;
+        my = gy - monster.y;
+    } else if (dist < 56.f) {
+        mx = -monster.facingX;
+        my = -monster.facingY;
+    } else {
+        const float side = (monster.id & 1) ? 1.f : -1.f;
+        mx = -monster.facingY * side;
+        my = monster.facingX * side;
+        speed = 26.f;
+    }
+    const float md = lengthOf(mx, my);
+    if (md > 1.f || (md > 0.01f && dist <= 96.f)) {
+        tryMove(monster.x, monster.y, mx / md * speed, my / md * speed, dt, kMonsterRadius, 0, nullptr);
+        monster.state = ActorState::Run;
+    } else {
+        monster.state = ActorState::Idle;
+    }
 }
 
 void Session::recomputeGear() {

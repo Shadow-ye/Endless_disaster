@@ -7,11 +7,10 @@
 #include "Storage.h"
 
 #include <QApplication>
-#include <QAbstractButton>
-#include <QButtonGroup>
 #include <QCheckBox>
 #include <QComboBox>
 #include <QCoreApplication>
+#include <QDesktopServices>
 #include <QDir>
 #include <QEvent>
 #include <QFile>
@@ -27,7 +26,6 @@
 #include <QMouseEvent>
 #include <QPixmap>
 #include <QPushButton>
-#include <QRadioButton>
 #include <QResizeEvent>
 #include <QScroller>
 #include <QShowEvent>
@@ -35,6 +33,7 @@
 #include <QSlider>
 #include <QStackedWidget>
 #include <QTextBrowser>
+#include <QUrl>
 #include <QVBoxLayout>
 
 #include <algorithm>
@@ -49,6 +48,30 @@ QString formatTime(float t) {
 }
 
 constexpr const char* kSlotKeys[4] = {"R", "F", "C", "V"};
+
+struct HeroInfo {
+    HeroClass hero;
+    const char* name;
+    const char* role;
+    const char* stats;
+};
+
+// 职业子菜单按此顺序列出；新角色不需要立绘也能在子菜单里选
+constexpr HeroInfo kHeroes[] = {
+    {HeroClass::Warrior, "战士", "战士", "HP 120  ARM 14  MP 60  CRT 12%"},
+    {HeroClass::Sword, "女剑客", "剑客", "HP 95  ARM 8  MP 85  SPD+16  CRT 22%"},
+    {HeroClass::Mage, "女魔法师", "法师", "HP 78  ARM 4  MP 130  CRT 12%"},
+    {HeroClass::Robot, "机甲人", "机甲人", "HP 105  ARM 12  MP 90  CRT 12%"},
+};
+
+const HeroInfo& heroInfo(HeroClass hero) {
+    for (const HeroInfo& info : kHeroes) {
+        if (info.hero == hero) {
+            return info;
+        }
+    }
+    return kHeroes[0];
+}
 
 QString findStoryBackground() {
     const QString appDir = QCoreApplication::applicationDirPath();
@@ -201,6 +224,33 @@ MainWindow::MainWindow(QWidget* parent) : QWidget(parent) {
         btn->setFixedWidth(280);
         layout->addWidget(btn, 0, Qt::AlignHCenter);
     }
+
+    // 放在右下角而不是按钮列里：手机横屏时标题已占去大半高度
+    menuLinks_ = new QWidget(menu_);
+    menuLinks_->setObjectName("menuLinks");
+    menuLinks_->setAttribute(Qt::WA_StyledBackground, true);
+    menuLinks_->setStyleSheet(
+        "QWidget#menuLinks { background: transparent; }"
+        "QLabel#dim { color: #d7c7b4; background: rgba(12,10,9,150); padding: 4px 10px; }"
+        "QPushButton { padding: 6px 12px; text-align: center; }");
+    auto* linksLayout = new QHBoxLayout(menuLinks_);
+    linksLayout->setContentsMargins(0, 0, 0, 0);
+    linksLayout->setSpacing(8);
+    auto* versionLabel = new QLabel(QStringLiteral("v" ED_VERSION), menuLinks_);
+    versionLabel->setObjectName("dim");
+    auto* releasesBtn = new QPushButton(QStringLiteral("历史版本"), menuLinks_);
+    auto* detailsBtn = new QPushButton(QStringLiteral("游戏详情"), menuLinks_);
+    linksLayout->addWidget(versionLabel);
+    linksLayout->addWidget(releasesBtn);
+    linksLayout->addWidget(detailsBtn);
+    connect(releasesBtn, &QPushButton::clicked, this, [] {
+        Audio::instance().play(SfxId::Ui);
+        QDesktopServices::openUrl(QUrl(QStringLiteral("https://github.com/Shadow-ye/Endless_disaster/releases")));
+    });
+    connect(detailsBtn, &QPushButton::clicked, this, [] {
+        Audio::instance().play(SfxId::Ui);
+        QDesktopServices::openUrl(QUrl(QStringLiteral("https://github.com/Shadow-ye/Endless_disaster")));
+    });
     layoutMenuBackground();
     layoutMenuTitle();
 
@@ -239,8 +289,7 @@ MainWindow::MainWindow(QWidget* parent) : QWidget(parent) {
         "QWidget#prepareContent { background: transparent; }"
         "QFrame#preparePanel { background: rgba(20,17,15,210); border: 1px solid #5c3a32; }"
         "QLabel#title { color: #f2e6d8; background: transparent; }"
-        "QLabel#dim { color: #d7c7b4; background: rgba(12,10,9,120); padding: 4px 10px; }"
-        "QRadioButton { color: #d7c7b4; background: transparent; }");
+        "QLabel#dim { color: #d7c7b4; background: rgba(12,10,9,120); padding: 4px 10px; }");
     auto* prepareOuter = new QVBoxLayout(prepareContent_);
     prepareOuter->setContentsMargins(0, 0, 0, 0);
     prepareOuter->setAlignment(Qt::AlignCenter);
@@ -255,7 +304,7 @@ MainWindow::MainWindow(QWidget* parent) : QWidget(parent) {
     prepareTitle->setAlignment(Qt::AlignCenter);
     prepareTitle->setFont(titleFont);
     prepareLayout->addWidget(prepareTitle);
-    skillHint_ = new QLabel("点击立绘或选项选择职业　Q 防御　E 恢复", prepareCard);
+    skillHint_ = new QLabel(prepareCard);
     skillHint_->setObjectName("dim");
     skillHint_->setAlignment(Qt::AlignCenter);
     skillHint_->setWordWrap(true);
@@ -271,74 +320,55 @@ MainWindow::MainWindow(QWidget* parent) : QWidget(parent) {
     // 手机横屏高度有限，名词解释并入下方可滚动的说明里
     glossary_->setVisible(!Platform::touchUi());
 
-    classGroup_ = new QButtonGroup(this);
-    auto* warrior = new QRadioButton("战士    HP 120  ARM 14  MP 60  CRT 12%", prepareCard);
-    auto* sword = new QRadioButton("女剑客  HP 95  ARM 8  MP 85  SPD+16  CRT 22%", prepareCard);
-    auto* mage = new QRadioButton("女魔法师  HP 78  ARM 4  MP 130  CRT 12%", prepareCard);
-    warrior->setChecked(true);
-    classGroup_->addButton(warrior, int(HeroClass::Warrior));
-    classGroup_->addButton(sword, int(HeroClass::Sword));
-    classGroup_->addButton(mage, int(HeroClass::Mage));
-    for (QRadioButton* button : {warrior, sword, mage}) {
-        prepareLayout->addWidget(button);
-    }
+    heroButton_ = new QPushButton(prepareCard);
+    heroButton_->setStyleSheet("QPushButton { text-align: center; }");
+    prepareLayout->addWidget(heroButton_);
+    heroStats_ = new QLabel(prepareCard);
+    heroStats_->setObjectName("dim");
+    heroStats_->setAlignment(Qt::AlignCenter);
+    prepareLayout->addWidget(heroStats_);
 
-    warriorPickRow_ = new QWidget(prepareCard);
-    auto* warriorLayout = new QHBoxLayout(warriorPickRow_);
-    warriorLayout->setContentsMargins(0, 4, 0, 4);
-    warriorLayout->setSpacing(8);
+    auto makePickRow = [&](int count, const int* pool, int poolSize, const int* defaults, int minWidth,
+                           QComboBox** boxes, QPushButton** buttons, void (MainWindow::*onPicked)(int)) {
+        auto* row = new QWidget(prepareCard);
+        auto* rowLayout = new QHBoxLayout(row);
+        rowLayout->setContentsMargins(0, 4, 0, 4);
+        rowLayout->setSpacing(8);
+        for (int i = 0; i < count; ++i) {
+            auto* col = new QVBoxLayout();
+            col->setSpacing(2);
+            auto* key = new QLabel(kSlotKeys[i], row);
+            key->setAlignment(Qt::AlignCenter);
+            key->setStyleSheet("color:#c45c48; font-weight:bold; background:transparent;");
+            auto* box = new QComboBox(row);
+            box->setMinimumWidth(minWidth);
+            fillSkillBox(box, pool, poolSize, defaults[i]);
+            boxes[i] = box;
+            col->addWidget(key);
+            col->addWidget(box);
+            if (Platform::touchUi()) {
+                buttons[i] = makeSkillPickButton(box, row);
+                col->addWidget(buttons[i]);
+            }
+            rowLayout->addLayout(col);
+            connect(box, QOverload<int>::of(&QComboBox::currentIndexChanged), this, [this, i, onPicked](int) {
+                (this->*onPicked)(i);
+            });
+        }
+        prepareLayout->addWidget(row);
+        return row;
+    };
     const int warriorDefaults[3] = {kSkillSpin, kSkillSwordQi, kSkillThrust};
-    for (int i = 0; i < 3; ++i) {
-        auto* col = new QVBoxLayout();
-        col->setSpacing(2);
-        auto* key = new QLabel(kSlotKeys[i], warriorPickRow_);
-        key->setAlignment(Qt::AlignCenter);
-        key->setStyleSheet("color:#c45c48; font-weight:bold; background:transparent;");
-        auto* box = new QComboBox(warriorPickRow_);
-        box->setMinimumWidth(100);
-        fillSkillBox(box, kWarriorSkillPool, int(std::size(kWarriorSkillPool)), warriorDefaults[i]);
-        warriorSkillBoxes_[i] = box;
-        col->addWidget(key);
-        col->addWidget(box);
-        if (Platform::touchUi()) {
-            warriorSkillButtons_[i] = makeSkillPickButton(box, warriorPickRow_);
-            col->addWidget(warriorSkillButtons_[i]);
-        }
-        warriorLayout->addLayout(col);
-        connect(box, QOverload<int>::of(&QComboBox::currentIndexChanged), this, [this, i](int) {
-            onWarriorSkillPicked(i);
-        });
-    }
-    prepareLayout->addWidget(warriorPickRow_);
-
-    magePickRow_ = new QWidget(prepareCard);
-    auto* mageLayout = new QHBoxLayout(magePickRow_);
-    mageLayout->setContentsMargins(0, 4, 0, 4);
-    mageLayout->setSpacing(8);
+    warriorPickRow_ = makePickRow(3, kWarriorSkillPool, int(std::size(kWarriorSkillPool)), warriorDefaults, 100,
+        warriorSkillBoxes_.data(), warriorSkillButtons_.data(), &MainWindow::onWarriorSkillPicked);
     const int mageDefaults[4] = {kSkillMageBolt, kSkillNova, kSkillFlight, kSkillBurial};
-    for (int i = 0; i < 4; ++i) {
-        auto* col = new QVBoxLayout();
-        col->setSpacing(2);
-        auto* key = new QLabel(kSlotKeys[i], magePickRow_);
-        key->setAlignment(Qt::AlignCenter);
-        key->setStyleSheet("color:#c45c48; font-weight:bold; background:transparent;");
-        auto* box = new QComboBox(magePickRow_);
-        box->setMinimumWidth(90);
-        fillSkillBox(box, kMageSkillPool, int(std::size(kMageSkillPool)), mageDefaults[i]);
-        mageSkillBoxes_[i] = box;
-        col->addWidget(key);
-        col->addWidget(box);
-        if (Platform::touchUi()) {
-            mageSkillButtons_[i] = makeSkillPickButton(box, magePickRow_);
-            col->addWidget(mageSkillButtons_[i]);
-        }
-        mageLayout->addLayout(col);
-        connect(box, QOverload<int>::of(&QComboBox::currentIndexChanged), this, [this, i](int) {
-            onMageSkillPicked(i);
-        });
-    }
+    magePickRow_ = makePickRow(4, kMageSkillPool, int(std::size(kMageSkillPool)), mageDefaults, 90,
+        mageSkillBoxes_.data(), mageSkillButtons_.data(), &MainWindow::onMageSkillPicked);
     magePickRow_->setVisible(false);
-    prepareLayout->addWidget(magePickRow_);
+    const int robotDefaults[3] = {kSkillScatter, kSkillMissile, kSkillBoost};
+    robotPickRow_ = makePickRow(3, kRobotSkillPool, int(std::size(kRobotSkillPool)), robotDefaults, 100,
+        robotSkillBoxes_.data(), robotSkillButtons_.data(), &MainWindow::onRobotSkillPicked);
+    robotPickRow_->setVisible(false);
 
     skillDetail_ = new QTextBrowser(prepareCard);
     skillDetail_->setOpenExternalLinks(false);
@@ -365,37 +395,36 @@ MainWindow::MainWindow(QWidget* parent) : QWidget(parent) {
     }
     prepareOuter->addWidget(prepareCard, 0, Qt::AlignHCenter | Qt::AlignVCenter);
 
-    if (Platform::touchUi()) {
-        skillPicker_ = new QWidget(prepare_);
-        skillPicker_->setObjectName("skillPicker");
-        skillPicker_->setAttribute(Qt::WA_StyledBackground, true);
-        skillPicker_->setStyleSheet(
-            "QWidget#skillPicker { background: rgba(0,0,0,150); }"
-            "QFrame#skillPickerCard { background: #14110f; border: 1px solid #5c3a32; }"
-            "QLabel { color: #f2e6d8; background: transparent; }"
-            "QPushButton { padding: 10px 8px; }"
-            "QPushButton:checked { background: #5c3a32; color: #f2e6d8; }");
-        skillPicker_->installEventFilter(this);
-        auto* pickerOuter = new QVBoxLayout(skillPicker_);
-        pickerOuter->setAlignment(Qt::AlignCenter);
-        auto* pickerCard = new QFrame(skillPicker_);
-        pickerCard->setObjectName("skillPickerCard");
-        pickerCard->setMinimumWidth(380);
-        auto* pickerLayout = new QVBoxLayout(pickerCard);
-        pickerLayout->setContentsMargins(18, 18, 18, 18);
-        pickerLayout->setSpacing(10);
-        skillPickerTitle_ = new QLabel(pickerCard);
-        skillPickerTitle_->setAlignment(Qt::AlignCenter);
-        pickerLayout->addWidget(skillPickerTitle_);
-        skillPickerGrid_ = new QGridLayout();
-        skillPickerGrid_->setSpacing(8);
-        pickerLayout->addLayout(skillPickerGrid_);
-        auto* pickerCancel = new QPushButton("取消", pickerCard);
-        pickerLayout->addWidget(pickerCancel);
-        connect(pickerCancel, &QPushButton::clicked, this, [this] { skillPicker_->hide(); });
-        pickerOuter->addWidget(pickerCard, 0, Qt::AlignCenter);
-        skillPicker_->hide();
-    }
+    // 页内浮层子菜单：职业选择与触屏的技能选择共用
+    picker_ = new QWidget(prepare_);
+    picker_->setObjectName("picker");
+    picker_->setAttribute(Qt::WA_StyledBackground, true);
+    picker_->setStyleSheet(
+        "QWidget#picker { background: rgba(0,0,0,150); }"
+        "QFrame#pickerCard { background: #14110f; border: 1px solid #5c3a32; }"
+        "QLabel { color: #f2e6d8; background: transparent; }"
+        "QPushButton { padding: 10px 8px; }"
+        "QPushButton:checked { background: #5c3a32; color: #f2e6d8; }");
+    picker_->installEventFilter(this);
+    auto* pickerOuter = new QVBoxLayout(picker_);
+    pickerOuter->setAlignment(Qt::AlignCenter);
+    auto* pickerCard = new QFrame(picker_);
+    pickerCard->setObjectName("pickerCard");
+    pickerCard->setMinimumWidth(380);
+    auto* pickerLayout = new QVBoxLayout(pickerCard);
+    pickerLayout->setContentsMargins(18, 18, 18, 18);
+    pickerLayout->setSpacing(10);
+    pickerTitle_ = new QLabel(pickerCard);
+    pickerTitle_->setAlignment(Qt::AlignCenter);
+    pickerLayout->addWidget(pickerTitle_);
+    pickerGrid_ = new QGridLayout();
+    pickerGrid_->setSpacing(8);
+    pickerLayout->addLayout(pickerGrid_);
+    auto* pickerCancel = new QPushButton("取消", pickerCard);
+    pickerLayout->addWidget(pickerCancel);
+    connect(pickerCancel, &QPushButton::clicked, this, [this] { picker_->hide(); });
+    pickerOuter->addWidget(pickerCard, 0, Qt::AlignCenter);
+    picker_->hide();
     layoutPrepareArt();
     updatePrepareArtHighlight();
 
@@ -507,9 +536,9 @@ MainWindow::MainWindow(QWidget* parent) : QWidget(parent) {
     });
     connect(quit, &QPushButton::clicked, this, [] { QApplication::quit(); });
     connect(game_, &GameWidget::returnedToMenu, this, [this] { showMenu(); });
-    connect(classGroup_, &QButtonGroup::idClicked, this, [this](int) {
-        refreshPrepareSkills();
-        updatePrepareArtHighlight();
+    connect(heroButton_, &QPushButton::clicked, this, [this] {
+        Audio::instance().play(SfxId::Ui);
+        openHeroPicker();
     });
 
     loadSettingsUi();
@@ -542,27 +571,44 @@ QPushButton* MainWindow::makeSkillPickButton(QComboBox* box, QWidget* parent) {
     return button;
 }
 
-void MainWindow::openSkillPicker(QComboBox* box) {
-    if (!skillPicker_) {
-        return;
-    }
-    std::vector<QComboBox*> group;
-    if (std::find(mageSkillBoxes_.begin(), mageSkillBoxes_.end(), box) != mageSkillBoxes_.end()) {
-        group.assign(mageSkillBoxes_.begin(), mageSkillBoxes_.end());
-    } else {
-        group.assign(warriorSkillBoxes_.begin(), warriorSkillBoxes_.end());
-    }
-    const int slot = int(std::find(group.begin(), group.end(), box) - group.begin());
-    skillPickerTitle_->setText(QString("选择 %1 键技能").arg(kSlotKeys[slot]));
-
-    while (QLayoutItem* item = skillPickerGrid_->takeAt(0)) {
+void MainWindow::openPicker(const QString& title, const QStringList& options, int current, int columns,
+    const std::function<void(int)>& onPick) {
+    pickerTitle_->setText(title);
+    while (QLayoutItem* item = pickerGrid_->takeAt(0)) {
         if (QWidget* widget = item->widget()) {
             widget->hide();
             widget->deleteLater();
         }
         delete item;
     }
-    QWidget* card = skillPickerGrid_->parentWidget();
+    QWidget* card = pickerGrid_->parentWidget();
+    for (int i = 0; i < options.size(); ++i) {
+        auto* option = new QPushButton(options[i], card);
+        option->setCheckable(true);
+        option->setChecked(i == current);
+        connect(option, &QPushButton::clicked, this, [this, onPick, i] {
+            picker_->hide();
+            onPick(i);
+            Audio::instance().play(SfxId::Ui);
+        });
+        pickerGrid_->addWidget(option, i / columns, i % columns);
+    }
+    picker_->setGeometry(prepare_->rect());
+    picker_->show();
+    picker_->raise();
+}
+
+void MainWindow::openSkillPicker(QComboBox* box) {
+    std::vector<QComboBox*> group;
+    if (std::find(mageSkillBoxes_.begin(), mageSkillBoxes_.end(), box) != mageSkillBoxes_.end()) {
+        group.assign(mageSkillBoxes_.begin(), mageSkillBoxes_.end());
+    } else if (std::find(robotSkillBoxes_.begin(), robotSkillBoxes_.end(), box) != robotSkillBoxes_.end()) {
+        group.assign(robotSkillBoxes_.begin(), robotSkillBoxes_.end());
+    } else {
+        group.assign(warriorSkillBoxes_.begin(), warriorSkillBoxes_.end());
+    }
+    const int slot = int(std::find(group.begin(), group.end(), box) - group.begin());
+    QStringList options;
     for (int i = 0; i < box->count(); ++i) {
         const int skill = box->itemData(i).toInt();
         QString text = box->itemText(i);
@@ -571,19 +617,23 @@ void MainWindow::openSkillPicker(QComboBox* box) {
                 text += QString("（与 %1 互换）").arg(kSlotKeys[other]);
             }
         }
-        auto* option = new QPushButton(text, card);
-        option->setCheckable(true);
-        option->setChecked(i == box->currentIndex());
-        connect(option, &QPushButton::clicked, this, [this, box, i] {
-            skillPicker_->hide();
-            box->setCurrentIndex(i);
-            Audio::instance().play(SfxId::Ui);
-        });
-        skillPickerGrid_->addWidget(option, i / 2, i % 2);
+        options << text;
     }
-    skillPicker_->setGeometry(prepare_->rect());
-    skillPicker_->show();
-    skillPicker_->raise();
+    openPicker(QString("选择 %1 键技能").arg(kSlotKeys[slot]), options, box->currentIndex(), 2,
+        [box](int index) { box->setCurrentIndex(index); });
+}
+
+void MainWindow::openHeroPicker() {
+    QStringList options;
+    int current = 0;
+    for (int i = 0; i < int(std::size(kHeroes)); ++i) {
+        options << QString("%1　　%2").arg(kHeroes[i].name, kHeroes[i].stats);
+        if (kHeroes[i].hero == hero_) {
+            current = i;
+        }
+    }
+    openPicker(QStringLiteral("选择职业"), options, current, 1,
+        [this](int index) { selectHeroClass(kHeroes[index].hero); });
 }
 
 void MainWindow::onWarriorSkillPicked(int slot) {
@@ -601,6 +651,16 @@ void MainWindow::onMageSkillPicked(int slot) {
     refreshPrepareSkills();
 }
 
+void MainWindow::onRobotSkillPicked(int slot) {
+    std::array<QComboBox*, 4> boxes{robotSkillBoxes_[0], robotSkillBoxes_[1], robotSkillBoxes_[2], nullptr};
+    std::array<int, 4> prev{robotSkillPrev_[0], robotSkillPrev_[1], robotSkillPrev_[2], -1};
+    swapDuplicate(boxes, prev, slot, 3);
+    robotSkillPrev_[0] = prev[0];
+    robotSkillPrev_[1] = prev[1];
+    robotSkillPrev_[2] = prev[2];
+    refreshPrepareSkills();
+}
+
 void MainWindow::refreshPrepareSkills() {
     auto line = [](const QString& key, const SkillText& text) {
         return QString("<p style='margin:4px 0;'><span style='color:#c45c48;'>%1</span>　<b>%2</b><br>%3</p>")
@@ -609,10 +669,14 @@ void MainWindow::refreshPrepareSkills() {
     QString html;
     html += line("Q", guardSkillText());
     html += line("E", healSkillText());
-    const HeroClass hero = HeroClass(classGroup_->checkedId());
-    const bool mage = hero == HeroClass::Mage;
-    warriorPickRow_->setVisible(!mage);
+    const HeroInfo& info = heroInfo(hero_);
+    heroButton_->setText(QString("职业：%1　▸").arg(info.name));
+    heroStats_->setText(info.stats);
+    const bool mage = hero_ == HeroClass::Mage;
+    const bool robot = hero_ == HeroClass::Robot;
+    warriorPickRow_->setVisible(!mage && !robot);
     magePickRow_->setVisible(mage);
+    robotPickRow_->setVisible(robot);
     if (mage) {
         skillHint_->setText("Q 防御　E 恢复　法师技能栏：R / F / C / V（自选，不可重复）");
         for (int i = 0; i < 4; ++i) {
@@ -620,12 +684,14 @@ void MainWindow::refreshPrepareSkills() {
         }
         html += "<p style='margin:8px 0 0 0; color:#a89888;'>可选技能共六个，带走其中四个。</p>";
     } else {
-        const char* role = hero == HeroClass::Sword ? "剑客" : "战士";
-        skillHint_->setText(QString("Q 防御　E 恢复　%1技能栏：R / F / C（自选，不可重复）").arg(role));
+        const auto& boxes = robot ? robotSkillBoxes_ : warriorSkillBoxes_;
+        skillHint_->setText(QString("Q 防御　E 恢复　%1技能栏：R / F / C（自选，不可重复）").arg(info.role));
         for (int i = 0; i < 3; ++i) {
-            html += line(kSlotKeys[i], skillText(warriorSkillBoxes_[i]->currentData().toInt()));
+            html += line(kSlotKeys[i], skillText(boxes[i]->currentData().toInt()));
         }
-        html += "<p style='margin:8px 0 0 0; color:#a89888;'>回旋斩 / 剑气 / 突刺 / 狂化，四选三分配到三个键位。</p>";
+        html += robot
+            ? "<p style='margin:8px 0 0 0; color:#a89888;'>散射 / 爆破弹 / 推进 / 过载 / 蜂群 / 磁力场 / 战术医疗包 / 喷气背包，八选三分配到三个键位。</p>"
+            : "<p style='margin:8px 0 0 0; color:#a89888;'>回旋斩 / 剑气 / 突刺 / 狂化，四选三分配到三个键位。</p>";
     }
     if (Platform::touchUi()) {
         html += "<p style='margin:8px 0 0 0; color:#a89888;'>" + glossary_->text().replace('\n', "<br>") + "</p>";
@@ -634,6 +700,9 @@ void MainWindow::refreshPrepareSkills() {
     for (int i = 0; i < 3; ++i) {
         if (warriorSkillButtons_[i]) {
             warriorSkillButtons_[i]->setText(warriorSkillBoxes_[i]->currentText());
+        }
+        if (robotSkillButtons_[i]) {
+            robotSkillButtons_[i]->setText(robotSkillBoxes_[i]->currentText());
         }
     }
     for (int i = 0; i < 4; ++i) {
@@ -666,6 +735,11 @@ void MainWindow::layoutMenuBackground() {
     menuContent_->setGeometry(r);
     menuBg_->lower();
     menuContent_->raise();
+    if (menuLinks_) {
+        const QSize size = menuLinks_->sizeHint();
+        menuLinks_->setGeometry(r.width() - size.width() - 16, r.height() - size.height() - 14, size.width(), size.height());
+        menuLinks_->raise();
+    }
     layoutMenuTitle();
 }
 
@@ -742,14 +816,14 @@ void MainWindow::layoutPrepareArt() {
     prepareMageArt_->raise();
     prepareSwordArt_->raise();
     prepareContent_->raise();
-    if (skillPicker_) {
-        skillPicker_->setGeometry(r);
-        skillPicker_->raise();
+    if (picker_) {
+        picker_->setGeometry(r);
+        picker_->raise();
     }
 }
 
 void MainWindow::updatePrepareArtHighlight() {
-    const HeroClass hero = classGroup_ ? HeroClass(classGroup_->checkedId()) : HeroClass::Warrior;
+    const HeroClass hero = hero_;
     auto setOpacity = [](QGraphicsOpacityEffect* effect, bool selected) {
         if (effect) {
             effect->setOpacity(selected ? 1.0 : 0.48);
@@ -761,25 +835,20 @@ void MainWindow::updatePrepareArtHighlight() {
 }
 
 void MainWindow::selectHeroClass(HeroClass hero) {
-    if (!classGroup_) {
-        return;
-    }
-    if (QAbstractButton* button = classGroup_->button(int(hero))) {
-        button->setChecked(true);
-    }
+    hero_ = hero;
     refreshPrepareSkills();
     updatePrepareArtHighlight();
 }
 
 bool MainWindow::eventFilter(QObject* watched, QEvent* event) {
-    if (watched == skillPicker_ && event->type() == QEvent::MouseButtonPress) {
+    if (watched == picker_ && event->type() == QEvent::MouseButtonPress) {
         return true;
     }
-    if (watched == skillPicker_ && event->type() == QEvent::MouseButtonRelease) {
+    if (watched == picker_ && event->type() == QEvent::MouseButtonRelease) {
         // 点在卡片外的遮罩上视为取消
         const QPoint pos = static_cast<QMouseEvent*>(event)->position().toPoint();
-        if (!skillPicker_->childAt(pos)) {
-            skillPicker_->hide();
+        if (!picker_->childAt(pos)) {
+            picker_->hide();
         }
         return true;
     }
@@ -816,8 +885,8 @@ void MainWindow::showEvent(QShowEvent* event) {
 }
 
 void MainWindow::showMenu() {
-    if (skillPicker_) {
-        skillPicker_->hide();
+    if (picker_) {
+        picker_->hide();
     }
     refreshMenu();
     stack_->setCurrentWidget(menu_);
@@ -873,13 +942,18 @@ void MainWindow::saveSettingsUi() {
 }
 
 void MainWindow::startPrepared() {
-    const HeroClass hero = HeroClass(classGroup_->checkedId());
+    const HeroClass hero = hero_;
     if (hero == HeroClass::Mage) {
         game_->startNew(hero,
             mageSkillBoxes_[0]->currentData().toInt(),
             mageSkillBoxes_[1]->currentData().toInt(),
             mageSkillBoxes_[2]->currentData().toInt(),
             mageSkillBoxes_[3]->currentData().toInt());
+    } else if (hero == HeroClass::Robot) {
+        game_->startNew(hero,
+            robotSkillBoxes_[0]->currentData().toInt(),
+            robotSkillBoxes_[1]->currentData().toInt(),
+            robotSkillBoxes_[2]->currentData().toInt());
     } else {
         game_->startNew(hero,
             warriorSkillBoxes_[0]->currentData().toInt(),

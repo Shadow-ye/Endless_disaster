@@ -3,11 +3,12 @@
 #include "Session.h"
 
 #include <QPixmap>
+#include <QStringList>
 #include <QWidget>
 #include <array>
+#include <functional>
 
 class GameWidget;
-class QButtonGroup;
 class QCheckBox;
 class QComboBox;
 class QGraphicsOpacityEffect;
@@ -42,9 +43,13 @@ private:
     void saveSettingsUi();
     void fillSkillBox(QComboBox* box, const int* pool, int poolSize, int selected);
     QPushButton* makeSkillPickButton(QComboBox* box, QWidget* parent);
+    void openPicker(const QString& title, const QStringList& options, int current, int columns,
+        const std::function<void(int)>& onPick);
     void openSkillPicker(QComboBox* box);
+    void openHeroPicker();
     void onWarriorSkillPicked(int slot);
     void onMageSkillPicked(int slot);
+    void onRobotSkillPicked(int slot);
     void layoutMenuBackground();
     void layoutMenuTitle();
     void layoutPrepareArt();
@@ -56,6 +61,7 @@ private:
     QLabel* menuBg_ = nullptr;
     QLabel* menuTitle_ = nullptr;
     QWidget* menuContent_ = nullptr;
+    QWidget* menuLinks_ = nullptr;
     QPixmap menuBgPix_;
     QWidget* prepare_ = nullptr;
     QLabel* prepareWarriorArt_ = nullptr;
@@ -78,21 +84,28 @@ private:
     QCheckBox* bgmCheck_ = nullptr;
     QSlider* bgmSlider_ = nullptr;
     QLabel* bgmVolumeLabel_ = nullptr;
-    QButtonGroup* classGroup_ = nullptr;
+    HeroClass hero_ = HeroClass::Warrior;
+    QPushButton* heroButton_ = nullptr;
+    QLabel* heroStats_ = nullptr;
     QTextBrowser* skillDetail_ = nullptr;
     QWidget* warriorPickRow_ = nullptr;
     QWidget* magePickRow_ = nullptr;
+    QWidget* robotPickRow_ = nullptr;
     QLabel* skillHint_ = nullptr;
     QLabel* glossary_ = nullptr;
     std::array<QPushButton*, 3> warriorSkillButtons_{};
     std::array<QPushButton*, 4> mageSkillButtons_{};
-    QWidget* skillPicker_ = nullptr;
-    QLabel* skillPickerTitle_ = nullptr;
-    QGridLayout* skillPickerGrid_ = nullptr;
+    std::array<QPushButton*, 3> robotSkillButtons_{};
+    QWidget* picker_ = nullptr;
+    QLabel* pickerTitle_ = nullptr;
+    QGridLayout* pickerGrid_ = nullptr;
     std::array<QComboBox*, 3> warriorSkillBoxes_{};
     std::array<int, 3> warriorSkillPrev_{
         kSkillSpin, kSkillSwordQi, kSkillThrust};
     std::array<QComboBox*, 4> mageSkillBoxes_{};
     std::array<int, 4> mageSkillPrev_{
         kSkillMageBolt, kSkillNova, kSkillFlight, kSkillBurial};
+    std::array<QComboBox*, 3> robotSkillBoxes_{};
+    std::array<int, 3> robotSkillPrev_{
+        kSkillScatter, kSkillMissile, kSkillBoost};
 };

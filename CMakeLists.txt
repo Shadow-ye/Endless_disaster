@@ -34,6 +34,7 @@ if(UNIX AND NOT APPLE AND NOT ANDROID)
 endif()
 
 target_include_directories(EndlessDisaster PRIVATE src)
+target_compile_definitions(EndlessDisaster PRIVATE ED_VERSION="${PROJECT_VERSION}")
 target_link_libraries(EndlessDisaster PRIVATE Qt6::Widgets Qt6::Multimedia)
 
 if(MSVC)
@@ -54,6 +55,9 @@ add_custom_command(TARGET EndlessDisaster POST_BUILD
     COMMAND ${CMAKE_COMMAND} -E copy_directory ${CMAKE_SOURCE_DIR}/assets/hero_mage $<TARGET_FILE_DIR:EndlessDisaster>/assets/hero_mage
     COMMAND ${CMAKE_COMMAND} -E copy_directory ${CMAKE_SOURCE_DIR}/assets/hero_sword $<TARGET_FILE_DIR:EndlessDisaster>/assets/hero_sword
     COMMAND ${CMAKE_COMMAND} -E copy_directory ${CMAKE_SOURCE_DIR}/assets/hero_warrior $<TARGET_FILE_DIR:EndlessDisaster>/assets/hero_warrior
+    COMMAND ${CMAKE_COMMAND} -E copy_directory ${CMAKE_SOURCE_DIR}/assets/hero_robot $<TARGET_FILE_DIR:EndlessDisaster>/assets/hero_robot
+    COMMAND ${CMAKE_COMMAND} -E copy_directory ${CMAKE_SOURCE_DIR}/assets/killbot $<TARGET_FILE_DIR:EndlessDisaster>/assets/killbot
+    COMMAND ${CMAKE_COMMAND} -E copy_directory ${CMAKE_SOURCE_DIR}/assets/drone $<TARGET_FILE_DIR:EndlessDisaster>/assets/drone
     COMMAND ${CMAKE_COMMAND} -E copy_directory ${CMAKE_SOURCE_DIR}/assets/slime $<TARGET_FILE_DIR:EndlessDisaster>/assets/slime
     COMMAND ${CMAKE_COMMAND} -E copy_directory ${CMAKE_SOURCE_DIR}/assets/skeleton $<TARGET_FILE_DIR:EndlessDisaster>/assets/skeleton
     COMMAND ${CMAKE_COMMAND} -E copy_directory ${CMAKE_SOURCE_DIR}/assets/mushroom $<TARGET_FILE_DIR:EndlessDisaster>/assets/mushroom
@@ -83,8 +87,8 @@ endif()
 if(ANDROID)
     # 资源编进 qrc，程序里按 ":/assets/..." 读取
     file(GLOB_RECURSE ED_ANDROID_DATA RELATIVE ${CMAKE_SOURCE_DIR} CONFIGURE_DEPENDS
-        assets/hero_mage/* assets/hero_sword/* assets/hero_warrior/*
-        assets/slime/* assets/skeleton/* assets/mushroom/* assets/flyer/*
+        assets/hero_mage/* assets/hero_sword/* assets/hero_warrior/* assets/hero_robot/*
+        assets/killbot/* assets/drone/* assets/slime/* assets/skeleton/* assets/mushroom/* assets/flyer/*
         assets/tiles/* assets/sfx/* assets/character-img/*.png BGM/*)
     list(APPEND ED_ANDROID_DATA assets/ui/story_bg.png assets/ui/游戏图标.jpg)
     qt_add_resources(EndlessDisaster gamedata PREFIX / BIG_RESOURCES FILES ${ED_ANDROID_DATA})
@@ -147,8 +151,8 @@ if(UNIX AND NOT APPLE AND NOT ANDROID)
 
     install(TARGETS EndlessDisaster RUNTIME DESTINATION ${CMAKE_INSTALL_BINDIR})
     install(DIRECTORY
-        assets/hero_mage assets/hero_sword assets/hero_warrior
-        assets/slime assets/skeleton assets/mushroom assets/flyer
+        assets/hero_mage assets/hero_sword assets/hero_warrior assets/hero_robot
+        assets/killbot assets/drone assets/slime assets/skeleton assets/mushroom assets/flyer
         assets/tiles assets/sfx
         DESTINATION ${ED_DATA_DIR}/assets)
     install(FILES assets/ui/story_bg.png assets/ui/游戏图标.jpg

@@ -6,7 +6,7 @@
 
 #include <algorithm>
 
-bool SpriteAnim::load(const QString& path) {
+bool SpriteAnim::load(const QString& path, int size) {
     QImage image(path);
     if (image.isNull()) {
         return false;
@@ -14,8 +14,9 @@ bool SpriteAnim::load(const QString& path) {
     // 预乘格式是 QPainter 的快速路径，非预乘每次绘制都要逐像素转换
     image_ = image.convertToFormat(QImage::Format_ARGB32_Premultiplied);
     tinted_.clear();
-    frames_ = std::max(1, image_.width() / kFrame);
-    dirs_ = std::max(1, image_.height() / kFrame);
+    size_ = size;
+    frames_ = std::max(1, image_.width() / size_);
+    dirs_ = std::max(1, image_.height() / size_);
     return true;
 }
 
@@ -45,25 +46,27 @@ void SpriteAnim::draw(QPainter& painter, int frame, float x, float y, bool flip,
         }
         sourceImage = &it.value();
     }
-    const int size = int(kFrame * scale);
+    const int size = int(size_ * scale);
     painter.save();
     painter.translate(x, y - lift);
     painter.scale(flip ? -1.0 : 1.0, 1.0);
-    painter.drawImage(QRect(-size / 2, int(-47 * scale), size, size), *sourceImage, QRect(frame * kFrame, dir * kFrame, kFrame, kFrame));
+    painter.drawImage(QRect(-size / 2, int(-(size_ - 17) * scale), size, size), *sourceImage, QRect(frame * size_, dir * size_, size_, size_));
     painter.restore();
 }
 
 bool SpriteSet::load(const QString& assetDir) {
-    auto loadHero = [&](const QString& folder, SpriteAnim& idle, SpriteAnim& run, SpriteAnim& attack, SpriteAnim& hurt, SpriteAnim& death) {
-        return idle.load(assetDir + "/" + folder + "/idle.png")
-            && run.load(assetDir + "/" + folder + "/run.png")
-            && attack.load(assetDir + "/" + folder + "/attack.png")
-            && hurt.load(assetDir + "/" + folder + "/hurt.png")
-            && death.load(assetDir + "/" + folder + "/death.png");
+    auto loadHero = [&](const QString& folder, SpriteAnim& idle, SpriteAnim& run, SpriteAnim& attack, SpriteAnim& hurt, SpriteAnim& death, int size = kFrame) {
+        return idle.load(assetDir + "/" + folder + "/idle.png", size)
+            && run.load(assetDir + "/" + folder + "/run.png", size)
+            && attack.load(assetDir + "/" + folder + "/attack.png", size)
+            && hurt.load(assetDir + "/" + folder + "/hurt.png", size)
+            && death.load(assetDir + "/" + folder + "/death.png", size);
     };
     const bool warrior = loadHero("hero_warrior", warriorIdle, warriorRun, warriorAttack, warriorHurt, warriorDeath);
     const bool sword = loadHero("hero_sword", swordIdle, swordRun, swordAttack, swordHurt, swordDeath);
     const bool mage = loadHero("hero_mage", mageIdle, mageRun, mageAttack, mageHurt, mageDeath);
+    // 步枪横向较长，64 像素帧放不下
+    const bool robot = loadHero("hero_robot", robotIdle, robotRun, robotAttack, robotHurt, robotDeath, 96);
     const bool slime = slimeIdle.load(assetDir + "/slime/idle.png")
         && slimeWalk.load(assetDir + "/slime/walk.png")
         && slimeDeath.load(assetDir + "/slime/death.png");
@@ -81,6 +84,10 @@ bool SpriteSet::load(const QString& assetDir) {
         && flyerAttack.load(assetDir + "/flyer/attack.png")
         && flyerHurt.load(assetDir + "/flyer/hurt.png")
         && flyerDeath.load(assetDir + "/flyer/death.png");
+    const bool killbot = killbotWalk.load(assetDir + "/killbot/walk.png")
+        && killbotAttack.load(assetDir + "/killbot/attack.png")
+        && killbotDeath.load(assetDir + "/killbot/death.png");
+    drone = QImage(assetDir + "/drone/drone.png").convertToFormat(QImage::Format_ARGB32_Premultiplied);
     tiles = QImage(assetDir + "/tiles/tilemaps.png").convertToFormat(QImage::Format_ARGB32_Premultiplied);
-    return warrior && sword && mage && slime && skeleton && mushroom && flyer && !tiles.isNull();
+    return warrior && sword && mage && robot && slime && skeleton && mushroom && flyer && killbot && !tiles.isNull();
 }

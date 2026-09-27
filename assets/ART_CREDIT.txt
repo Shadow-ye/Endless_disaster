@@ -8,3 +8,10 @@
 
 许可：小苏早睡免费素材条款（可改色；勿单独转售素材包）。
 朝向：单行朝右；引擎按 facingX 镜像。
+
+机甲人（hero_robot）：Hormelz「8 - Directional Drone Robot」免费包（蓝色款），
+https://hormelz.itch.io/8-directional-drone-robot ，CC0。
+机器人小兵（killbot）：patvanmackelberg「Killbot (8 Directional)」，
+https://opengameart.org/content/killbot-8-directional ，CC0。
+两者由 tools/robot_sprites.py 缩放、重排为 8 行（南起顺时针），受击 / 死亡帧由脚本生成。
+蜂群无人机（drone）：本项目原创，由 tools/drone_sprite.py 逐像素绘制。

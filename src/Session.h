@@ -11,9 +11,11 @@
 #include <vector>
 
 enum class ActorState { Idle, Run, Attack, Dodge, Hurt, Dead };
-enum class MonsterKind { Slime, Skeleton, Mushroom, Flyer, Caster };
-enum class HeroClass { Warrior, Sword, Mage };
+enum class MonsterKind { Slime, Skeleton, Mushroom, Flyer, Caster, Killbot };
+enum class HeroClass { Warrior, Sword, Mage, Robot };
 enum class EndReason { None, Death, Settle };
+
+inline constexpr int kRobotMagazine = 30;
 
 struct Item {
     int slot = 0;
@@ -43,6 +45,9 @@ struct Player {
     float attackT = 0.f;
     bool heavy = false;
     float heavyCharge = 0.f;
+    int ammo = kRobotMagazine;
+    // 长按换弹后到松开左键之前不再蓄力，松开也不开火
+    bool reloadLatch = false;
     int attackId = 0;
     float dodgeT = 0.f;
     float dodgeCd = 0.f;
@@ -80,6 +85,10 @@ struct Player {
     float mirrorCap = 40.f;
     float mirrorMaxHit = 28.f;
     float berserkT = 0.f;
+    float overloadT = 0.f;
+    float fieldT = 0.f;
+    float fieldTick = 0.f;
+    float medkitT = 0.f;
     int weaponAtk = 0;
     float speedBonus = 0.f;
     int critBonus = 0;
@@ -152,11 +161,29 @@ struct Bolt {
     bool hostile = false;
     bool crit = false;
     bool mage = false;
+    bool robot = false;
+    // >0 时为爆破弹：命中、撞墙或寿命耗尽时按此半径范围伤害
+    float blast = 0.f;
+    // 仅绘制时上移；判定仍按脚底平面，避免枪口高度让弹道与目标错开
+    float lift = 0.f;
     static constexpr int kTrail = 8;
     float trailX[kTrail]{};
     float trailY[kTrail]{};
     int trailLen = 0;
     float trailAcc = 0.f;
+};
+
+// 蜂群无人机：坐标在地面平面，飞行高度只影响绘制
+struct Drone {
+    float x = 0.f;
+    float y = 0.f;
+    float vx = 0.f;
+    float vy = 0.f;
+    float life = 0.f;
+    float age = 0.f;
+    int slot = 0;
+    float damage = 0.f;
+    bool crit = false;
 };
 
 struct Drop {
@@ -189,6 +216,7 @@ public:
     const Player& player() const { return player_; }
     const std::vector<Monster>& monsters() const { return monsters_; }
     const std::vector<Bolt>& bolts() const { return bolts_; }
+    const std::vector<Drone>& drones() const { return drones_; }
     const std::vector<Drop>& drops() const { return drops_; }
     const std::vector<FloatText>& floatTexts() const { return floats_; }
     const std::vector<AttackFx>& attackFx() const { return attackFx_; }
@@ -219,6 +247,7 @@ private:
     void castHeavySwordQi();
     void slashHostileBolts();
     void tryMove(float& x, float& y, float vx, float vy, float dt, float radius, int pass, float* moved);
+    int playerPass() const;
     void updatePlayer(float dt, const InputState& input, float mouseX, float mouseY);
     void updateMonsters(float dt);
     void updateBolts(float dt);
@@ -233,7 +262,22 @@ private:
     void castBurial(float& cooldown);
     void castMirrorShield(float& cooldown);
     void castMageHeal(float& cooldown);
-    void castBerserk(float& cooldown);
+    void castBerserk(float& cooldown, const QString& name);
+    void castOverload(float& cooldown);
+    void castMagField(float& cooldown);
+    void castMedkit(float& cooldown);
+    void updateRobotBuffs(float dt);
+    float skillCostMul() const { return player_.overloadT > 0.f ? 1.5f : 1.f; }
+    void fireRobotShot(float angleOffset, float baseDamage);
+    void castScatter();
+    void castMissile();
+    void castBoost();
+    void explodeBolt(const Bolt& bolt);
+    void castSwarm();
+    void updateDrones(float dt);
+    void explodeDrone(const Drone& drone, bool harmful);
+    void updateKillbot(Monster& monster, float dt, float dist);
+    bool rangedHero() const { return player_.hero == HeroClass::Mage || player_.hero == HeroClass::Robot; }
     void breakMirrorShield(const QString& reason);
     void toggleFlight();
     void updateFlight(float dt);
@@ -251,6 +295,7 @@ private:
     Player player_;
     std::vector<Monster> monsters_;
     std::vector<Bolt> bolts_;
+    std::vector<Drone> drones_;
     std::vector<Drop> drops_;
     std::vector<FloatText> floats_;
     std::vector<AttackFx> attackFx_;
