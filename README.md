@@ -19,11 +19,13 @@
 
 #### Windows
 
-**[Releases · v0.1.0 Windows 可玩包](https://github.com/Shadow-ye/Endless_disaster/releases/tag/v0.1.0)**
+**[Releases · 最新 Windows 包](https://github.com/Shadow-ye/Endless_disaster/releases/latest)**
 
-1. 下载 `EndlessDisaster-windows-x64.zip`  
+1. 下载 `EndlessDisaster-windows-x64.zip`（Windows 10 / 11 x64，自带 Qt 与音频解码）  
 2. 解压到任意目录  
 3. 双击 `EndlessDisaster.exe`
+
+旧的 v0.1.0 包在未安装 MSYS2 的电脑上背景音乐没有声音，请改用最新版本。
 
 #### Linux
 
@@ -64,46 +66,37 @@
 | 组件 | 版本要求 | 说明 |
 |------|----------|------|
 | CMake | ≥ 3.21 | 生成工程 |
-| C++ 编译器 | 支持 C++17 | 如 MSVC、MinGW（MSYS2 UCRT64） |
-| Qt6 | Widgets、Multimedia | 运行与部署依赖 |
+| C++ 编译器 | 支持 C++17 | Windows 用 Qt 官方 MinGW 13.1 |
+| Qt6 | 6.8.3，Widgets、Multimedia | Windows 用官方 Qt（自带精简 LGPL FFmpeg） |
+| Ninja | 任意 | 生成器 |
 
-#### 使用 MSYS2（示例）
+#### Windows：官方 Qt + MinGW（推荐）
+
+用 [aqtinstall](https://github.com/miurahr/aqtinstall) 安装到 E 盘（免登录 Qt 账号）：
 
 ```bash
-pacman -S mingw-w64-ucrt-x86_64-cmake mingw-w64-ucrt-x86_64-ninja \
-  mingw-w64-ucrt-x86_64-qt6-base mingw-w64-ucrt-x86_64-qt6-multimedia
+aqt install-qt windows desktop 6.8.3 win64_mingw -m qtmultimedia -O E:\Qt
+aqt install-tool windows desktop tools_mingw1310 qt.tools.win64_mingw1310 -O E:\Qt
 ```
 
-将 `C:/msys64/ucrt64/bin` 加入 `PATH`（以便找到 `cmake`、`ninja`、`windeployqt6`）。
-
-#### 使用官方 Qt 安装器
-
-安装 Qt 6.x，勾选 **Qt Widgets** 与 **Qt Multimedia**，并配置 CMake 能找到 `Qt6Config.cmake`（`CMAKE_PREFIX_PATH` 指向 Qt 安装目录）。
+不建议用 MSYS2 的 Qt 打 Windows 包：它的 FFmpeg 是 GPL 全功能版，依赖约 70 个额外 DLL（约 200 MB），漏拷任何一个 BGM 都会无声。
 
 ## 编译运行
 
 在仓库根目录执行：
 
-```bash
-cmake -S . -B build -G Ninja -DCMAKE_BUILD_TYPE=Release
-cmake --build build --config Release
+```powershell
+.\packaging\windows\build-windows.ps1
 ```
 
-成功后生成：
+脚本会用 `E:\Qt\6.8.3\mingw_64` 与 `E:\Qt\Tools\mingw1310_64` 编译到 `build-windows/`（路径可用 `-QtDir`、`-MinGWDir` 参数修改），构建后步骤复制资源（`assets/`、`BGM/`、`character-img/`、故事背景与图标）并用同一套 Qt 的 `windeployqt` 部署运行库（含 FFmpeg），最后生成：
 
 ```text
-build/EndlessDisaster.exe
+dist/EndlessDisaster/EndlessDisaster.exe      # 解压即玩的目录（约 78 MB）
+dist/EndlessDisaster-windows-x64.zip           # 用于发布（约 45 MB）
 ```
 
-构建后脚本会复制资源（`assets/`、`BGM/`、`character-img/`、故事背景与图标），并尽量用 `windeployqt` 部署 Qt 运行库。
-
-直接启动：
-
-```bash
-./build/EndlessDisaster.exe
-```
-
-若缺少 DLL，请确认 `PATH` 含 Qt 的 `bin`，或重新完整编译一次以触发部署步骤。
+脚本运行时会把 `PATH` 限定为官方 Qt 与 MinGW，避免混入 MSYS2 等其他 Qt 的 DLL。
 
 ### Linux 编译与打包
 
@@ -137,7 +130,7 @@ Windows 上可直接运行 `packaging\android\build-apk.ps1`，它会加载正�
 
 ### 自动打包
 
-推送 `v*` 标签时，GitHub Actions（`.github/workflows/packages.yml`）会自动编译 `.deb`、AppImage 与安卓 APK 并发布到 Release。
+推送 `v*` 标签时，GitHub Actions（`.github/workflows/packages.yml`）会自动编译 `.deb`、AppImage、安卓 APK 与 Windows zip 并发布到 Release。
 发布安卓包必须在仓库 Secrets 中配置 `ANDROID_KEYSTORE_BASE64`、`ANDROID_KEYSTORE_PASSWORD`、`ANDROID_KEY_ALIAS`，否则发布会失败。
 密钥的位置、配置方法与交接清单见 [docs/android-signing.md](docs/android-signing.md)。
 

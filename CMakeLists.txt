@@ -43,8 +43,9 @@ else()
 endif()
 
 if(WIN32)
+    # 必须与链接的 Qt 同一套：官方 Qt 的 windeployqt 会连同精简版 FFmpeg DLL 一起部署
     find_program(WINDEPLOYQT_EXECUTABLE NAMES windeployqt6 windeployqt
-        HINTS C:/msys64/ucrt64/bin)
+        PATHS "${QT6_INSTALL_PREFIX}/${QT6_INSTALL_BINS}" NO_DEFAULT_PATH)
 endif()
 
 if(NOT ANDROID)
@@ -73,7 +74,7 @@ endif()
 if(WINDEPLOYQT_EXECUTABLE)
     add_custom_command(TARGET EndlessDisaster POST_BUILD
         COMMAND ${WINDEPLOYQT_EXECUTABLE}
-                --release --no-translations --no-compiler-runtime
+                --release --no-translations --no-opengl-sw
                 \"$<TARGET_FILE:EndlessDisaster>\"
         COMMENT "Deploying Qt runtime (incl. Multimedia)"
     )
