@@ -316,17 +316,72 @@ jobs:
             android-menu.png
             logcat.txt
 
+  windows:
+    name: Windows zip (x64)
+    runs-on: windows-2022
+    defaults:
+      run:
+        shell: pwsh
+    steps:
+      - uses: actions/checkout@v4
+
+      # 官方 Qt 自带精简 LGPL FFmpeg，windeployqt 会一并部署；MinGW 13.1 与这套 Qt 配套
+      - uses: jurplel/install-qt-action@v4
+        with:
+          version: '6.8.3'
+          host: windows
+          target: desktop
+          arch: win64_mingw
+          modules: 'qtmultimedia'
+          tools: 'tools_mingw1310,qt.tools.win64_mingw1310 tools_ninja'
+          cache: true
+
+      - name: Build
+        run: |
+          $tools = if ($env:IQTA_TOOLS) { $env:IQTA_TOOLS } else { Join-Path $env:QT_ROOT_DIR '..\..\Tools' }
+          $env:PATH = (Join-Path $tools 'Ninja') + ';' + $env:PATH
+          ./packaging/windows/build-windows.ps1 -QtDir $env:QT_ROOT_DIR -MinGWDir (Join-Path $tools 'mingw1310_64') *>&1 |
+            Tee-Object -FilePath "$env:RUNNER_TEMP/build.log"
+          if (-not (Test-Path dist/EndlessDisaster-windows-x64.zip)) { throw "zip not produced" }
+
+      - name: Smoke test
+        run: |
+          # 只保留系统目录，确认包内 DLL 自给自足，且 FFmpeg 多媒体后端能加载（否则 BGM 无声）
+          $env:PATH = "$env:SystemRoot\System32;$env:SystemRoot"
+          $env:QT_LOGGING_RULES = 'qt.multimedia.plugin=true'
+          $log = "$env:RUNNER_TEMP/smoke.log"
+          $p = Start-Process dist/EndlessDisaster/EndlessDisaster.exe -RedirectStandardError $log -PassThru
+          Start-Sleep 10
+          $alive = -not $p.HasExited
+          if ($alive) { Stop-Process -Id $p.Id -Force }
+          Get-Content $log
+          if (-not $alive) { throw "EndlessDisaster.exe exited early with code $($p.ExitCode)" }
+          if (-not (Select-String -Path $log -Pattern 'Loading media backend "ffmpeg"' -Quiet) -or
+              (Select-String -Path $log -Pattern 'No QtMultimedia backends' -Quiet)) {
+            throw "FFmpeg multimedia backend did not load"
+          }
+
+      - uses: actions/upload-artifact@v4
+        with:
+          name: windows
+          path: dist/EndlessDisaster-windows-x64.zip
+
+      - name: Report failure
+        if: failure()
+        shell: bash
+        run: eval "$REPORT_FAILURE"
+
   release:
     name: Publish GitHub Release
     if: startsWith(github.ref, 'refs/tags/v')
-    needs: [deb, appimage, android]
+    needs: [deb, appimage, android, windows]
     runs-on: ubuntu-latest
     permissions:
       contents: write
     steps:
       - uses: actions/download-artifact@v4
         with:
-          pattern: '{deb,appimage,apk}'
+          pattern: '{deb,appimage,apk,windows}'
           path: dist
           merge-multiple: true
 
@@ -351,4 +406,4 @@ jobs:
 
             ## Windows
 
-            Windows 可玩包见 [v0.1.0](https://github.com/Shadow-ye/Endless_disaster/releases/tag/v0.1.0)。
+            - **`EndlessDisaster-windows-x64.zip`**：Windows 10 / 11（x64）可玩包，自带 Qt 与音频解码。解压到任意目录后双击 `EndlessDisaster.exe`。
