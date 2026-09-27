@@ -1,5 +1,5 @@
 cmake_minimum_required(VERSION 3.21)
-project(EndlessDisaster VERSION 0.2.0 LANGUAGES CXX)
+project(EndlessDisaster VERSION 0.3.0 LANGUAGES CXX)
 
 set(CMAKE_CXX_STANDARD 17)
 set(CMAKE_CXX_STANDARD_REQUIRED ON)
@@ -7,7 +7,7 @@ set(CMAKE_AUTOMOC ON)
 
 find_package(Qt6 REQUIRED COMPONENTS Widgets Multimedia)
 
-add_executable(EndlessDisaster
+qt_add_executable(EndlessDisaster
     src/main.cpp
     src/MainWindow.h
     src/MainWindow.cpp
@@ -29,7 +29,7 @@ add_executable(EndlessDisaster
     src/Platform.cpp
 )
 
-if(UNIX AND NOT APPLE)
+if(UNIX AND NOT APPLE AND NOT ANDROID)
     set_target_properties(EndlessDisaster PROPERTIES OUTPUT_NAME endless-disaster)
 endif()
 
@@ -47,6 +47,7 @@ if(WIN32)
         HINTS C:/msys64/ucrt64/bin)
 endif()
 
+if(NOT ANDROID)
 add_custom_command(TARGET EndlessDisaster POST_BUILD
     COMMAND ${CMAKE_COMMAND} -E make_directory $<TARGET_FILE_DIR:EndlessDisaster>/assets
     COMMAND ${CMAKE_COMMAND} -E copy_directory ${CMAKE_SOURCE_DIR}/assets/hero_mage $<TARGET_FILE_DIR:EndlessDisaster>/assets/hero_mage
@@ -67,6 +68,7 @@ add_custom_command(TARGET EndlessDisaster POST_BUILD
     COMMAND ${CMAKE_COMMAND} -E copy_directory ${CMAKE_SOURCE_DIR}/BGM $<TARGET_FILE_DIR:EndlessDisaster>/BGM
     COMMAND ${CMAKE_COMMAND} -E copy_if_different ${CMAKE_SOURCE_DIR}/assets/ART_CREDIT.txt $<TARGET_FILE_DIR:EndlessDisaster>/assets/ART_CREDIT.txt
 )
+endif()
 
 if(WINDEPLOYQT_EXECUTABLE)
     add_custom_command(TARGET EndlessDisaster POST_BUILD
@@ -77,7 +79,47 @@ if(WINDEPLOYQT_EXECUTABLE)
     )
 endif()
 
-if(UNIX AND NOT APPLE)
+if(ANDROID)
+    # 资源编进 qrc，程序里按 ":/assets/..." 读取
+    file(GLOB_RECURSE ED_ANDROID_DATA RELATIVE ${CMAKE_SOURCE_DIR} CONFIGURE_DEPENDS
+        assets/hero_mage/* assets/hero_sword/* assets/hero_warrior/*
+        assets/slime/* assets/skeleton/* assets/mushroom/* assets/flyer/*
+        assets/tiles/* assets/sfx/* assets/character-img/*.png BGM/*)
+    list(APPEND ED_ANDROID_DATA assets/ui/story_bg.png assets/ui/游戏图标.jpg)
+    qt_add_resources(EndlessDisaster gamedata PREFIX / BIG_RESOURCES FILES ${ED_ANDROID_DATA})
+
+    set_target_properties(EndlessDisaster PROPERTIES
+        QT_ANDROID_PACKAGE_NAME io.github.shadowye.endlessdisaster
+        QT_ANDROID_VERSION_NAME ${PROJECT_VERSION}
+        QT_ANDROID_VERSION_CODE 3
+        QT_ANDROID_TARGET_SDK_VERSION 34)
+
+    # 基于当前 Qt 自带的清单模板：锁定横屏、应用名与图标
+    set(ED_ANDROID_DIR ${CMAKE_BINARY_DIR}/android-package)
+    set(ED_MANIFEST_TEMPLATE ${QT6_INSTALL_PREFIX}/src/android/templates/AndroidManifest.xml)
+    if(EXISTS ${ED_MANIFEST_TEMPLATE})
+        file(READ ${ED_MANIFEST_TEMPLATE} ED_MANIFEST)
+        string(REPLACE "-- %%INSERT_APP_NAME%% --" "无尽之灾" ED_MANIFEST "${ED_MANIFEST}")
+        if(ED_MANIFEST MATCHES "android:screenOrientation=")
+            string(REGEX REPLACE "android:screenOrientation=\"[^\"]*\"" "android:screenOrientation=\"sensorLandscape\""
+                ED_MANIFEST "${ED_MANIFEST}")
+        else()
+            string(REPLACE "<activity" "<activity android:screenOrientation=\"sensorLandscape\"" ED_MANIFEST "${ED_MANIFEST}")
+        endif()
+        if(ED_MANIFEST MATCHES "android:icon=")
+            string(REGEX REPLACE "android:icon=\"[^\"]*\"" "android:icon=\"@drawable/icon\"" ED_MANIFEST "${ED_MANIFEST}")
+        else()
+            string(REPLACE "<application" "<application android:icon=\"@drawable/icon\"" ED_MANIFEST "${ED_MANIFEST}")
+        endif()
+        file(WRITE ${ED_ANDROID_DIR}/AndroidManifest.xml "${ED_MANIFEST}")
+        configure_file(packaging/linux/endless-disaster.png ${ED_ANDROID_DIR}/res/drawable/icon.png COPYONLY)
+        set_property(TARGET EndlessDisaster PROPERTY QT_ANDROID_PACKAGE_SOURCE_DIR ${ED_ANDROID_DIR})
+    else()
+        message(WARNING "Qt Android manifest template not found at ${ED_MANIFEST_TEMPLATE}; using Qt defaults")
+    endif()
+endif()
+
+if(UNIX AND NOT APPLE AND NOT ANDROID)
     include(GNUInstallDirs)
     set(ED_DATA_DIR ${CMAKE_INSTALL_DATADIR}/endless-disaster)
 

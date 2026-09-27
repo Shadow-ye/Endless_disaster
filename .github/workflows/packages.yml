@@ -1,0 +1,336 @@
+name: Packages
+
+on:
+  push:
+    branches: [main]
+    tags: ['v*']
+  pull_request:
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+env:
+  # 公开仓库的 Actions 日志需要登录才能看，失败时把关键报错转成公开可见的注解
+  REPORT_FAILURE: |
+    log="$RUNNER_TEMP/build.log"
+    [ -f "$log" ] || exit 0
+    msg=$(grep -nE "error|Error|FAILED|fatal|No such file|not found" "$log" | tail -n 30 | sed 's/%/%25/g; s/\r//g' | awk '{printf "%s%%0A", $0}')
+    [ -n "$msg" ] || msg=$(tail -n 30 "$log" | sed 's/%/%25/g; s/\r//g' | awk '{printf "%s%%0A", $0}')
+    echo "::error title=$GITHUB_JOB failed::$msg"
+
+jobs:
+  deb:
+    name: Debian package (.deb)
+    runs-on: ubuntu-22.04
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Install build dependencies
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y --no-install-recommends \
+            cmake ninja-build g++ dpkg-dev file \
+            qt6-base-dev qt6-multimedia-dev libgl1-mesa-dev
+
+      - name: Build
+        run: |
+          set -o pipefail
+          {
+            cmake -S . -B build -G Ninja -DCMAKE_BUILD_TYPE=Release -DCMAKE_INSTALL_PREFIX=/usr
+            cmake --build build
+          } 2>&1 | tee "$RUNNER_TEMP/build.log"
+
+      - name: Package
+        run: |
+          cd build
+          cpack -G DEB
+          dpkg-deb --info endless-disaster_*.deb
+          dpkg-deb --contents endless-disaster_*.deb
+
+      - name: Smoke test
+        run: |
+          sudo apt-get install -y ./build/endless-disaster_*.deb
+          test -f /usr/share/endless-disaster/assets/hero_warrior/idle.png
+          test -d /usr/share/endless-disaster/BGM
+          code=0
+          QT_QPA_PLATFORM=offscreen timeout 8 endless-disaster || code=$?
+          if [ "$code" -ne 124 ]; then echo "endless-disaster exited early with code $code"; exit 1; fi
+
+      - uses: actions/upload-artifact@v4
+        with:
+          name: deb
+          path: build/endless-disaster_*.deb
+
+      - name: Report failure
+        if: failure()
+        run: eval "$REPORT_FAILURE"
+
+  appimage:
+    name: AppImage (universal Linux)
+    runs-on: ubuntu-22.04
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Install system dependencies
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y --no-install-recommends \
+            ninja-build file patchelf desktop-file-utils libfuse2 \
+            libgl1-mesa-dev libegl1 libfontconfig1 libpulse0 \
+            libxkbcommon-x11-0 libxcb-cursor0 libxcb-icccm4 libxcb-image0 \
+            libxcb-keysyms1 libxcb-randr0 libxcb-render-util0 libxcb-shape0 \
+            libxcb-xinerama0 libxcb-xkb1
+
+      - uses: jurplel/install-qt-action@v4
+        with:
+          version: '6.8.*'
+          modules: 'qtmultimedia'
+          cache: true
+
+      - name: Build
+        run: |
+          set -o pipefail
+          {
+            cmake -S . -B build -G Ninja -DCMAKE_BUILD_TYPE=Release -DCMAKE_INSTALL_PREFIX=/usr
+            cmake --build build
+            DESTDIR="$PWD/AppDir" cmake --install build
+          } 2>&1 | tee "$RUNNER_TEMP/build.log"
+
+      - name: Download linuxdeploy
+        run: |
+          base=https://github.com/linuxdeploy
+          wget -q "$base/linuxdeploy/releases/download/continuous/linuxdeploy-x86_64.AppImage"
+          wget -q "$base/linuxdeploy-plugin-qt/releases/download/continuous/linuxdeploy-plugin-qt-x86_64.AppImage"
+          chmod +x linuxdeploy*.AppImage
+
+      - name: Build AppImage
+        env:
+          APPIMAGE_EXTRACT_AND_RUN: 1
+          EXTRA_PLATFORM_PLUGINS: libqoffscreen.so
+          LDAI_OUTPUT: EndlessDisaster-x86_64.AppImage
+          OUTPUT: EndlessDisaster-x86_64.AppImage
+        run: |
+          set -o pipefail
+          export QMAKE="$QT_ROOT_DIR/bin/qmake"
+          export LD_LIBRARY_PATH="$QT_ROOT_DIR/lib:${LD_LIBRARY_PATH:-}"
+          # 只打包 Qt 自带的 FFmpeg 后端，播放 m4a 不依赖系统 GStreamer
+          mkdir -p AppDir/usr/plugins/multimedia
+          cp "$QT_ROOT_DIR"/plugins/multimedia/libffmpegmediaplugin.so AppDir/usr/plugins/multimedia/
+          ./linuxdeploy-x86_64.AppImage --appdir AppDir \
+            --desktop-file AppDir/usr/share/applications/endless-disaster.desktop \
+            --icon-file AppDir/usr/share/icons/hicolor/256x256/apps/endless-disaster.png \
+            --deploy-deps-only AppDir/usr/plugins/multimedia \
+            --plugin qt --output appimage 2>&1 | tee -a "$RUNNER_TEMP/build.log"
+          ls -la *.AppImage
+
+      - name: Smoke test
+        run: |
+          chmod +x EndlessDisaster-x86_64.AppImage
+          code=0
+          QT_QPA_PLATFORM=offscreen APPIMAGE_EXTRACT_AND_RUN=1 timeout 8 ./EndlessDisaster-x86_64.AppImage || code=$?
+          if [ "$code" -ne 124 ]; then echo "AppImage exited early with code $code"; exit 1; fi
+
+      - uses: actions/upload-artifact@v4
+        with:
+          name: appimage
+          path: EndlessDisaster-x86_64.AppImage
+
+      - name: Report failure
+        if: failure()
+        run: eval "$REPORT_FAILURE"
+
+  android:
+    name: Android APK (arm64)
+    runs-on: ubuntu-22.04
+    env:
+      QT_VERSION: '6.8.3'
+      NDK_VERSION: '26.1.10909125'
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Install tools
+        run: sudo apt-get update && sudo apt-get install -y --no-install-recommends ninja-build
+
+      - uses: actions/setup-java@v4
+        with:
+          distribution: temurin
+          java-version: '17'
+
+      - name: Install Android SDK packages
+        run: |
+          yes | "$ANDROID_SDK_ROOT/cmdline-tools/latest/bin/sdkmanager" --install \
+            "ndk;$NDK_VERSION" "platforms;android-34" "build-tools;34.0.0" > /dev/null
+          echo "ANDROID_NDK_ROOT=$ANDROID_SDK_ROOT/ndk/$NDK_VERSION" >> "$GITHUB_ENV"
+
+      - name: Install Qt (host tools)
+        uses: jurplel/install-qt-action@v4
+        with:
+          version: ${{ env.QT_VERSION }}
+          host: linux
+          target: desktop
+          arch: linux_gcc_64
+          cache: true
+
+      - name: Install Qt (Android)
+        uses: jurplel/install-qt-action@v4
+        with:
+          version: ${{ env.QT_VERSION }}
+          host: linux
+          target: android
+          arch: android_arm64_v8a
+          modules: 'qtmultimedia'
+          cache: true
+
+      - name: Prepare signing key
+        env:
+          KEYSTORE_B64: ${{ secrets.ANDROID_KEYSTORE_BASE64 }}
+          KEYSTORE_PASS: ${{ secrets.ANDROID_KEYSTORE_PASSWORD }}
+          KEY_ALIAS: ${{ secrets.ANDROID_KEY_ALIAS }}
+        run: |
+          ks="$RUNNER_TEMP/release.keystore"
+          if [ -n "$KEYSTORE_B64" ]; then
+            echo "$KEYSTORE_B64" | base64 -d > "$ks"
+            pass="$KEYSTORE_PASS"
+            alias="${KEY_ALIAS:-endless}"
+          else
+            echo "::warning title=Android signing::未配置 ANDROID_KEYSTORE_BASE64，本次使用临时签名；升级安装需先卸载旧版"
+            pass="$(openssl rand -hex 16)"
+            alias=endless
+            keytool -genkeypair -keystore "$ks" -storepass "$pass" -keypass "$pass" -alias "$alias" \
+              -keyalg RSA -keysize 2048 -validity 10000 -dname "CN=Endless Disaster" > /dev/null
+          fi
+          echo "::add-mask::$pass"
+          {
+            echo "QT_ANDROID_KEYSTORE_PATH=$ks"
+            echo "QT_ANDROID_KEYSTORE_ALIAS=$alias"
+            echo "QT_ANDROID_KEYSTORE_STORE_PASS=$pass"
+            echo "QT_ANDROID_KEYSTORE_KEY_PASS=$pass"
+          } >> "$GITHUB_ENV"
+
+      - name: Build APK
+        run: |
+          set -o pipefail
+          host="$(dirname "$QT_ROOT_DIR")/gcc_64"
+          test -d "$host" || { echo "host Qt not found at $host" | tee "$RUNNER_TEMP/build.log"; exit 1; }
+          {
+            "$QT_ROOT_DIR/bin/qt-cmake" -S . -B build-android -G Ninja \
+              -DCMAKE_BUILD_TYPE=Release \
+              -DQT_HOST_PATH="$host" \
+              -DANDROID_SDK_ROOT="$ANDROID_SDK_ROOT" \
+              -DANDROID_NDK_ROOT="$ANDROID_NDK_ROOT" \
+              -DQT_ANDROID_SIGN_APK=ON
+            cmake --build build-android --target apk
+          } 2>&1 | tee "$RUNNER_TEMP/build.log"
+          apk=$(find build-android -name "*-signed.apk" | head -n 1)
+          if [ -z "$apk" ]; then find build-android -name "*.apk" | tee -a "$RUNNER_TEMP/build.log"; echo "signed apk not found" >> "$RUNNER_TEMP/build.log"; exit 1; fi
+          cp "$apk" EndlessDisaster-android-arm64.apk
+
+      - name: Inspect APK
+        run: |
+          tools="$ANDROID_SDK_ROOT/build-tools/34.0.0"
+          ls -la EndlessDisaster-android-arm64.apk
+          "$tools/apksigner" verify EndlessDisaster-android-arm64.apk
+          "$tools/aapt" dump badging EndlessDisaster-android-arm64.apk | grep -E "^(package|application-label|sdkVersion|targetSdkVersion|native-code)"
+          info=$("$tools/aapt" dump badging EndlessDisaster-android-arm64.apk | grep -E "^(package|application-label|native-code)" | tr '\n' ' ')
+          orient=$("$tools/aapt" dump xmltree EndlessDisaster-android-arm64.apk AndroidManifest.xml | grep -A0 -i "screenOrientation" | tr -s ' ' | tr '\n' ' ')
+          echo "::notice title=APK info::$info | $orient | size $(du -h EndlessDisaster-android-arm64.apk | cut -f1)"
+
+      - uses: actions/upload-artifact@v4
+        with:
+          name: apk
+          path: EndlessDisaster-android-arm64.apk
+
+      - name: Report failure
+        if: failure()
+        run: eval "$REPORT_FAILURE"
+
+  android-smoke:
+    name: Android emulator smoke test
+    needs: android
+    runs-on: ubuntu-latest
+    continue-on-error: true
+    steps:
+      - uses: actions/download-artifact@v4
+        with:
+          name: apk
+
+      - name: Enable KVM
+        run: |
+          echo 'KERNEL=="kvm", GROUP="kvm", MODE="0666", OPTIONS+="static_node=kvm"' | sudo tee /etc/udev/rules.d/99-kvm4all.rules
+          sudo udevadm control --reload-rules
+          sudo udevadm trigger --name-match=kvm
+
+      - name: Write smoke script
+        run: |
+          cat > smoke.sh <<'EOF'
+          pkg=io.github.shadowye.endlessdisaster
+          adb install -r EndlessDisaster-android-arm64.apk || { echo "::error title=Android smoke::adb install failed"; exit 1; }
+          adb logcat -c
+          adb shell monkey -p "$pkg" -c android.intent.category.LAUNCHER 1
+          sleep 40
+          pid=$(adb shell pidof "$pkg" | tr -d '\r')
+          adb exec-out screencap -p > android-menu.png
+          adb logcat -d > logcat.txt
+          qtlog=$(grep -iE " (qt|libEndless|EndlessDisaster)" logcat.txt | grep -viE "qt\.qpa\.fonts" | tail -n 25 | sed 's/%/%25/g; s/\r//g' | awk '{printf "%s%%0A", $0}')
+          if [ -n "$pid" ]; then
+            echo "::notice title=Android smoke: app running after 40s (pid $pid)::$qtlog"
+          else
+            crash=$(grep -E "FATAL|AndroidRuntime|DEBUG|libc|qt" logcat.txt | tail -n 40 | sed 's/%/%25/g; s/\r//g' | awk '{printf "%s%%0A", $0}')
+            echo "::error title=Android smoke: app not running::$crash"
+            exit 1
+          fi
+          EOF
+
+      - uses: reactivecircus/android-emulator-runner@v2
+        with:
+          api-level: 30
+          arch: x86_64
+          target: google_apis
+          emulator-options: -no-window -gpu swiftshader_indirect -noaudio -no-boot-anim -camera-back none
+          disable-animations: true
+          script: bash smoke.sh
+
+      - uses: actions/upload-artifact@v4
+        if: always()
+        with:
+          name: android-smoke
+          path: |
+            android-menu.png
+            logcat.txt
+
+  release:
+    name: Publish GitHub Release
+    if: startsWith(github.ref, 'refs/tags/v')
+    needs: [deb, appimage, android]
+    runs-on: ubuntu-latest
+    permissions:
+      contents: write
+    steps:
+      - uses: actions/download-artifact@v4
+        with:
+          pattern: '{deb,appimage,apk}'
+          path: dist
+          merge-multiple: true
+
+      - uses: softprops/action-gh-release@v2
+        with:
+          files: dist/*
+          body: |
+            ## Android
+
+            - **`EndlessDisaster-android-arm64.apk`**：安卓安装包（Android 9+，arm64 手机）。下载后点击安装，需允许「安装未知来源应用」。
+              操作：左下角摇杆移动并控制朝向；右下角「攻击」（点按轻击、长按重击），周围是闪避、防御、跳跃和技能；右上角「说明」「暂停」。
+
+            ## Linux
+
+            - **`EndlessDisaster-x86_64.AppImage`**：万能 Linux 包，自带 Qt 与音频解码，适用于大多数 x86_64 发行版（glibc ≥ 2.35，例如 Ubuntu 22.04+、Debian 12+、Fedora 36+）。
+              下载后执行 `chmod +x EndlessDisaster-x86_64.AppImage && ./EndlessDisaster-x86_64.AppImage`。
+              若提示缺少 FUSE，可安装 `libfuse2`，或加环境变量 `APPIMAGE_EXTRACT_AND_RUN=1` 运行。
+            - **`endless-disaster_*_amd64.deb`**：Debian / Ubuntu 安装包（Ubuntu 22.04+、Debian 12+）。
+              安装：`sudo apt install ./endless-disaster_*_amd64.deb`，之后在应用菜单中打开「无尽之灾」，或在终端运行 `endless-disaster`。
+              中文出现方块字时请安装 `fonts-noto-cjk`。
+
+            ## Windows
+
+            Windows 可玩包见 [v0.1.0](https://github.com/Shadow-ye/Endless_disaster/releases/tag/v0.1.0)。

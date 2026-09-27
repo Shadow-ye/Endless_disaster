@@ -2,8 +2,17 @@
 
 #include <QCoreApplication>
 #include <QDir>
+#include <QFile>
+#include <QFileInfo>
 #include <QFontDatabase>
 #include <QGuiApplication>
+#include <QStandardPaths>
+
+#ifdef Q_OS_ANDROID
+#include <QJniObject>
+
+#include <algorithm>
+#endif
 
 namespace {
 QString firstAvailable(const QStringList& preferred) {
@@ -18,11 +27,15 @@ QString firstAvailable(const QStringList& preferred) {
 }  // namespace
 
 QStringList Platform::dataRoots() {
+#ifdef Q_OS_ANDROID
+    return {QStringLiteral(":")};
+#else
     const QDir appDir(QCoreApplication::applicationDirPath());
     return {
         appDir.absolutePath(),
         QDir::cleanPath(appDir.absoluteFilePath(QStringLiteral("../share/endless-disaster"))),
     };
+#endif
 }
 
 QString Platform::uiFontFamily() {
@@ -53,4 +66,59 @@ QString Platform::titleFontFamily() {
         return found.isEmpty() ? uiFontFamily() : found;
     }();
     return family;
+}
+
+bool Platform::touchUi() {
+#ifdef Q_OS_ANDROID
+    return true;
+#else
+    static const bool forced = qEnvironmentVariableIntValue("ENDLESS_TOUCH_UI") != 0;
+    return forced;
+#endif
+}
+
+void Platform::configureDisplay() {
+#ifdef Q_OS_ANDROID
+    if (qEnvironmentVariableIsSet("QT_SCALE_FACTOR")) {
+        return;
+    }
+    const QJniObject resources = QJniObject::callStaticObjectMethod(
+        "android/content/res/Resources", "getSystem", "()Landroid/content/res/Resources;");
+    if (!resources.isValid()) {
+        return;
+    }
+    const QJniObject metrics = resources.callObjectMethod("getDisplayMetrics", "()Landroid/util/DisplayMetrics;");
+    if (!metrics.isValid()) {
+        return;
+    }
+    const int widthPx = metrics.getField<jint>("widthPixels");
+    const int heightPx = metrics.getField<jint>("heightPixels");
+    const float density = metrics.getField<jfloat>("density");
+    if (density <= 0.f) {
+        return;
+    }
+    // 界面按桌面 960×540 设计，手机横屏通常只有 360~430dp 高。
+    constexpr float kMinLogicalHeight = 560.f;
+    const float shortSideDp = float(std::min(widthPx, heightPx)) / density;
+    if (shortSideDp < kMinLogicalHeight) {
+        qputenv("QT_SCALE_FACTOR", QByteArray::number(shortSideDp / kMinLogicalHeight, 'f', 3));
+    }
+#endif
+}
+
+QUrl Platform::mediaUrl(const QString& path) {
+    if (!path.startsWith(QLatin1String(":/"))) {
+        return QUrl::fromLocalFile(path);
+    }
+    const QString target = QStandardPaths::writableLocation(QStandardPaths::CacheLocation)
+        + QStringLiteral("/media") + path.mid(1);
+    const QFileInfo cached(target);
+    if (!cached.exists() || cached.size() != QFileInfo(path).size()) {
+        QDir().mkpath(cached.absolutePath());
+        QFile::remove(target);
+        if (!QFile::copy(path, target)) {
+            return QUrl(QStringLiteral("qrc") + path);
+        }
+    }
+    return QUrl::fromLocalFile(target);
 }

@@ -12,6 +12,7 @@
 #include <QFile>
 #include <QFocusEvent>
 #include <QFontMetrics>
+#include <QGuiApplication>
 #include <QHBoxLayout>
 #include <QKeyEvent>
 #include <QLabel>
@@ -20,16 +21,20 @@
 #include <QFrame>
 #include <QPainter>
 #include <QPainterPath>
+#include <QPointingDevice>
 #include <QPushButton>
 #include <QRadialGradient>
 #include <QScrollArea>
+#include <QScroller>
 #include <QRandomGenerator>
 #include <QShortcut>
 #include <QSignalBlocker>
 #include <QSlider>
 #include <QTimer>
+#include <QTouchEvent>
 #include <QVector>
 #include <QVBoxLayout>
+#include <QtMath>
 
 #include <algorithm>
 #include <cmath>
@@ -65,6 +70,31 @@ QString findAssets() {
         }
     }
     return QCoreApplication::applicationDirPath() + "/assets";
+}
+
+float skillCooldownMax(int skill, float mul) {
+    switch (skill) {
+    case kSkillSpin:
+        return 2.8f * mul;
+    case kSkillMageBolt:
+        return 1.6f * mul;
+    case kSkillNova:
+        return 4.2f * mul;
+    case kSkillBurial:
+        return 9.f * mul;
+    case kSkillMirror:
+        return 15.f * mul;
+    case kSkillMageHeal:
+        return 20.f * mul;
+    case kSkillBerserk:
+        return 8.f * mul;
+    case kSkillSwordQi:
+        return 1.5f * mul;
+    case kSkillThrust:
+        return 1.0f * mul;
+    default:
+        return 0.f;
+    }
 }
 
 QColor tileColor(Tile tile) {
@@ -176,7 +206,11 @@ int GameWidget::frameIndex(const SpriteAnim& anim, float time, bool loop, float 
 GameWidget::GameWidget(QWidget* parent) : QWidget(parent) {
     setFocusPolicy(Qt::StrongFocus);
     setContextMenuPolicy(Qt::PreventContextMenu);
-    setMinimumSize(960, 540);
+    setAttribute(Qt::WA_AcceptTouchEvents, true);
+    touchUi_ = Platform::touchUi();
+    if (!touchUi_) {
+        setMinimumSize(960, 540);
+    }
     spritesOk_ = sprites_.load(findAssets());
     {
         const AppSettings settings = Storage::loadSettings();
@@ -279,13 +313,16 @@ GameWidget::GameWidget(QWidget* parent) : QWidget(parent) {
     guideText_->setTextFormat(Qt::RichText);
     guideText_->setAlignment(Qt::AlignLeft | Qt::AlignTop);
     guideText_->setFixedWidth(390);
-    auto* scroll = new QScrollArea(pausePanel_);
-    scroll->setWidget(guideText_);
-    scroll->setWidgetResizable(false);
-    scroll->setFixedSize(420, 280);
-    scroll->setFrameShape(QFrame::NoFrame);
-    scroll->setStyleSheet("QScrollArea { background: transparent; border: none; }");
-    pauseLayout->addWidget(scroll);
+    guideScroll_ = new QScrollArea(pausePanel_);
+    guideScroll_->setWidget(guideText_);
+    guideScroll_->setWidgetResizable(false);
+    guideScroll_->setFixedSize(420, 280);
+    guideScroll_->setFrameShape(QFrame::NoFrame);
+    guideScroll_->setStyleSheet("QScrollArea { background: transparent; border: none; }");
+    if (touchUi_) {
+        QScroller::grabGesture(guideScroll_->viewport(), QScroller::LeftMouseButtonGesture);
+    }
+    pauseLayout->addWidget(guideScroll_);
     pausePanel_->setObjectName("panel");
     pausePanel_->setStyleSheet("QWidget#panel { background: #14110f; border: 1px solid #5c3a32; } QLabel { background: transparent; color: #d7c7b4; border: none; }");
     pausePanel_->hide();
@@ -305,26 +342,26 @@ GameWidget::GameWidget(QWidget* parent) : QWidget(parent) {
 
     auto* esc = new QShortcut(QKeySequence(Qt::Key_Escape), this);
     esc->setContext(Qt::WidgetWithChildrenShortcut);
-    connect(esc, &QShortcut::activated, this, [this] {
-        if (session_.ended()) {
-            return;
-        }
-        setPaused(!session_.paused());
-        if (!session_.paused()) {
-            setFocus();
-        }
-    });
+    connect(esc, &QShortcut::activated, this, [this] { togglePause(); });
     auto* tab = new QShortcut(QKeySequence(Qt::Key_Tab), this);
     tab->setContext(Qt::WidgetWithChildrenShortcut);
-    connect(tab, &QShortcut::activated, this, [this] {
-        if (session_.ended()) {
+    connect(tab, &QShortcut::activated, this, [this] { togglePause(); });
+
+#ifdef Q_OS_ANDROID
+    connect(qApp, &QGuiApplication::applicationStateChanged, this, [this](Qt::ApplicationState state) {
+        const bool inGame = running_ && !session_.ended();
+        if (state == Qt::ApplicationActive) {
+            if (!(inGame && session_.paused())) {
+                Audio::instance().setBgmPaused(false);
+            }
             return;
         }
-        setPaused(!session_.paused());
-        if (!session_.paused()) {
-            setFocus();
+        if (inGame && !session_.paused()) {
+            setPaused(true);
         }
+        Audio::instance().setBgmPaused(true);
     });
+#endif
 
     timer_ = new QTimer(this);
     connect(timer_, &QTimer::timeout, this, [this] { tick(); });
@@ -362,10 +399,11 @@ void GameWidget::refreshGuide() {
     };
     QString html;
     html += "<p style='color:#e4d4c4; margin:0 0 4px 0;'><b>技能</b></p>";
-    html += block("鼠标", lightAttackText(), "");
-    html += block("长按", heavyAttackText(), "");
-    html += block("Q", guardSkillText(), "冷却 " + cdText(player.cdGuard));
-    html += block("E", healSkillText(), "冷却 " + cdText(player.cdHeal));
+    const bool touch = touchUi_;
+    html += block(touch ? "点按攻击" : "鼠标", lightAttackText(), "");
+    html += block(touch ? "长按攻击" : "长按", heavyAttackText(), "");
+    html += block(touch ? "按钮" : "Q", guardSkillText(), "冷却 " + cdText(player.cdGuard));
+    html += block(touch ? "按钮" : "E", healSkillText(), "冷却 " + cdText(player.cdHeal));
     auto skillExtra = [&](int skill, float cd) -> QString {
         if (skill == kSkillSwordQi) {
             return player.stacksQi < 3
@@ -392,11 +430,11 @@ void GameWidget::refreshGuide() {
         }
         return "冷却 " + cdText(cd);
     };
-    html += block("R", skillText(player.skillD), skillExtra(player.skillD, player.cdD));
-    html += block("F", skillText(player.skillF), skillExtra(player.skillF, player.cdF));
-    html += block("C", skillText(player.skillC), skillExtra(player.skillC, player.cdC));
+    html += block(touch ? "技能" : "R", skillText(player.skillD), skillExtra(player.skillD, player.cdD));
+    html += block(touch ? "技能" : "F", skillText(player.skillF), skillExtra(player.skillF, player.cdF));
+    html += block(touch ? "技能" : "C", skillText(player.skillC), skillExtra(player.skillC, player.cdC));
     if (player.hero == HeroClass::Mage && player.skillV >= 0) {
-        html += block("V", skillText(player.skillV), skillExtra(player.skillV, player.cdV));
+        html += block(touch ? "技能" : "V", skillText(player.skillV), skillExtra(player.skillV, player.cdV));
     }
     html += "<p style='color:#e4d4c4; margin:12px 0 4px 0;'><b>天赋</b></p>";
     html += progress("重手", player.damageDealt, 250.f, player.talentMight, talentMightDetail());
@@ -460,6 +498,20 @@ void GameWidget::setPaused(bool paused) {
     }
 }
 
+void GameWidget::togglePause() {
+    if (session_.ended()) {
+        return;
+    }
+    const bool pausing = !session_.paused();
+    if (pausing) {
+        releaseAllTouches();
+    }
+    setPaused(pausing);
+    if (!pausing) {
+        setFocus();
+    }
+}
+
 void GameWidget::saveGame() {
     if (Storage::saveContinue(session_.toJson())) {
         toast_ = "已存档";
@@ -503,7 +555,14 @@ void GameWidget::commitEnd() {
 }
 
 void GameWidget::layoutOverlays() {
+    constexpr int kGuideHeight = 280;
+    guideScroll_->setFixedHeight(kGuideHeight);
     pausePanel_->adjustSize();
+    const int overflow = pausePanel_->height() - (height() - 16);
+    if (overflow > 0) {
+        guideScroll_->setFixedHeight(std::max(80, kGuideHeight - overflow));
+        pausePanel_->adjustSize();
+    }
     pausePanel_->move((width() - pausePanel_->width()) / 2, (height() - pausePanel_->height()) / 2);
     resultPanel_->adjustSize();
     resultPanel_->move((width() - resultPanel_->width()) / 2, (height() - resultPanel_->height()) / 2);
@@ -540,22 +599,33 @@ void GameWidget::tick() {
     update();
 }
 
-int GameWidget::viewScale(int& originX, int& originY) const {
-    const int scale = std::max(1, std::min(width() / kViewW, height() / kViewH));
-    originX = (width() - kViewW * scale) / 2;
-    originY = (height() - kViewH * scale) / 2;
-    return scale;
+QRect GameWidget::viewRect() const {
+    int viewW = 0;
+    int viewH = 0;
+    if (touchUi_) {
+        // 手机屏幕尺寸五花八门，按比例铺满，不强求整数倍像素
+        const qreal scale = std::min(width() / qreal(kViewW), height() / qreal(kViewH));
+        viewW = int(kViewW * scale);
+        viewH = int(kViewH * scale);
+    } else {
+        const int scale = std::max(1, std::min(width() / kViewW, height() / kViewH));
+        viewW = kViewW * scale;
+        viewH = kViewH * scale;
+    }
+    return QRect((width() - viewW) / 2, (height() - viewH) / 2, viewW, viewH);
 }
 
 QPointF GameWidget::mouseWorld() const {
-    int originX = 0;
-    int originY = 0;
-    const int scale = viewScale(originX, originY);
+    const Player& player = session_.player();
+    if (touchUi_) {
+        return QPointF(player.x + aimDir_.x() * 48.0, player.y + aimDir_.y() * 48.0);
+    }
+    const QRect view = viewRect();
     const QPoint local = mapFromGlobal(QCursor::pos());
-    const float canvasX = (local.x() - originX) / float(scale);
-    const float canvasY = (local.y() - originY) / float(scale);
-    const float cameraX = session_.player().x - kViewW * 0.5f;
-    const float cameraY = session_.player().y - kViewH * 0.5f;
+    const float canvasX = (local.x() - view.x()) * float(kViewW) / float(view.width());
+    const float canvasY = (local.y() - view.y()) * float(kViewH) / float(view.height());
+    const float cameraX = player.x - kViewW * 0.5f;
+    const float cameraY = player.y - kViewH * 0.5f;
     return QPointF(cameraX + canvasX, cameraY + canvasY);
 }
 
@@ -625,6 +695,14 @@ void GameWidget::syncKey(int key, bool down) {
 }
 
 void GameWidget::keyPressEvent(QKeyEvent* event) {
+    if (event->key() == Qt::Key_Back) {
+        // Android 返回键：游戏中当作暂停，避免直接退出应用
+        if (running_ && !session_.ended()) {
+            togglePause();
+        }
+        event->accept();
+        return;
+    }
     if (event->isAutoRepeat()) {
         return;
     }
@@ -640,6 +718,15 @@ void GameWidget::keyReleaseEvent(QKeyEvent* event) {
 
 void GameWidget::mousePressEvent(QMouseEvent* event) {
     setFocus();
+    if (event->pointingDevice() && event->pointingDevice()->type() == QInputDevice::DeviceType::TouchScreen) {
+        return;
+    }
+#ifndef Q_OS_ANDROID
+    if (touchUi_ && !Platform::touchUi()) {
+        touchUi_ = false;
+        releaseAllTouches();
+    }
+#endif
     if (event->button() == Qt::LeftButton) {
         input_.lmb = true;
         input_.lmbEdge = true;
@@ -650,12 +737,322 @@ void GameWidget::mousePressEvent(QMouseEvent* event) {
 }
 
 void GameWidget::mouseReleaseEvent(QMouseEvent* event) {
+    if (event->pointingDevice() && event->pointingDevice()->type() == QInputDevice::DeviceType::TouchScreen) {
+        return;
+    }
     if (event->button() == Qt::LeftButton) {
         input_.lmb = false;
         input_.lmbUp = true;
     } else if (event->button() == Qt::RightButton) {
         input_.rmb = false;
     }
+}
+
+bool GameWidget::event(QEvent* event) {
+    switch (event->type()) {
+    case QEvent::TouchBegin:
+    case QEvent::TouchUpdate:
+    case QEvent::TouchEnd: {
+        auto* touch = static_cast<QTouchEvent*>(event);
+        if (event->type() == QEvent::TouchBegin && !touch->points().isEmpty()
+            && childAt(touch->points().first().position().toPoint())) {
+            // 落在暂停 / 结算面板上：交给 Qt 转成鼠标事件给按钮
+            event->ignore();
+            return false;
+        }
+        touchUi_ = true;
+        handleTouch(touch);
+        event->accept();
+        return true;
+    }
+    case QEvent::TouchCancel:
+        releaseAllTouches();
+        event->accept();
+        return true;
+    default:
+        return QWidget::event(event);
+    }
+}
+
+qreal GameWidget::touchUnit() const {
+    return std::min<qreal>(height(), width() * 0.5625);
+}
+
+QPointF GameWidget::stickHome() const {
+    const qreal u = touchUnit();
+    return QPointF(u * 0.22, height() - u * 0.22);
+}
+
+QVector<GameWidget::TouchButton> GameWidget::touchButtons() const {
+    const Player& player = session_.player();
+    const bool mage = player.hero == HeroClass::Mage;
+    const qreal u = touchUnit();
+    const qreal w = width();
+    const qreal h = height();
+    QVector<TouchButton> buttons;
+
+    // 右下：攻击居角，内圈闪避 / 防御 / 跳跃，外圈技能与恢复
+    const QPointF attack(w - u * 0.19, h - u * 0.19);
+    buttons.push_back({TouchControl::Attack, attack, u * 0.105, QStringLiteral("攻击")});
+    auto around = [&](qreal dist, qreal degrees) {
+        const qreal rad = qDegreesToRadians(degrees);
+        return QPointF(attack.x() + std::cos(rad) * dist, attack.y() + std::sin(rad) * dist);
+    };
+    const qreal small = u * 0.058;
+    const qreal inner = u * 0.215;
+    buttons.push_back({TouchControl::Dodge, around(inner, 180.0), small, mage ? QStringLiteral("闪现") : QStringLiteral("闪避")});
+    buttons.push_back({TouchControl::Guard, around(inner, 225.0), small, guardSkillText().name});
+    buttons.push_back({TouchControl::Jump, around(inner, 270.0), small, QStringLiteral("跳跃")});
+
+    QVector<QPair<TouchControl, QString>> outer = {
+        {TouchControl::SkillR, skillText(player.skillD).name},
+        {TouchControl::SkillF, skillText(player.skillF).name},
+        {TouchControl::SkillC, skillText(player.skillC).name},
+    };
+    if (mage && player.skillV >= 0) {
+        outer.push_back({TouchControl::SkillV, skillText(player.skillV).name});
+    }
+    outer.push_back({TouchControl::Heal, healSkillText().name});
+    for (int i = 0; i < outer.size(); ++i) {
+        const qreal degrees = 180.0 + 90.0 * i / (outer.size() - 1);
+        buttons.push_back({outer[i].first, around(u * 0.37, degrees), small, outer[i].second});
+    }
+
+    // 右上：Tab（技能与天赋说明）/ Esc（暂停）
+    const qreal top = u * 0.045;
+    buttons.push_back({TouchControl::Pause, QPointF(w - u * 0.075, u * 0.075), top, QStringLiteral("暂停")});
+    buttons.push_back({TouchControl::Guide, QPointF(w - u * 0.185, u * 0.075), top, QStringLiteral("说明")});
+    return buttons;
+}
+
+void GameWidget::handleTouch(QTouchEvent* event) {
+    const bool playing = running_ && !session_.ended();
+    for (const QEventPoint& point : event->points()) {
+        const int id = point.id();
+        const QPointF pos = point.position();
+        switch (point.state()) {
+        case QEventPoint::Pressed: {
+            if (!playing) {
+                break;
+            }
+            TouchControl hit = TouchControl::None;
+            for (const TouchButton& button : touchButtons()) {
+                if (QLineF(pos, button.center).length() <= button.radius * 1.2) {
+                    hit = button.control;
+                    break;
+                }
+            }
+            if (hit == TouchControl::Guide || hit == TouchControl::Pause) {
+                togglePause();
+                touchBindings_.insert(id, hit);
+            } else if (session_.paused()) {
+                break;
+            } else if (hit != TouchControl::None) {
+                touchBindings_.insert(id, hit);
+                pressTouch(hit, true);
+            } else if (stickTouchId_ < 0 && pos.x() < width() * 0.5) {
+                // 左半屏任意位置按下即出现摇杆
+                const qreal radius = touchUnit() * 0.12;
+                stickTouchId_ = id;
+                touchBindings_.insert(id, TouchControl::Stick);
+                stickCenter_ = QPointF(std::clamp(pos.x(), radius + 8.0, width() * 0.5),
+                    std::clamp(pos.y(), radius + 8.0, height() - radius - 8.0));
+                updateStick(pos);
+            }
+            break;
+        }
+        case QEventPoint::Updated:
+            if (id == stickTouchId_) {
+                updateStick(pos);
+            }
+            break;
+        case QEventPoint::Released: {
+            const TouchControl control = touchBindings_.take(id);
+            if (control == TouchControl::Stick) {
+                releaseStick();
+            } else if (control != TouchControl::Guide && control != TouchControl::Pause) {
+                pressTouch(control, false);
+            }
+            break;
+        }
+        default:
+            break;
+        }
+    }
+}
+
+void GameWidget::updateStick(const QPointF& pos) {
+    const qreal radius = touchUnit() * 0.12;
+    const QPointF delta = pos - stickCenter_;
+    const qreal dist = std::hypot(delta.x(), delta.y());
+    stickOffset_ = dist > radius ? delta * (radius / dist) : delta;
+    const qreal dead = radius * 0.18;
+    if (dist <= dead) {
+        input_.moveX = 0.f;
+        input_.moveY = 0.f;
+        return;
+    }
+    const QPointF dir = delta / dist;
+    const qreal strength = std::clamp((dist - dead) / (radius * 0.7 - dead), 0.0, 1.0);
+    input_.moveX = float(dir.x() * strength);
+    input_.moveY = float(dir.y() * strength);
+    aimDir_ = dir;
+}
+
+void GameWidget::releaseStick() {
+    stickTouchId_ = -1;
+    stickOffset_ = QPointF();
+    input_.moveX = 0.f;
+    input_.moveY = 0.f;
+}
+
+void GameWidget::pressTouch(TouchControl control, bool down) {
+    switch (control) {
+    case TouchControl::Attack:
+        input_.lmb = down;
+        if (down) {
+            input_.lmbEdge = true;
+        } else {
+            input_.lmbUp = true;
+        }
+        break;
+    case TouchControl::Dodge:
+        input_.rmb = down;
+        if (down) {
+            input_.rmbEdge = true;
+        }
+        break;
+    case TouchControl::Jump:
+        input_.spaceEdge = input_.spaceEdge || down;
+        break;
+    case TouchControl::Guard:
+        input_.qEdge = input_.qEdge || down;
+        break;
+    case TouchControl::Heal:
+        input_.eEdge = input_.eEdge || down;
+        break;
+    case TouchControl::SkillR:
+        input_.rEdge = input_.rEdge || down;
+        break;
+    case TouchControl::SkillF:
+        input_.fEdge = input_.fEdge || down;
+        break;
+    case TouchControl::SkillC:
+        input_.cEdge = input_.cEdge || down;
+        break;
+    case TouchControl::SkillV:
+        input_.vEdge = input_.vEdge || down;
+        break;
+    default:
+        break;
+    }
+}
+
+void GameWidget::releaseAllTouches() {
+    touchBindings_.clear();
+    releaseStick();
+    input_.clearHeld();
+}
+
+void GameWidget::drawTouchControls(QPainter& painter) {
+    const Player& player = session_.player();
+    const qreal u = touchUnit();
+    const float mul = session_.cooldownMul();
+    painter.save();
+    painter.setRenderHint(QPainter::Antialiasing, true);
+
+    const bool stickActive = stickTouchId_ >= 0;
+    const QPointF base = stickActive ? stickCenter_ : stickHome();
+    const qreal baseRadius = u * 0.12;
+    const qreal knobRadius = u * 0.055;
+    painter.setPen(QPen(QColor(228, 212, 188, stickActive ? 120 : 70), 2));
+    painter.setBrush(QColor(12, 10, 9, stickActive ? 110 : 70));
+    painter.drawEllipse(base, baseRadius, baseRadius);
+    painter.setPen(Qt::NoPen);
+    painter.setBrush(QColor(196, 92, 72, stickActive ? 200 : 120));
+    painter.drawEllipse(base + stickOffset_, knobRadius, knobRadius);
+
+    const QList<TouchControl> held = touchBindings_.values();
+    for (const TouchButton& button : touchButtons()) {
+        float remain = 0.f;
+        float maxCd = 0.f;
+        QString sub;
+        auto slot = [&](int skill, float cd) {
+            if (skill == kSkillSwordQi || skill == kSkillThrust) {
+                const int stacks = skill == kSkillSwordQi ? player.stacksQi : player.stacksThrust;
+                sub = QString("%1/3").arg(stacks);
+                if (stacks == 0) {
+                    remain = skill == kSkillSwordQi ? player.cdQiStack : player.cdThrustStack;
+                    maxCd = skillCooldownMax(skill, mul);
+                }
+            } else if (skill == kSkillFlight) {
+                sub = player.flying ? QStringLiteral("开") : QStringLiteral("关");
+            } else {
+                remain = cd;
+                maxCd = skillCooldownMax(skill, mul);
+            }
+        };
+        switch (button.control) {
+        case TouchControl::Guard:
+            remain = player.cdGuard;
+            maxCd = 3.6f * mul;
+            break;
+        case TouchControl::Heal:
+            remain = player.cdHeal;
+            maxCd = 5.5f * mul;
+            break;
+        case TouchControl::SkillR:
+            slot(player.skillD, player.cdD);
+            break;
+        case TouchControl::SkillF:
+            slot(player.skillF, player.cdF);
+            break;
+        case TouchControl::SkillC:
+            slot(player.skillC, player.cdC);
+            break;
+        case TouchControl::SkillV:
+            slot(player.skillV, player.cdV);
+            break;
+        default:
+            break;
+        }
+
+        const bool pressed = held.contains(button.control);
+        const QRectF circle(button.center.x() - button.radius, button.center.y() - button.radius,
+            button.radius * 2.0, button.radius * 2.0);
+        painter.setPen(QPen(pressed ? QColor(236, 170, 140, 230) : QColor(150, 100, 86, 200), 2));
+        painter.setBrush(pressed ? QColor(196, 92, 72, 180) : QColor(12, 10, 9, 150));
+        painter.drawEllipse(circle);
+
+        if (button.control == TouchControl::Attack && player.heavyCharge > 0.f) {
+            const float charge = std::clamp(player.heavyCharge / 0.42f, 0.f, 1.f);
+            painter.setPen(QPen(QColor(255, int(120 + 100 * charge), 60, 230), 4));
+            painter.setBrush(Qt::NoBrush);
+            painter.drawArc(circle.adjusted(3, 3, -3, -3), 90 * 16, -int(360 * 16 * charge));
+        }
+        const bool cooling = remain > 0.05f && maxCd > 0.01f;
+        if (cooling) {
+            painter.setPen(Qt::NoPen);
+            painter.setBrush(QColor(0, 0, 0, 150));
+            painter.drawPie(circle, 90 * 16, int(360 * 16 * std::clamp(remain / maxCd, 0.f, 1.f)));
+        }
+
+        QFont font(Platform::uiFontFamily());
+        font.setBold(true);
+        font.setPixelSize(std::max(9, int(button.radius * (button.label.size() > 2 ? 0.42 : 0.52))));
+        painter.setFont(font);
+        painter.setPen(cooling ? QColor(170, 158, 146) : QColor(240, 228, 212));
+        const bool withSub = !sub.isEmpty() && !cooling;
+        const QString text = cooling ? QString::number(remain, 'f', 1) : button.label;
+        painter.drawText(withSub ? circle.adjusted(0, 0, 0, -button.radius * 0.5) : circle, Qt::AlignCenter, text);
+        if (withSub) {
+            font.setPixelSize(std::max(8, int(button.radius * 0.34)));
+            painter.setFont(font);
+            painter.setPen(QColor(176, 190, 146));
+            painter.drawText(circle.adjusted(0, button.radius * 1.12, 0, 0), Qt::AlignHCenter | Qt::AlignTop, sub);
+        }
+    }
+    painter.restore();
 }
 
 void GameWidget::focusOutEvent(QFocusEvent* event) {
@@ -1079,12 +1476,16 @@ void GameWidget::drawWorld(QPainter& painter) {
     }
 }
 
-void GameWidget::drawRadar(QPainter& painter, int originX, int originY, int scale) {
+void GameWidget::drawRadar(QPainter& painter, const QRect& view) {
     const Player& player = session_.player();
     constexpr int kRadar = 112;
     constexpr float kRange = 320.f;
-    const int radarX = originX + kViewW * scale - kRadar - 12;
-    const int radarY = originY + 34;
+    const int radarX = view.x() + view.width() - kRadar - 12;
+    int radarY = view.y() + 34;
+    if (touchUi_) {
+        // 让出右上角的「说明 / 暂停」按钮
+        radarY = std::max(radarY, int(touchUnit() * 0.13) + 8);
+    }
     const QRectF plate(radarX, radarY, kRadar, kRadar);
     const QPointF center(plate.center());
     const float radius = kRadar * 0.5f - 4.f;
@@ -1190,9 +1591,11 @@ void GameWidget::paintEvent(QPaintEvent* event) {
     Q_UNUSED(event);
     QPainter painter(this);
     painter.fillRect(rect(), QColor(8, 7, 6));
-    int originX = 0;
-    int originY = 0;
-    const int scale = viewScale(originX, originY);
+    const QRect view = viewRect();
+    const int originX = view.x();
+    const int originY = view.y();
+    const int viewW = view.width();
+    const int viewH = view.height();
 
     QImage canvas(kViewW, kViewH, QImage::Format_ARGB32);
     canvas.fill(QColor(16, 14, 12));
@@ -1212,10 +1615,10 @@ void GameWidget::paintEvent(QPaintEvent* event) {
         grade.fillRect(canvas.rect(), vig);
     }
     painter.setRenderHint(QPainter::SmoothPixmapTransform, false);
-    painter.drawImage(QRect(originX, originY, kViewW * scale, kViewH * scale), canvas);
+    painter.drawImage(view, canvas);
 
     painter.setPen(QColor(90, 58, 50));
-    painter.drawRect(QRect(originX, originY, kViewW * scale - 1, kViewH * scale - 1));
+    painter.drawRect(view.adjusted(0, 0, -1, -1));
     const Player& player = session_.player();
     auto shown = [](float value) { return value <= 0.f ? 0 : int(std::ceil(value)); };
     painter.setFont(QFont(Platform::uiFontFamily(), 11));
@@ -1252,9 +1655,9 @@ void GameWidget::paintEvent(QPaintEvent* event) {
     talentLine(2, "轻身", float(player.dodgeCount), 6.f);
     talentLine(3, "熟练", float(player.skillCasts), 12.f);
     painter.setPen(QColor(228, 212, 188));
-    painter.drawText(QRect(originX, originY + 10, kViewW * scale, 22), Qt::AlignHCenter | Qt::AlignTop, formatTime(session_.time()));
-    painter.drawText(QRect(originX, originY + 10, kViewW * scale - 16, 22), Qt::AlignRight | Qt::AlignTop, QString("SCORE %1").arg(session_.score()));
-    drawRadar(painter, originX, originY, scale);
+    painter.drawText(QRect(originX, originY + 10, viewW, 22), Qt::AlignHCenter | Qt::AlignTop, formatTime(session_.time()));
+    painter.drawText(QRect(originX, originY + 10, viewW - 16, 22), Qt::AlignRight | Qt::AlignTop, QString("SCORE %1").arg(session_.score()));
+    drawRadar(painter, view);
     struct Chip {
         QString key;
         QString name;
@@ -1264,30 +1667,7 @@ void GameWidget::paintEvent(QPaintEvent* event) {
     };
     QVector<Chip> chips;
     const float mul = session_.cooldownMul();
-    auto skillCdMax = [&](int skill) -> float {
-        switch (skill) {
-        case kSkillSpin:
-            return 2.8f * mul;
-        case kSkillMageBolt:
-            return 1.6f * mul;
-        case kSkillNova:
-            return 4.2f * mul;
-        case kSkillBurial:
-            return 9.f * mul;
-        case kSkillMirror:
-            return 15.f * mul;
-        case kSkillMageHeal:
-            return 20.f * mul;
-        case kSkillBerserk:
-            return 8.f * mul;
-        case kSkillSwordQi:
-            return 1.5f * mul;
-        case kSkillThrust:
-            return 1.0f * mul;
-        default:
-            return 0.f;
-        }
-    };
+    auto skillCdMax = [&](int skill) { return skillCooldownMax(skill, mul); };
     auto pushSkillChip = [&](const QString& key, int skill, float slotCd) {
         Chip chip;
         chip.key = key;
@@ -1345,12 +1725,15 @@ void GameWidget::paintEvent(QPaintEvent* event) {
     if (player.hero == HeroClass::Mage && player.skillV >= 0) {
         pushSkillChip("V", player.skillV, player.cdV);
     }
+    if (touchUi_) {
+        chips.clear();
+    }
     const int chipW = 84;
     const int chipH = 38;
     const int gap = 6;
     const int rowW = int(chips.size()) * chipW + int(chips.size() - 1) * gap;
-    int chipX = originX + (kViewW * scale - rowW) / 2;
-    const int chipY = originY + kViewH * scale - chipH - 10;
+    int chipX = originX + (viewW - rowW) / 2;
+    const int chipY = originY + viewH - chipH - 10;
     painter.setFont(QFont(Platform::uiFontFamily(), 10));
     painter.setBrush(Qt::NoBrush);
     for (const Chip& chip : chips) {
@@ -1371,11 +1754,16 @@ void GameWidget::paintEvent(QPaintEvent* event) {
         chipX += chipW + gap;
     }
     painter.setPen(QColor(138, 122, 108));
-    painter.drawText(QRect(originX, chipY - 16, kViewW * scale, 14), Qt::AlignHCenter, "Tab 查看技能与天赋");
+    if (!touchUi_) {
+        painter.drawText(QRect(originX, chipY - 16, viewW, 14), Qt::AlignHCenter, "Tab 查看技能与天赋");
+    }
     if (toastTime_ > 0.f) {
-        painter.drawText(QRect(originX, originY + 40, kViewW * scale, 24), Qt::AlignHCenter, toast_);
+        painter.drawText(QRect(originX, originY + 40, viewW, 24), Qt::AlignHCenter, toast_);
     }
     if (!spritesOk_) {
-        painter.drawText(QRect(originX, originY + kViewH * scale - 28, kViewW * scale, 20), Qt::AlignCenter, "未找到像素图，当前用色块代替");
+        painter.drawText(QRect(originX, originY + viewH - 28, viewW, 20), Qt::AlignCenter, "未找到像素图，当前用色块代替");
+    }
+    if (touchUi_ && running_ && !session_.ended()) {
+        drawTouchControls(painter);
     }
 }

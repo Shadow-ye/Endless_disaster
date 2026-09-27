@@ -28,6 +28,7 @@
 #include <QPushButton>
 #include <QRadioButton>
 #include <QResizeEvent>
+#include <QScroller>
 #include <QShowEvent>
 #include <QSignalBlocker>
 #include <QSlider>
@@ -330,9 +331,12 @@ MainWindow::MainWindow(QWidget* parent) : QWidget(parent) {
     skillDetail_ = new QTextBrowser(prepareCard);
     skillDetail_->setOpenExternalLinks(false);
     skillDetail_->setOpenLinks(false);
-    skillDetail_->setMinimumHeight(140);
+    skillDetail_->setMinimumHeight(Platform::touchUi() ? 80 : 140);
     skillDetail_->setMaximumHeight(200);
     skillDetail_->setStyleSheet("QTextBrowser { background: transparent; border: none; color: #cbbfae; }");
+    if (Platform::touchUi()) {
+        QScroller::grabGesture(skillDetail_->viewport(), QScroller::LeftMouseButtonGesture);
+    }
     prepareLayout->addWidget(skillDetail_, 1);
 
     auto* go = new QPushButton("进入", prepareCard);

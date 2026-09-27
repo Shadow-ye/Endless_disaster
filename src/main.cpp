@@ -29,6 +29,7 @@ QString findGameIcon() {
 }  // namespace
 
 int main(int argc, char* argv[]) {
+    Platform::configureDisplay();
     QApplication app(argc, argv);
     QCoreApplication::setOrganizationName("EndlessDisaster");
     QCoreApplication::setApplicationName("EndlessDisaster");
@@ -61,6 +62,10 @@ int main(int argc, char* argv[]) {
     if (!iconPath.isEmpty()) {
         window.setWindowIcon(QIcon(iconPath));
     }
+#ifdef Q_OS_ANDROID
+    window.showFullScreen();
+#else
     window.show();
+#endif
     return app.exec();
 }

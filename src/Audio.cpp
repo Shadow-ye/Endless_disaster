@@ -1,4 +1,5 @@
 #include "Audio.h"
+#include "Platform.h"
 
 #include <QAudioOutput>
 #include <QCoreApplication>
@@ -85,7 +86,7 @@ void Audio::load(const QString& assetDir) {
         for (int i = 0; i < int(SfxId::Count); ++i) {
             state().pools[i].clear();
             state().cursor[i] = 0;
-            const QUrl url = QUrl::fromLocalFile(sfxDir + "/" + sfxFile(SfxId(i)));
+            const QUrl url = Platform::mediaUrl(sfxDir + "/" + sfxFile(SfxId(i)));
             for (int v = 0; v < kVoices; ++v) {
                 auto* effect = new QSoundEffect(QCoreApplication::instance());
                 effect->setSource(url);
@@ -210,7 +211,7 @@ void Audio::playBgm(BgmId id, bool loop) {
     }
     currentBgm_ = id;
     recoverPlaying_ = (id == BgmId::Recover);
-    state().bgm->setSource(QUrl::fromLocalFile(file));
+    state().bgm->setSource(Platform::mediaUrl(file));
     state().bgm->setLoops(loop ? QMediaPlayer::Infinite : 1);
     rebuildBgmVolume();
     state().bgm->play();

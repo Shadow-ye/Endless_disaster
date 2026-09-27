@@ -36,6 +36,18 @@
 
 中文出现方块字时，请安装系统中文字体（如 `fonts-noto-cjk`）。
 
+#### Android
+
+**[Releases · 最新安卓包](https://github.com/Shadow-ye/Endless_disaster/releases/latest)**：下载 `EndlessDisaster-android-arm64.apk` 安装（Android 9+，arm64 手机；需允许「安装未知来源应用」）。游戏固定横屏。
+
+| 位置 | 触屏操作 |
+|------|----------|
+| 左下 | 摇杆：移动，同时决定朝向 / 瞄准（左半屏任意处按下即出现） |
+| 右下 | 攻击（点按轻击、长按重击）；内圈闪避 / 防御 / 跳跃；外圈技能与恢复（冷却中显示剩余秒数） |
+| 右上 | 说明（技能与天赋，同 Tab）、暂停（同 Esc）；系统返回键也可暂停 |
+
+桌面版可用环境变量 `ENDLESS_TOUCH_UI=1` 预览触屏布局。
+
 也可按下方自行从源码编译。
 
 ## 环境配置
@@ -106,7 +118,22 @@ cmake --build build
 
 安装后程序位于 `/usr/bin/endless-disaster`，资源位于 `/usr/share/endless-disaster/`。
 
-推送 `v*` 标签时，GitHub Actions（`.github/workflows/linux.yml`）会自动编译 `.deb` 与 AppImage 并发布到 Release。
+### Android 编译
+
+需要 Qt 6.8（`android_arm64_v8a` 与同版本桌面 Qt）、Android SDK、NDK r26b、JDK 17：
+
+```bash
+<Qt>/6.8.3/android_arm64_v8a/bin/qt-cmake -S . -B build-android -G Ninja -DCMAKE_BUILD_TYPE=Release \
+  -DQT_HOST_PATH=<Qt>/6.8.3/gcc_64 -DANDROID_SDK_ROOT=<sdk> -DANDROID_NDK_ROOT=<sdk>/ndk/26.1.10909125
+cmake --build build-android --target apk
+```
+
+安卓版资源通过 Qt 资源系统（qrc）打包进 APK。
+
+### 自动打包
+
+推送 `v*` 标签时，GitHub Actions（`.github/workflows/packages.yml`）会自动编译 `.deb`、AppImage 与安卓 APK 并发布到 Release。
+在仓库 Secrets 中配置 `ANDROID_KEYSTORE_BASE64`、`ANDROID_KEYSTORE_PASSWORD`（可选 `ANDROID_KEY_ALIAS`）后，APK 会使用固定签名，便于覆盖升级。
 
 ## 游玩方法
 

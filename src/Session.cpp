@@ -1198,7 +1198,9 @@ void Session::updatePlayer(float dt, const InputState& input, float mouseX, floa
         if (input.s) {
             dodgeY += 1.f;
         }
-        if (dodgeX != 0.f || dodgeY != 0.f) {
+        dodgeX += input.moveX;
+        dodgeY += input.moveY;
+        if (lengthOf(dodgeX, dodgeY) > 0.01f) {
             const float dodgeLen = lengthOf(dodgeX, dodgeY);
             player_.dodgeX = dodgeX / dodgeLen;
             player_.dodgeY = dodgeY / dodgeLen;
@@ -1336,9 +1338,11 @@ void Session::updatePlayer(float dt, const InputState& input, float mouseX, floa
     if (input.s) {
         vy += 1.f;
     }
-    const bool moving = vx != 0.f || vy != 0.f;
-    if (moving) {
-        const float moveLen = lengthOf(vx, vy);
+    vx += input.moveX;
+    vy += input.moveY;
+    const float moveLen = lengthOf(vx, vy);
+    const bool moving = moveLen > 0.01f;
+    if (moveLen > 1.f) {
         vx /= moveLen;
         vy /= moveLen;
     }
