@@ -48,6 +48,8 @@
 
 桌面版可用环境变量 `ENDLESS_TOUCH_UI=1` 预览触屏布局。
 
+从 v0.3.1 起新版本可直接覆盖安装并保留存档；手机上若装的是 v0.3.0，需要先卸载一次（该版本使用临时签名）。详见 [安卓签名与覆盖安装说明](docs/android-signing.md)。
+
 也可按下方自行从源码编译。
 
 ## 环境配置
@@ -128,12 +130,16 @@ cmake --build build
 cmake --build build-android --target apk
 ```
 
+Windows 上可直接运行 `packaging\android\build-apk.ps1`，它会加载正式签名密钥，产物可与 Release 中的 APK 互相覆盖安装。
+设置了 `QT_ANDROID_KEYSTORE_*` 环境变量时 CMake 会自动签名，否则 APK 使用调试签名，不能覆盖正式包。
+
 安卓版资源通过 Qt 资源系统（qrc）打包进 APK。
 
 ### 自动打包
 
 推送 `v*` 标签时，GitHub Actions（`.github/workflows/packages.yml`）会自动编译 `.deb`、AppImage 与安卓 APK 并发布到 Release。
-在仓库 Secrets 中配置 `ANDROID_KEYSTORE_BASE64`、`ANDROID_KEYSTORE_PASSWORD`（可选 `ANDROID_KEY_ALIAS`）后，APK 会使用固定签名，便于覆盖升级。
+发布安卓包必须在仓库 Secrets 中配置 `ANDROID_KEYSTORE_BASE64`、`ANDROID_KEYSTORE_PASSWORD`、`ANDROID_KEY_ALIAS`，否则发布会失败。
+密钥的位置、配置方法与交接清单见 [docs/android-signing.md](docs/android-signing.md)。
 
 ## 游玩方法
 

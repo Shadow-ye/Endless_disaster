@@ -206,6 +206,9 @@ jobs:
             echo "$KEYSTORE_B64" | base64 -d > "$ks"
             pass="$KEYSTORE_PASS"
             alias="${KEY_ALIAS:-endless}"
+          elif [[ "$GITHUB_REF" == refs/tags/v* ]]; then
+            echo "::error title=Android signing::发布版本必须使用正式密钥：请在仓库 Secrets 中配置 ANDROID_KEYSTORE_BASE64 / ANDROID_KEYSTORE_PASSWORD / ANDROID_KEY_ALIAS（见 docs/android-signing.md）"
+            exit 1
           else
             [ "${{ matrix.abi }}" = arm64 ] && echo "::warning title=Android signing::未配置 ANDROID_KEYSTORE_BASE64，本次使用临时签名；升级安装需先卸载旧版"
             pass="$(openssl rand -hex 16)"
@@ -247,7 +250,8 @@ jobs:
           "$tools/aapt" dump badging "$APK_NAME" | grep -E "^(package|application-label|sdkVersion|targetSdkVersion|native-code)"
           info=$("$tools/aapt" dump badging "$APK_NAME" | grep -E "^(package|application-label|native-code)" | tr '\n' ' ')
           orient=$("$tools/aapt" dump xmltree "$APK_NAME" AndroidManifest.xml | grep -A0 -i "screenOrientation" | tr -s ' ' | tr '\n' ' ')
-          echo "::notice title=APK info (${{ matrix.abi }})::$info | $orient | size $(du -h "$APK_NAME" | cut -f1)"
+          cert=$("$tools/apksigner" verify --print-certs "$APK_NAME" | grep -m1 "SHA-256 digest" | awk '{print $NF}')
+          echo "::notice title=APK info (${{ matrix.abi }})::$info | $orient | size $(du -h "$APK_NAME" | cut -f1) | cert SHA-256 $cert"
 
       - uses: actions/upload-artifact@v4
         with:

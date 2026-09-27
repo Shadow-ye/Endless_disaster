@@ -1,5 +1,5 @@
 cmake_minimum_required(VERSION 3.21)
-project(EndlessDisaster VERSION 0.3.0 LANGUAGES CXX)
+project(EndlessDisaster VERSION 0.3.1 LANGUAGES CXX)
 
 set(CMAKE_CXX_STANDARD 17)
 set(CMAKE_CXX_STANDARD_REQUIRED ON)
@@ -88,11 +88,32 @@ if(ANDROID)
     list(APPEND ED_ANDROID_DATA assets/ui/story_bg.png assets/ui/游戏图标.jpg)
     qt_add_resources(EndlessDisaster gamedata PREFIX / BIG_RESOURCES FILES ${ED_ANDROID_DATA})
 
+    # 覆盖安装要求 versionCode 不减小：由版本号推出（0.3.1 -> 301），本地与 CI 同版本得到相同的值
+    set(ED_ANDROID_VERSION_CODE "" CACHE STRING "Override Android versionCode (empty: derived from project version)")
+    if(ED_ANDROID_VERSION_CODE)
+        set(ED_VERSION_CODE ${ED_ANDROID_VERSION_CODE})
+    else()
+        math(EXPR ED_VERSION_CODE
+            "${PROJECT_VERSION_MAJOR} * 10000 + ${PROJECT_VERSION_MINOR} * 100 + ${PROJECT_VERSION_PATCH}")
+    endif()
+    message(STATUS "Android versionName ${PROJECT_VERSION}, versionCode ${ED_VERSION_CODE}")
+
     set_target_properties(EndlessDisaster PROPERTIES
         QT_ANDROID_PACKAGE_NAME io.github.shadowye.endlessdisaster
         QT_ANDROID_VERSION_NAME ${PROJECT_VERSION}
-        QT_ANDROID_VERSION_CODE 3
+        QT_ANDROID_VERSION_CODE ${ED_VERSION_CODE}
         QT_ANDROID_TARGET_SDK_VERSION 34)
+
+    # 设置了 QT_ANDROID_KEYSTORE_PATH 等环境变量时自动用正式密钥签名，
+    # 否则 APK 带调试签名，无法覆盖安装正式包（见 docs/android-signing.md）
+    if(NOT DEFINED QT_ANDROID_SIGN_APK AND DEFINED ENV{QT_ANDROID_KEYSTORE_PATH})
+        set(QT_ANDROID_SIGN_APK ON)
+    endif()
+    if(QT_ANDROID_SIGN_APK)
+        message(STATUS "Android APK will be signed with $ENV{QT_ANDROID_KEYSTORE_PATH}")
+    else()
+        message(STATUS "Android APK uses the debug signature (QT_ANDROID_KEYSTORE_PATH not set)")
+    endif()
 
     # 基于当前 Qt 自带的清单模板：锁定横屏、应用名与图标
     set(ED_ANDROID_DIR ${CMAKE_BINARY_DIR}/android-package)

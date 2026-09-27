@@ -20,4 +20,13 @@ _char_preview/
 
 dist/
 *.zip
+build-android/
+
+# 安卓签名密钥与密码，绝不提交
+*.keystore
+*.jks
+*-signing.ps1
+*-github-secrets.txt
+
+.codegraph/
 
