@@ -99,7 +99,9 @@ struct Player {
     bool talentLight = false;
     bool talentMastery = false;
     bool talentGuide = false;
+    bool talentUnderdog = false;
     int worldKills = 0;
+    int underdogKills = 0;
     ActorState state = ActorState::Idle;
 };
 
@@ -265,6 +267,8 @@ private:
     int playerPass() const;
     void updatePlayer(float dt, const InputState& input, float mouseX, float mouseY);
     void updateMonsters(float dt);
+    // 画面外：跨过岩石和灌木直追，被水或迷宫墙挡住时再绕行，并按离画面的距离加速
+    bool chaseOffscreen(Monster& monster, float dt);
     void updateBolts(float dt);
     void castSlot(int skill, float& cooldown);
     void castSpin();

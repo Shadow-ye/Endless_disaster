@@ -335,7 +335,9 @@ bool Session::loadFrom(const QJsonObject& game) {
     player_.talentLight = p.value("talentLight").toBool();
     player_.talentMastery = p.value("talentMastery").toBool();
     player_.talentGuide = p.value("talentGuide").toBool();
+    player_.talentUnderdog = p.value("talentUnderdog").toBool();
     player_.worldKills = std::max(0, p.value("worldKills").toInt());
+    player_.underdogKills = std::max(0, p.value("underdogKills").toInt());
     player_.skillCasts = p.value("skillCasts").toInt();
     player_.stacksQi = p.value("stacksQi").toInt(3);
     player_.stacksThrust = p.value("stacksThrust").toInt(3);
@@ -445,7 +447,9 @@ QJsonObject Session::toJson() const {
     p.insert("talentLight", player_.talentLight);
     p.insert("talentMastery", player_.talentMastery);
     p.insert("talentGuide", player_.talentGuide);
+    p.insert("talentUnderdog", player_.talentUnderdog);
     p.insert("worldKills", player_.worldKills);
+    p.insert("underdogKills", player_.underdogKills);
     p.insert("skillCasts", player_.skillCasts);
     p.insert("stacksQi", player_.stacksQi);
     p.insert("stacksThrust", player_.stacksThrust);
@@ -582,6 +586,10 @@ void Session::checkTalents() {
     if (!player_.talentGuide && player_.worldKills >= 20) {
         player_.talentGuide = true;
         note("天赋：世界指引");
+    }
+    if (!player_.talentUnderdog && player_.underdogKills >= 10) {
+        player_.talentUnderdog = true;
+        note("天赋：以小博大");
     }
 }
 
@@ -734,6 +742,9 @@ void Session::hurtMonster(Monster& monster, float damage, float poiseDamage, boo
     }
     if (monster.kind == MonsterKind::Eye && ruin_.arrive >= 0.f) {
         return;
+    }
+    if (player_.talentUnderdog && monster.level > player_.level) {
+        damage *= 1.3f;
     }
     if (monster.defenseT > 0.f) {
         damage *= 0.4f;
@@ -2247,6 +2258,91 @@ void Session::updateBolts(float dt) {
     bolts_.erase(std::remove_if(bolts_.begin(), bolts_.end(), [](const Bolt& bolt) { return bolt.life <= 0.f; }), bolts_.end());
 }
 
+bool Session::chaseOffscreen(Monster& monster, float dt) {
+    const float dx = player_.x - monster.x;
+    const float dy = player_.y - monster.y;
+    const float dist = lengthOf(dx, dy);
+    if (dist < 1.f) {
+        return false;
+    }
+    // 比可视范围再出去一截才切换，避免贴着画面边缘来回变速度
+    const float outsideX = std::abs(dx) - (kViewW * 0.5f + 24.f);
+    const float outsideY = std::abs(dy) - (kViewH * 0.5f + 24.f);
+    const float outside = std::max(outsideX, outsideY);
+    if (outside <= 0.f) {
+        return false;
+    }
+
+    float base = 40.f;
+    if (monster.kind == MonsterKind::Skeleton) {
+        base = 36.f;
+    } else if (monster.kind == MonsterKind::Mushroom) {
+        base = 32.f;
+    } else if (monster.kind == MonsterKind::Flyer) {
+        base = 48.f;
+    } else if (monster.kind == MonsterKind::Caster) {
+        base = 34.f;
+    } else if (monster.kind == MonsterKind::Killbot) {
+        base = 38.f;
+    }
+    // 玩家奔跑约 96。离画面越远越快，贴回边缘时回到原本速度
+    const float speed = base + std::min(100.f, outside * 0.55f);
+    // 飞行怪只被迷宫墙挡住；其余画面外可以迈过岩石和灌木，水和迷宫墙仍然绕开
+    const int pass = monster.kind == MonsterKind::Flyer ? 2 : 1;
+
+    const float inv = 1.f / dist;
+    const float towardX = dx * inv;
+    const float towardY = dy * inv;
+    float dirX = towardX;
+    float dirY = towardY;
+    const float probe = kMonsterRadius + 2.f;
+    const auto probeBlocked = [&](float x, float y) {
+        return map_.blockedAt(monster.x + x * probe, monster.y + y * probe, kMonsterRadius, pass);
+    };
+    if (probeBlocked(towardX, towardY)) {
+        int nx = 0;
+        int ny = 0;
+        bool following = false;
+        if (paths_.nextTile(tileOf(monster.x), tileOf(monster.y), nx, ny)) {
+            const float gx = (nx + 0.5f) * kTile - monster.x;
+            const float gy = (ny + 0.5f) * kTile - monster.y;
+            const float gd = lengthOf(gx, gy);
+            if (gd > 0.5f && !probeBlocked(gx / gd, gy / gd)) {
+                dirX = gx / gd;
+                dirY = gy / gd;
+                following = true;
+            }
+        }
+        if (!following) {
+            // 寻路覆盖不到时贴着水或墙侧移；四周都堵住就后退，避免嵌在凹角里
+            const float turns[5][2] = {
+                {towardX * 0.7071f - towardY * 0.7071f, towardY * 0.7071f + towardX * 0.7071f},
+                {towardX * 0.7071f + towardY * 0.7071f, towardY * 0.7071f - towardX * 0.7071f},
+                {-towardY, towardX},
+                {towardY, -towardX},
+                {-towardX, -towardY},
+            };
+            float best = -2.f;
+            for (const auto& turn : turns) {
+                if (probeBlocked(turn[0], turn[1])) {
+                    continue;
+                }
+                const float score = turn[0] * towardX + turn[1] * towardY;
+                if (score > best) {
+                    best = score;
+                    dirX = turn[0];
+                    dirY = turn[1];
+                }
+            }
+        }
+    }
+
+    monster.attackT = 0.f;
+    tryMove(monster.x, monster.y, dirX * speed, dirY * speed, dt, kMonsterRadius, pass, nullptr);
+    monster.state = ActorState::Run;
+    return true;
+}
+
 void Session::updateMonsters(float dt) {
     for (Monster& monster : monsters_) {
         monster.animT += dt;
@@ -2263,16 +2359,20 @@ void Session::updateMonsters(float dt) {
             monster.state = ActorState::Dead;
             monster.animT = 0.f;
             if (!monster.scored) {
+                const bool overLevel = monster.level > player_.level;
                 const int gained = scoreFor(monster.kind, monster.level);
                 score_ += gained;
                 gainXp(gained);
                 monster.scored = true;
+                if (overLevel) {
+                    player_.underdogKills += 1;
+                }
                 if (monster.kind == MonsterKind::Eye) {
                     onEyeDefeated();
                 } else {
                     player_.worldKills += 1;
-                    checkTalents();
                 }
+                checkTalents();
             }
             continue;
         }
@@ -2303,6 +2403,10 @@ void Session::updateMonsters(float dt) {
 
         if (monster.stunT > 0.f) {
             monster.state = ActorState::Hurt;
+            continue;
+        }
+
+        if (chaseOffscreen(monster, dt)) {
             continue;
         }
 

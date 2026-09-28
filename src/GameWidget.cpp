@@ -568,6 +568,7 @@ void GameWidget::refreshGuide() {
     html += progress("轻身", float(player.dodgeCount), 6.f, player.talentLight, talentLightDetail());
     html += progress("熟练", float(player.skillCasts), 12.f, player.talentMastery, talentMasteryDetail());
     html += progress("世界指引", float(player.worldKills), 20.f, player.talentGuide, talentGuideDetail());
+    html += progress("以小博大", float(player.underdogKills), 10.f, player.talentUnderdog, talentUnderdogDetail());
     guideText_->setText(html);
     guideText_->adjustSize();
 }
@@ -2569,7 +2570,7 @@ void GameWidget::paintEvent(QPaintEvent* event) {
     painter.drawText(QRect(meta.x() + 6, meta.y() + 18, 198, 16), Qt::AlignVCenter | Qt::AlignLeft,
         QString("ARM %1    CRT %2%").arg(int(std::lround(player.armor))).arg(12 + player.critBonus));
     auto talentLine = [&](int index, const QString& name, float current, float need) {
-        painter.drawText(QRect(originX + 20, originY + 138 + index * 16, 200, 16), Qt::AlignLeft | Qt::AlignVCenter,
+        painter.drawText(QRect(originX + 20, originY + 138 + index * 13, 200, 14), Qt::AlignLeft | Qt::AlignVCenter,
             QString("%1  %2 / %3").arg(name).arg(int(std::min(current, need))).arg(int(need)));
     };
     painter.fillRect(QRect(originX + 14, originY + 136, 210, 84), QColor(12, 10, 9, 190));
@@ -2579,6 +2580,7 @@ void GameWidget::paintEvent(QPaintEvent* event) {
     talentLine(2, "轻身", float(player.dodgeCount), 6.f);
     talentLine(3, "熟练", float(player.skillCasts), 12.f);
     talentLine(4, "指引", float(player.worldKills), 20.f);
+    talentLine(5, "以小博大", float(player.underdogKills), 10.f);
     painter.setPen(QColor(228, 212, 188));
     painter.drawText(QRect(originX, originY + 10, viewW, 22), Qt::AlignHCenter | Qt::AlignTop, formatTime(session_.time()));
     if (touchUi_) {

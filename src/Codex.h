@@ -146,3 +146,7 @@ inline QString talentMasteryDetail() {
 inline QString talentGuideDetail() {
     return "击杀 20 个入侵世界的怪物后获得额外技能寻路，按 G 开关。";
 }
+
+inline QString talentUnderdogDetail() {
+    return "对等级高于自己的敌人，造成的伤害变为 1.3 倍。击杀 10 个等级超过自己的怪物后获得。";
+}
