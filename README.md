@@ -4,6 +4,8 @@
 
 > 怪物入侵世界，而你要做的是活下去。
 
+**[在线展示页](https://shadow-ye.github.io/Endless_disaster/)**：职业、怪物、迷宫遗迹与实机风格动画一览（源码在 `site/`，推送后由 GitHub Pages 自动部署）。
+
 ## 游戏介绍
 
 - **类型**：2D 俯视角肉鸽动作生存  
@@ -197,6 +199,7 @@ Windows 上可直接运行 `packaging\android\build-apk.ps1`，它会加载正�
 src/                 游戏逻辑与界面
 assets/              角色、怪物、音效、UI、地图块
 BGM/                 背景音乐
+site/                展示网页（GitHub Pages）
 CMakeLists.txt       构建与资源拷贝
 ```
 
