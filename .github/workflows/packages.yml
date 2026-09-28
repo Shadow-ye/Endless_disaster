@@ -346,7 +346,7 @@ jobs:
 
       - name: Smoke test
         run: |
-          # 只保留系统目录，确认包内 DLL 自给自足，且 FFmpeg 多媒体后端能加载（否则 BGM 无声）
+          # 只保留系统目录，确认包内 DLL 自给自足。Windows 指定系统播放器；FFmpeg 插件仍须出现在可用后端里。
           $env:PATH = "$env:SystemRoot\System32;$env:SystemRoot"
           $env:QT_LOGGING_RULES = 'qt.multimedia.plugin=true'
           $log = "$env:RUNNER_TEMP/smoke.log"
@@ -356,9 +356,10 @@ jobs:
           if ($alive) { Stop-Process -Id $p.Id -Force }
           Get-Content $log
           if (-not $alive) { throw "EndlessDisaster.exe exited early with code $($p.ExitCode)" }
-          if (-not (Select-String -Path $log -Pattern 'Loading media backend "ffmpeg"' -Quiet) -or
-              (Select-String -Path $log -Pattern 'No QtMultimedia backends' -Quiet)) {
-            throw "FFmpeg multimedia backend did not load"
+          if ((Select-String -Path $log -Pattern 'No QtMultimedia backends' -Quiet) -or
+              -not (Select-String -Path $log -Pattern 'Available backends .*"ffmpeg"' -Quiet) -or
+              -not (Select-String -Path $log -Pattern 'Loading media backend "windows"' -Quiet)) {
+            throw "Windows multimedia backend did not load, or the FFmpeg plugin is missing"
           }
 
       - uses: actions/upload-artifact@v4
