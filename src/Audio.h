@@ -43,6 +43,7 @@ public:
     int volume() const { return sfxVolumePercent_; }
 
     void play(SfxId id);
+    void playBurialVoice();
     void startBgmLoop();
     void ensureBgmLoop();
     void playRecoverBgm();

@@ -14,6 +14,7 @@ struct AppSettings {
     bool bgmEnabled = true;
     int bgmVolume = 55;
     bool autoAim = true;
+    bool autoAimDesktop = false;
 };
 
 class Storage {

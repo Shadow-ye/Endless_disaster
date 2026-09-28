@@ -59,6 +59,7 @@ struct InputState {
     bool cEdge = false;
     bool vEdge = false;
     bool bEdge = false;
+    bool gEdge = false;
     // 虚拟摇杆：方向 × 力度，长度 0~1
     float moveX = 0.f;
     float moveY = 0.f;
@@ -77,6 +78,7 @@ struct InputState {
         cEdge = false;
         vEdge = false;
         bEdge = false;
+        gEdge = false;
     }
 
     void clearHeld() {

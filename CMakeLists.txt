@@ -17,6 +17,8 @@ qt_add_executable(EndlessDisaster
     src/Session.cpp
     src/TileMap.h
     src/TileMap.cpp
+    src/MazeRuin.h
+    src/MazeRuin.cpp
     src/PathField.h
     src/PathField.cpp
     src/Sprites.h

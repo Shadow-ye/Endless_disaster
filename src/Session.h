@@ -2,6 +2,7 @@
 
 #include "Audio.h"
 #include "Codex.h"
+#include "MazeRuin.h"
 #include "PathField.h"
 #include "TileMap.h"
 #include "Types.h"
@@ -11,7 +12,7 @@
 #include <vector>
 
 enum class ActorState { Idle, Run, Attack, Dodge, Hurt, Dead };
-enum class MonsterKind { Slime, Skeleton, Mushroom, Flyer, Caster, Killbot };
+enum class MonsterKind { Slime, Skeleton, Mushroom, Flyer, Caster, Killbot, Eye };
 enum class HeroClass { Warrior, Sword, Mage, Robot };
 enum class EndReason { None, Death, Settle };
 
@@ -78,6 +79,7 @@ struct Player {
     float cdQiStack = 0.f;
     float cdThrustStack = 0.f;
     bool flying = false;
+    bool seekOn = false;
     float burialT = 0.f;
     float burialR = 96.f;
     float mirrorT = 0.f;
@@ -96,6 +98,8 @@ struct Player {
     bool talentStride = false;
     bool talentLight = false;
     bool talentMastery = false;
+    bool talentGuide = false;
+    int worldKills = 0;
     ActorState state = ActorState::Idle;
 };
 
@@ -221,11 +225,15 @@ public:
     const std::vector<FloatText>& floatTexts() const { return floats_; }
     const std::vector<AttackFx>& attackFx() const { return attackFx_; }
     const TileMap& map() const { return map_; }
+    const MazeRuin& ruin() const { return ruin_; }
+    float plazaRed() const { return plazaRed_; }
+    void cameraShake(float& sx, float& sy) const;
     float cooldownMul() const { return cdMul(); }
 
     void queueSfx(SfxId id);
     std::vector<SfxId> drainSfx();
     bool consumeRecoverBgm();
+    bool consumeVoidPrompt();
 
     int xpToNext() const;
 
@@ -246,6 +254,13 @@ private:
     void fireMageLaser();
     void castHeavySwordQi();
     void slashHostileBolts();
+    bool canBreakMazeWalls() const;
+    bool breakMazeWallTile(int tileX, int tileY);
+    void commitBrokenWalls(bool broken);
+    void breakMazeWallsCone(float range, float minDot);
+    void breakMazeWallsRadius(float x, float y, float radius);
+    void breakMazeWallsBeam(float range, float halfWidth);
+    void applyEyeLevel();
     void tryMove(float& x, float& y, float vx, float vy, float dt, float radius, int pass, float* moved);
     int playerPass() const;
     void updatePlayer(float dt, const InputState& input, float mouseX, float mouseY);
@@ -288,9 +303,19 @@ private:
     void spawn(float dt);
     void spawnMonster(MonsterKind kind, float x, float y);
     bool findSpawn(float& x, float& y);
+    bool spawnRuin();
+    void dismissRuin();
+    void syncRuinMap();
+    void updateRuin(float dt);
+    void spawnEye(float hp = -1.f, float shield = -1.f, int level = -1);
+    void updateEye(Monster& monster, float dt);
+    void onEyeDefeated();
+    void triggerShake();
+    void restoreRuin(const QJsonObject& game);
     Monster* findMonster(int id);
 
     TileMap map_{1};
+    MazeRuin ruin_;
     PathField paths_;
     Player player_;
     std::vector<Monster> monsters_;
@@ -321,5 +346,10 @@ private:
     bool bgmRecoverArmed_ = false;
     bool recoverBgmPending_ = false;
     float hpTrack_ = -1.f;
+    float shakeT_ = 0.f;
+    float plazaRed_ = 0.f;
+    bool voidPrompt_ = false;
+    int eyeDefeats_ = 0;
+    int wallStrikeId_ = -1;
     uint32_t nextRand();
 };

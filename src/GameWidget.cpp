@@ -124,6 +124,12 @@ QColor tileColor(Tile tile) {
         return QColor(46, 120, 52);
     case Tile::Grass:
         return QColor(86, 158, 62);
+    case Tile::MazeWall:
+        return QColor(42, 36, 40);
+    case Tile::MazeFloor:
+        return QColor(70, 60, 54);
+    case Tile::Plaza:
+        return QColor(92, 42, 40);
     }
     return QColor(86, 158, 62);
 }
@@ -246,7 +252,11 @@ GameWidget::GameWidget(QWidget* parent) : QWidget(parent) {
         Audio::instance().setSfxVolume(settings.sfxVolume);
         Audio::instance().setBgmEnabled(settings.bgmEnabled);
         Audio::instance().setBgmVolume(settings.bgmVolume);
+#if (defined(Q_OS_WIN) || defined(Q_OS_LINUX)) && !defined(Q_OS_ANDROID)
+        autoAim_ = touchUi_ ? settings.autoAim : settings.autoAimDesktop;
+#else
         autoAim_ = settings.autoAim;
+#endif
     }
 
     pausePanel_ = new QWidget(this);
@@ -408,6 +418,35 @@ GameWidget::GameWidget(QWidget* parent) : QWidget(parent) {
     confirmPanel_->setStyleSheet("QWidget#panel { background: #14110f; border: 1px solid #5c3a32; } QLabel { background: transparent; color: #d7c7b4; border: none; }");
     confirmPanel_->hide();
 
+    voidPanel_ = new QWidget(this);
+    auto* voidLayout = new QVBoxLayout(voidPanel_);
+    voidLayout->setContentsMargins(18, 18, 18, 18);
+    auto* voidText = new QLabel(QStringLiteral("呵呵呵，还要在这没有希望的世界中挣扎吗？万灵寂灭才是这个世界的归宿。"), voidPanel_);
+    voidText->setWordWrap(true);
+    voidText->setAlignment(Qt::AlignCenter);
+    voidText->setMinimumWidth(400);
+    voidLayout->addWidget(voidText);
+    auto* voidRow = new QHBoxLayout();
+    auto* voidEnd = new QPushButton(QStringLiteral("结束本轮游戏"), voidPanel_);
+    auto* voidStay = new QPushButton(QStringLiteral("继续本轮游戏"), voidPanel_);
+    voidRow->addWidget(voidEnd);
+    voidRow->addWidget(voidStay);
+    voidLayout->addLayout(voidRow);
+    connect(voidEnd, &QPushButton::clicked, this, [this] {
+        voidPanel_->hide();
+        session_.settle();
+        commitEnd();
+    });
+    connect(voidStay, &QPushButton::clicked, this, [this] {
+        voidPanel_->hide();
+        session_.setPaused(false);
+        Audio::instance().setBgmPaused(false);
+        setFocus();
+    });
+    voidPanel_->setObjectName("panel");
+    voidPanel_->setStyleSheet("QWidget#panel { background: #14110f; border: 1px solid #5c3a32; } QLabel { background: transparent; color: #d7c7b4; border: none; }");
+    voidPanel_->hide();
+
     auto* esc = new QShortcut(QKeySequence(Qt::Key_Escape), this);
     esc->setContext(Qt::WidgetWithChildrenShortcut);
     connect(esc, &QShortcut::activated, this, [this] { togglePause(); });
@@ -445,6 +484,7 @@ void GameWidget::leaveToMenu() {
     pausePanel_->hide();
     resultPanel_->hide();
     confirmPanel_->hide();
+    voidPanel_->hide();
     releaseAllTouches();
     emit returnedToMenu();
 }
@@ -473,6 +513,12 @@ void GameWidget::refreshGuide() {
     const bool touch = touchUi_;
     html += block(touch ? "点按攻击" : "鼠标", lightAttackText(), "");
     html += block(touch ? "长按攻击" : "长按", heavyAttackText(), "");
+#if (defined(Q_OS_WIN) || defined(Q_OS_LINUX)) && !defined(Q_OS_ANDROID)
+    if (!touch) {
+        html += block("中键", SkillText{QStringLiteral("索敌"), QStringLiteral("开关自动锁定附近敌人，朝向和攻击转向锁定目标。")},
+            autoAim_ ? QStringLiteral("开启") : QStringLiteral("关闭"));
+    }
+#endif
     html += block(touch ? "按钮" : "Q", guardSkillText(), "冷却 " + cdText(player.cdGuard));
     html += block(touch ? "按钮" : "E", healSkillText(), "冷却 " + cdText(player.cdHeal));
     auto skillExtra = [&](int skill, float cd) -> QString {
@@ -488,6 +534,9 @@ void GameWidget::refreshGuide() {
         }
         if (skill == kSkillFlight || skill == kSkillJetpack) {
             return player.flying ? QString("飞行中") : QString("关");
+        }
+        if (skill == kSkillSeek) {
+            return player.seekOn ? QString("开启") : QString("关闭");
         }
         if (skill == kSkillMirror) {
             return player.mirrorT > 0.f
@@ -510,11 +559,15 @@ void GameWidget::refreshGuide() {
     if (player.hero == HeroClass::Mage && player.skillV >= 0) {
         html += block(touch ? "技能" : "V", skillText(player.skillV), skillExtra(player.skillV, player.cdV));
     }
+    if (player.talentGuide) {
+        html += block(touch ? "技能" : "G", skillText(kSkillSeek), skillExtra(kSkillSeek, 0.f));
+    }
     html += "<p style='color:#e4d4c4; margin:12px 0 4px 0;'><b>天赋</b></p>";
     html += progress("重手", player.damageDealt, 250.f, player.talentMight, talentMightDetail());
     html += progress("远行", player.distanceMoved, 900.f, player.talentStride, talentStrideDetail());
     html += progress("轻身", float(player.dodgeCount), 6.f, player.talentLight, talentLightDetail());
     html += progress("熟练", float(player.skillCasts), 12.f, player.talentMastery, talentMasteryDetail());
+    html += progress("世界指引", float(player.worldKills), 20.f, player.talentGuide, talentGuideDetail());
     guideText_->setText(html);
     guideText_->adjustSize();
 }
@@ -530,6 +583,7 @@ void GameWidget::startNew(HeroClass hero, int skillD, int skillF, int skillC, in
     pausePanel_->hide();
     resultPanel_->hide();
     confirmPanel_->hide();
+    voidPanel_->hide();
     Audio::instance().startBgmLoop();
     setFocus();
 }
@@ -543,6 +597,7 @@ void GameWidget::startContinue(const QJsonObject& game) {
     pausePanel_->hide();
     resultPanel_->hide();
     confirmPanel_->hide();
+    voidPanel_->hide();
     Audio::instance().startBgmLoop();
     setFocus();
 }
@@ -576,7 +631,7 @@ void GameWidget::setPaused(bool paused) {
 }
 
 void GameWidget::togglePause() {
-    if (session_.ended()) {
+    if (session_.ended() || (voidPanel_ && voidPanel_->isVisible())) {
         return;
     }
     const bool pausing = !session_.paused();
@@ -600,12 +655,25 @@ void GameWidget::saveGame() {
 }
 
 void GameWidget::askSettle() {
-    if (session_.ended()) {
+    if (session_.ended() || (voidPanel_ && voidPanel_->isVisible())) {
         return;
     }
     pausePanel_->hide();
     confirmPanel_->show();
     confirmPanel_->raise();
+    layoutOverlays();
+}
+
+void GameWidget::showVoidPrompt() {
+    if (!running_ || session_.ended() || (voidPanel_ && voidPanel_->isVisible())) {
+        return;
+    }
+    session_.setPaused(true);
+    Audio::instance().setBgmPaused(true);
+    pausePanel_->hide();
+    confirmPanel_->hide();
+    voidPanel_->show();
+    voidPanel_->raise();
     layoutOverlays();
 }
 
@@ -617,6 +685,7 @@ void GameWidget::commitEnd() {
     session_.setPaused(false);
     pausePanel_->hide();
     confirmPanel_->hide();
+    voidPanel_->hide();
     releaseAllTouches();
     Records records = Storage::loadRecords();
     if (session_.time() > records.bestTime) {
@@ -653,6 +722,8 @@ void GameWidget::layoutOverlays() {
     resultPanel_->move((width() - resultPanel_->width()) / 2, (height() - resultPanel_->height()) / 2);
     confirmPanel_->adjustSize();
     confirmPanel_->move((width() - confirmPanel_->width()) / 2, (height() - confirmPanel_->height()) / 2);
+    voidPanel_->adjustSize();
+    voidPanel_->move((width() - voidPanel_->width()) / 2, (height() - voidPanel_->height()) / 2);
 }
 
 void GameWidget::tick() {
@@ -678,7 +749,10 @@ void GameWidget::tick() {
         }
     }
     if (session_.ended()) {
+        session_.consumeVoidPrompt();
         commitEnd();
+    } else if (session_.consumeVoidPrompt()) {
+        showVoidPrompt();
     }
     const QString notice = session_.pullNotice();
     if (!notice.isEmpty()) {
@@ -706,11 +780,11 @@ QRect GameWidget::viewRect() const {
 
 QPointF GameWidget::mouseWorld() const {
     const Player& player = session_.player();
+    if (const Monster* target = aimTarget()) {
+        return QPointF(target->x, target->y);
+    }
     if (touchUi_) {
         // 只决定朝向（攻击 / 技能方向）；闪避方向仍取摇杆的移动方向
-        if (const Monster* target = aimTarget()) {
-            return QPointF(target->x, target->y);
-        }
         return QPointF(player.x + aimDir_.x() * 48.0, player.y + aimDir_.y() * 48.0);
     }
     const QRect view = viewRect();
@@ -782,6 +856,11 @@ void GameWidget::syncKey(int key, bool down) {
             input_.bEdge = true;
         }
         break;
+    case Qt::Key_G:
+        if (down) {
+            input_.gEdge = true;
+        }
+        break;
     default:
         break;
     }
@@ -827,6 +906,11 @@ void GameWidget::mousePressEvent(QMouseEvent* event) {
         input_.rmb = true;
         input_.rmbEdge = true;
     }
+#if (defined(Q_OS_WIN) || defined(Q_OS_LINUX)) && !defined(Q_OS_ANDROID)
+    else if (event->button() == Qt::MiddleButton && running_ && !session_.ended() && !session_.paused()) {
+        toggleAutoAim();
+    }
+#endif
 }
 
 void GameWidget::mouseReleaseEvent(QMouseEvent* event) {
@@ -1123,15 +1207,33 @@ void GameWidget::toggleAutoAim() {
     autoAim_ = !autoAim_;
     aimTargetId_ = -1;
     AppSettings settings = Storage::loadSettings();
+#if (defined(Q_OS_WIN) || defined(Q_OS_LINUX)) && !defined(Q_OS_ANDROID)
+    if (!touchUi_) {
+        settings.autoAimDesktop = autoAim_;
+    } else {
+        settings.autoAim = autoAim_;
+    }
+#else
     settings.autoAim = autoAim_;
+#endif
     Storage::saveSettings(settings);
     toast_ = autoAim_ ? QStringLiteral("自动索敌：开") : QStringLiteral("自动索敌：关");
     toastTime_ = 1.2f;
 }
 
+bool GameWidget::aimLockEnabled() const {
+#if defined(Q_OS_ANDROID)
+    return touchUi_ && autoAim_;
+#elif (defined(Q_OS_WIN) || defined(Q_OS_LINUX))
+    return autoAim_;
+#else
+    return touchUi_ && autoAim_;
+#endif
+}
+
 void GameWidget::updateAimTarget() {
     constexpr float kLockRange = 160.f;
-    if (!touchUi_ || !autoAim_) {
+    if (!aimLockEnabled()) {
         aimTargetId_ = -1;
         return;
     }
@@ -1142,6 +1244,9 @@ void GameWidget::updateAimTarget() {
     float nearestDist = kLockRange;
     for (const Monster& monster : session_.monsters()) {
         if (monster.state == ActorState::Dead) {
+            continue;
+        }
+        if (monster.kind == MonsterKind::Eye && session_.ruin().arrive >= 0.f) {
             continue;
         }
         const float dist = std::hypot(monster.x - player.x, monster.y - player.y);
@@ -1162,7 +1267,7 @@ void GameWidget::updateAimTarget() {
 }
 
 const Monster* GameWidget::aimTarget() const {
-    if (!touchUi_ || !autoAim_ || aimTargetId_ < 0) {
+    if (!aimLockEnabled() || aimTargetId_ < 0) {
         return nullptr;
     }
     for (const Monster& monster : session_.monsters()) {
@@ -1350,8 +1455,11 @@ void GameWidget::drawAnim(QPainter& painter, const SpriteAnim& anim, ActorState 
 
 void GameWidget::drawWorld(QPainter& painter) {
     const Player& player = session_.player();
-    const float cameraX = player.x - kViewW * 0.5f;
-    const float cameraY = player.y - kViewH * 0.5f;
+    float shakeX = 0.f;
+    float shakeY = 0.f;
+    session_.cameraShake(shakeX, shakeY);
+    const float cameraX = player.x - kViewW * 0.5f + shakeX;
+    const float cameraY = player.y - kViewH * 0.5f + shakeY;
     painter.translate(-cameraX, -cameraY);
 
     const int x0 = tileOf(cameraX) - 1;
@@ -1361,8 +1469,24 @@ void GameWidget::drawWorld(QPainter& painter) {
     for (int y = y0; y <= y1; ++y) {
         for (int x = x0; x <= x1; ++x) {
             const Tile tile = session_.map().at(x, y);
-            if (tile == Tile::Rock || tile == Tile::Bush) {
-                drawGround(painter, sprites_.tiles, spritesOk_, Tile::Grass, x, y, session_.map());
+            const QRect dest(x * kTile, y * kTile, kTile, kTile);
+            if (tile == Tile::MazeFloor) {
+                painter.fillRect(dest, QColor(228, 206, 156));
+                painter.setPen(QColor(186, 154, 104));
+                painter.drawLine(dest.topLeft(), dest.topRight());
+                painter.drawLine(dest.topLeft(), dest.bottomLeft());
+            } else if (tile == Tile::Plaza) {
+                painter.fillRect(dest, QColor(176, 72, 62));
+                painter.setPen(QColor(120, 40, 38));
+                painter.drawLine(dest.topLeft(), dest.bottomRight());
+            } else if (tile == Tile::MazeWall) {
+                painter.fillRect(dest, QColor(16, 18, 28));
+            } else if (tile == Tile::Rock || tile == Tile::Bush) {
+                if (tile == Tile::Rock && session_.ruin().inPlaza(x, y)) {
+                    painter.fillRect(dest, QColor(176, 72, 62));
+                } else {
+                    drawGround(painter, sprites_.tiles, spritesOk_, Tile::Grass, x, y, session_.map());
+                }
             } else {
                 drawGround(painter, sprites_.tiles, spritesOk_, tile, x, y, session_.map());
             }
@@ -1371,6 +1495,21 @@ void GameWidget::drawWorld(QPainter& painter) {
     for (int y = y0; y <= y1; ++y) {
         for (int x = x0; x <= x1; ++x) {
             const Tile tile = session_.map().at(x, y);
+            if (tile == Tile::MazeWall) {
+                const QRect block(x * kTile, y * kTile - 12, kTile, kTile + 12);
+                painter.setPen(Qt::NoPen);
+                painter.setBrush(QColor(8, 10, 16, 170));
+                painter.drawRect(QRect(x * kTile + 1, y * kTile + 10, kTile - 2, 5));
+                painter.setBrush(QColor(22, 26, 40));
+                painter.setPen(QPen(QColor(6, 8, 14), 1));
+                painter.drawRect(block);
+                painter.setPen(Qt::NoPen);
+                painter.setBrush(QColor(168, 188, 214));
+                painter.drawRect(QRect(x * kTile, y * kTile - 12, kTile, 4));
+                painter.setBrush(QColor(70, 82, 108));
+                painter.drawRect(QRect(x * kTile, y * kTile - 8, kTile, 2));
+                continue;
+            }
             if (tile != Tile::Rock && tile != Tile::Bush) {
                 continue;
             }
@@ -1385,6 +1524,43 @@ void GameWidget::drawWorld(QPainter& painter) {
                 painter.setBrush(tile == Tile::Rock ? QColor(40, 40, 44) : QColor(30, 110, 40));
                 painter.drawEllipse(prop);
             }
+        }
+    }
+
+    if (const MazeRuin& ruin = session_.ruin(); ruin.active) {
+        int outX = 0;
+        int outY = 0;
+        if (ruin.entranceX == 0) {
+            outX = -1;
+        } else if (ruin.entranceX == MazeRuin::kSize - 1) {
+            outX = 1;
+        } else if (ruin.entranceY == 0) {
+            outY = -1;
+        } else {
+            outY = 1;
+        }
+        const int doorX = ruin.originX + ruin.entranceX;
+        const int doorY = ruin.originY + ruin.entranceY;
+        auto paintApproach = [&](int tx, int ty, const QColor& fill) {
+            const QRect dest(tx * kTile, ty * kTile, kTile, kTile);
+            painter.fillRect(dest, fill);
+            painter.setPen(QColor(150, 110, 60));
+            painter.drawLine(dest.topLeft(), dest.topRight());
+            painter.drawLine(dest.topLeft(), dest.bottomLeft());
+        };
+        for (int step = 1; step <= 4; ++step) {
+            paintApproach(doorX + outX * step, doorY + outY * step, QColor(214, 176, 104));
+        }
+        paintApproach(doorX, doorY, QColor(255, 228, 150));
+        const int sideX = outY;
+        const int sideY = -outX;
+        painter.setPen(Qt::NoPen);
+        painter.setBrush(QColor(255, 196, 70));
+        for (int side = -1; side <= 1; side += 2) {
+            const float px = (doorX + outX + sideX * side) * kTile + kTile * 0.5f;
+            const float py = (doorY + outY + sideY * side) * kTile + kTile * 0.5f;
+            painter.drawRect(QRectF(px - 2.f, py - 8.f, 4.f, 12.f));
+            painter.drawEllipse(QRectF(px - 3.f, py - 11.f, 6.f, 6.f));
         }
     }
 
@@ -1572,11 +1748,121 @@ void GameWidget::drawWorld(QPainter& painter) {
             drawFacingMarker(painter, guardCx, guardCy, player.facingX, player.facingY, kGuardR, attackMarkerColor(player));
         } else {
             const Monster& monster = *item.monster;
+            if (monster.kind == MonsterKind::Eye && session_.ruin().arrive == 0.f) {
+                continue;
+            }
             drawShadow(painter, monster.x, monster.y);
             const SpriteAnim* anim = &sprites_.slimeIdle;
             float scale = 1.f;
             float lift = 0.f;
-            if (monster.kind == MonsterKind::Slime) {
+            bool custom = false;
+            if (monster.kind == MonsterKind::Eye) {
+                custom = true;
+                const MazeRuin& ruin = session_.ruin();
+                const float bob = monster.state == ActorState::Dead ? 0.f : std::sin(monster.animT * 1.6f) * 3.f;
+                float fade = monster.state == ActorState::Dead ? 0.35f : 1.f;
+                float descend = 0.f;
+                if (ruin.arrive > 0.f) {
+                    const float u = 1.f - std::clamp(ruin.arrive / 1.7f, 0.f, 1.f);
+                    const float eased = u * u * (3.f - 2.f * u);
+                    descend = (1.f - eased) * 120.f;
+                    fade *= 0.2f + 0.8f * eased;
+                    painter.setPen(QPen(QColor(120, 12, 18, int(160 * (1.f - eased))), 3));
+                    painter.drawLine(QPointF(monster.x, monster.y - 170.f), QPointF(monster.x, monster.y - 20.f));
+                    painter.setBrush(Qt::NoBrush);
+                    const float ring = 16.f + (1.f - eased) * 74.f;
+                    painter.setPen(QPen(QColor(150, 24, 30, int(200 * eased)), 2));
+                    painter.drawEllipse(QRectF(monster.x - ring, monster.y - ring * 0.32f, ring * 2.f, ring * 0.64f));
+                }
+                const float rx = 42.f;
+                const float ry = 30.f;
+                const float cy = monster.y - 30.f + bob - descend;
+                const bool flash = monster.hurtT > 0.1f;
+                const bool broken = monster.stunT > 0.f;
+                float gazeX = monster.facingX;
+                float gazeY = monster.facingY;
+                if (ruin.arrive > 0.f) {
+                    gazeX = 0.f;
+                    gazeY = 0.7f;
+                } else if (broken) {
+                    gazeX *= 0.15f;
+                    gazeY = 0.45f;
+                }
+                const float eyeX = monster.x + gazeX * 12.f;
+                const float eyeY = cy + gazeY * 8.f;
+                painter.setPen(Qt::NoPen);
+                painter.setBrush(QColor(28, 0, 6, int(90 * fade)));
+                painter.drawEllipse(QRectF(monster.x - 58.f, cy - 44.f, 116.f, 88.f));
+                painter.setPen(QPen(QColor(48, 6, 10, int(230 * fade)), 3));
+                painter.setBrush(flash ? QColor(255, 236, 220, int(235 * fade)) : QColor(214, 186, 164, int(240 * fade)));
+                painter.drawEllipse(QRectF(monster.x - rx, cy - ry, rx * 2.f, ry * 2.f));
+                painter.setPen(QPen(QColor(120, 16, 22, int(170 * fade)), 1.4f));
+                painter.drawLine(QPointF(monster.x - 34.f, cy - 6.f), QPointF(monster.x - 16.f, cy + 2.f));
+                painter.drawLine(QPointF(monster.x - 30.f, cy + 8.f), QPointF(monster.x - 14.f, cy + 4.f));
+                painter.drawLine(QPointF(monster.x + 34.f, cy - 6.f), QPointF(monster.x + 16.f, cy + 2.f));
+                painter.drawLine(QPointF(monster.x + 30.f, cy + 8.f), QPointF(monster.x + 14.f, cy + 4.f));
+                painter.setPen(Qt::NoPen);
+                painter.setBrush(QColor(110, 8, 16, int((broken ? 140 : 245) * fade)));
+                painter.drawEllipse(QRectF(eyeX - 16.f, eyeY - 16.f, 32.f, 32.f));
+                painter.setBrush(QColor(12, 0, 4, int(250 * fade)));
+                painter.drawRoundedRect(QRectF(eyeX - 2.6f, eyeY - 13.f, 5.2f, broken ? 16.f : 26.f), 2.2, 2.2);
+                if (broken) {
+                    painter.setPen(QPen(QColor(40, 8, 10, int(200 * fade)), 2));
+                    painter.drawLine(QPointF(monster.x - 28.f, cy - 4.f), QPointF(monster.x + 28.f, cy + 2.f));
+                }
+                painter.setPen(Qt::NoPen);
+                painter.setBrush(QColor(180, 20, 28, int(200 * fade)));
+                painter.drawEllipse(QRectF(monster.x - 46.f, cy + 8.f, 10.f, 7.f));
+                painter.drawEllipse(QRectF(monster.x + 36.f, cy + 10.f, 8.f, 6.f));
+                const float barW = 118.f;
+                const float barH = 9.f;
+                const float barX = monster.x - barW * 0.5f;
+                const float barY = cy - ry - 28.f;
+                const QRectF plate(barX - 8.f, barY - 20.f, barW + 16.f, 18.f);
+                painter.setPen(QPen(QColor(168, 36, 32, int(230 * fade)), 1));
+                painter.setBrush(QColor(28, 6, 8, int(220 * fade)));
+                painter.drawRoundedRect(plate, 3, 3);
+                painter.setFont(QFont(Platform::uiFontFamily(), 11, QFont::Bold));
+                painter.setPen(QColor(0, 0, 0, int(210 * fade)));
+                painter.drawText(plate.adjusted(0, 1, -36, 1), Qt::AlignCenter, QStringLiteral("克苏鲁之眼"));
+                painter.setPen(QColor(255, 196, 150, int(255 * fade)));
+                painter.drawText(plate.adjusted(0, 0, -36, 0), Qt::AlignCenter, QStringLiteral("克苏鲁之眼"));
+                const QRectF tag(plate.right() - 34.f, plate.y() + 2.f, 30.f, 14.f);
+                painter.setPen(QPen(QColor(92, 28, 32, int(220 * fade)), 1));
+                painter.setBrush(QColor(18, 6, 8, int(230 * fade)));
+                painter.drawRoundedRect(tag, 2, 2);
+                painter.setFont(QFont(Platform::uiFontFamily(), 8, QFont::Bold));
+                painter.setPen(QColor(176, 96, 88, int(255 * fade)));
+                painter.drawText(tag, Qt::AlignCenter, QStringLiteral("投影"));
+                painter.setPen(Qt::NoPen);
+                painter.setBrush(QColor(0, 0, 0, 220));
+                painter.drawRoundedRect(QRectF(barX - 2, barY - 2, barW + 4, barH + 4), 2, 2);
+                painter.setBrush(QColor(48, 10, 12));
+                painter.drawRect(QRectF(barX, barY, barW, barH));
+                const float ratio = monster.maxHp <= 0.f ? 0.f : std::clamp(monster.hp / monster.maxHp, 0.f, 1.f);
+                painter.setBrush(QColor(210, 28, 32));
+                painter.drawRect(QRectF(barX, barY, barW * ratio, barH));
+                if (monster.maxShield > 0.f) {
+                    painter.setBrush(QColor(150, 196, 230));
+                    painter.drawRect(QRectF(barX, barY - 4, barW * std::clamp(monster.shield / monster.maxShield, 0.f, 1.f), 3));
+                }
+                const float poiseRatio = monster.maxPoise <= 0.f ? 0.f : std::clamp(monster.poise / monster.maxPoise, 0.f, 1.f);
+                painter.setBrush(QColor(24, 16, 8));
+                painter.drawRect(QRectF(barX, barY + barH + 2, barW, 4));
+                if (broken) {
+                    painter.setBrush(QColor(90, 42, 28));
+                    painter.drawRect(QRectF(barX, barY + barH + 2, barW * std::clamp(monster.stunT / 1.6f, 0.f, 1.f), 4));
+                } else {
+                    painter.setBrush(QColor(196, 148, 48));
+                    painter.drawRect(QRectF(barX, barY + barH + 2, barW * poiseRatio, 4));
+                }
+                painter.setFont(QFont(Platform::uiFontFamily(), 8, QFont::Bold));
+                const int hpShown = monster.hp <= 0.f ? 0 : int(std::ceil(monster.hp));
+                const QString hpText = QString::number(hpShown);
+                painter.setPen(QColor(255, 236, 220));
+                painter.drawText(QRectF(barX, barY - 1, barW, barH + 2), Qt::AlignCenter, hpText);
+                lift = 8.f;
+            } else if (monster.kind == MonsterKind::Slime) {
                 anim = monster.state == ActorState::Dead ? &sprites_.slimeDeath : monster.state == ActorState::Run ? &sprites_.slimeWalk : &sprites_.slimeIdle;
             } else if (monster.kind == MonsterKind::Mushroom) {
                 scale = 1.25f;
@@ -1631,7 +1917,7 @@ void GameWidget::drawWorld(QPainter& painter) {
             } else {
                 anim = &sprites_.skeletonIdle;
             }
-            if (anim->ok()) {
+            if (!custom && anim->ok()) {
                 const bool loop = monster.state != ActorState::Attack && monster.state != ActorState::Hurt && monster.state != ActorState::Dead;
                 QColor tint = monster.kind == MonsterKind::Caster ? QColor(88, 42, 112) : QColor();
                 if (monster.hurtT > 0.1f) {
@@ -1640,6 +1926,9 @@ void GameWidget::drawWorld(QPainter& painter) {
                 const int dir = anim->dirs() >= 4 ? facingDir(monster.facingX, monster.facingY, anim->dirs()) : 0;
                 const bool flip = anim->dirs() < 4 && monster.flip;
                 anim->draw(painter, frameIndex(*anim, monster.animT, loop, 10.f), monster.x, monster.y, flip, scale, lift, tint, dir);
+            }
+            if (monster.kind == MonsterKind::Eye) {
+                continue;
             }
             // 清晰血条：黑底描边 + 亮红 + 等级
             const float barW = 30.f;
@@ -1662,6 +1951,16 @@ void GameWidget::drawWorld(QPainter& painter) {
             painter.setPen(QColor(255, 240, 220));
             painter.drawText(QRectF(barX - 10, barY - 14, barW + 20, 12), Qt::AlignCenter, label);
         }
+    }
+    if (session_.ruin().active && session_.ruin().pulseR >= 0.f) {
+        const float r = session_.ruin().pulseR;
+        const float cx = session_.ruin().centerX();
+        const float cy = session_.ruin().centerY();
+        painter.setBrush(Qt::NoBrush);
+        painter.setPen(QPen(QColor(170, 24, 32, 200), 2));
+        painter.drawEllipse(QRectF(cx - r, cy - r, r * 2.f, r * 2.f));
+        painter.setPen(QPen(QColor(255, 80, 70, 120), 1));
+        painter.drawEllipse(QRectF(cx - r * 0.82f, cy - r * 0.82f, r * 1.64f, r * 1.64f));
     }
     painter.setPen(Qt::NoPen);
     for (const AttackFx& fx : session_.attackFx()) {
@@ -1935,6 +2234,8 @@ void GameWidget::drawRadar(QPainter& painter, const QRect& view) {
             return QColor(180, 110, 220);
         case MonsterKind::Killbot:
             return QColor(255, 150, 60);
+        case MonsterKind::Eye:
+            return QColor(220, 40, 50);
         default:
             return QColor(220, 80, 70);
         }
@@ -1942,6 +2243,9 @@ void GameWidget::drawRadar(QPainter& painter, const QRect& view) {
 
     for (const Monster& monster : session_.monsters()) {
         if (monster.state == ActorState::Dead) {
+            continue;
+        }
+        if (monster.kind == MonsterKind::Eye && session_.ruin().arrive == 0.f) {
             continue;
         }
         bool onRim = false;
@@ -1985,10 +2289,221 @@ void GameWidget::drawRadar(QPainter& painter, const QRect& view) {
     painter.setBrush(QColor(90, 200, 255));
     painter.drawPath(tri);
 
+    const MazeRuin& ruin = session_.ruin();
+    if (player.seekOn && ruin.active) {
+        bool onRim = false;
+        const QPointF p = toRadar(ruin.entranceWorldX(), ruin.entranceWorldY(), &onRim);
+        painter.setPen(QPen(QColor(255, 220, 120), 1.4));
+        painter.setBrush(QColor(210, 170, 60));
+        QPainterPath mark;
+        mark.moveTo(p.x(), p.y() - 5.f);
+        mark.lineTo(p.x() + 4.f, p.y());
+        mark.lineTo(p.x(), p.y() + 5.f);
+        mark.lineTo(p.x() - 4.f, p.y());
+        mark.closeSubpath();
+        painter.drawPath(mark);
+        if (onRim) {
+            const float dx = ruin.entranceWorldX() - player.x;
+            const float dy = ruin.entranceWorldY() - player.y;
+            const float d = std::sqrt(dx * dx + dy * dy);
+            if (d > 1.f) {
+                painter.setPen(QPen(QColor(255, 210, 90), 1.6));
+                painter.drawLine(p, QPointF(p.x() + dx / d * 8.f, p.y() + dy / d * 8.f));
+            }
+        }
+        painter.setFont(QFont(Platform::uiFontFamily(), 8));
+        painter.setPen(QColor(255, 214, 120));
+        painter.drawText(QRectF(p.x() - 16.f, p.y() + 4.f, 32.f, 12.f), Qt::AlignCenter, QStringLiteral("遗迹"));
+    }
+
     painter.setBrush(Qt::NoBrush);
     painter.setPen(QColor(228, 212, 188));
     painter.setFont(QFont(Platform::uiFontFamily(), 11));
     painter.setRenderHint(QPainter::Antialiasing, false);
+}
+
+void GameWidget::drawMazeMap(QPainter& painter, const QRect& view) {
+    const Player& player = session_.player();
+    const MazeRuin& ruin = session_.ruin();
+    if (!player.seekOn || !ruin.active) {
+        return;
+    }
+    if (!ruin.contains(tileOf(player.x), tileOf(player.y))) {
+        return;
+    }
+    constexpr int kRadar = 112;
+    const int radarX = view.x() + view.width() - kRadar - 12;
+    int radarY = view.y() + 34;
+    if (touchUi_) {
+        radarY = std::max(radarY, int(touchUnit() * 0.13) + 8);
+    }
+    constexpr int kSide = 132;
+    int mapX = radarX + (kRadar - kSide) / 2;
+    int mapY = radarY + kRadar + 16;
+    if (mapY + kSide > view.bottom() - 8) {
+        mapX = radarX - kSide - 8;
+        mapY = radarY;
+    }
+    const QRect plate(mapX, mapY, kSide, kSide);
+    painter.setRenderHint(QPainter::Antialiasing, false);
+    painter.setPen(Qt::NoPen);
+    painter.setBrush(QColor(12, 10, 9, 220));
+    painter.drawRect(plate);
+    painter.setPen(QPen(QColor(120, 72, 58), 1));
+    painter.setBrush(Qt::NoBrush);
+    painter.drawRect(plate.adjusted(0, 0, -1, -1));
+    const float cell = float(kSide - 8) / float(MazeRuin::kSize);
+    const float ox = plate.x() + 4.f;
+    const float oy = plate.y() + 4.f;
+    for (int y = 0; y < MazeRuin::kSize; ++y) {
+        for (int x = 0; x < MazeRuin::kSize; ++x) {
+            const QRectF tile(ox + x * cell, oy + y * cell, cell, cell);
+            const bool plaza = x >= MazeRuin::kPlaza0 && x <= MazeRuin::kPlaza1 && y >= MazeRuin::kPlaza0 && y <= MazeRuin::kPlaza1;
+            const bool entrance = x == ruin.entranceX && y == ruin.entranceY;
+            if (ruin.isWallAt(ruin.originX + x, ruin.originY + y)) {
+                painter.fillRect(tile, QColor(28, 32, 48));
+            } else if (entrance) {
+                painter.fillRect(tile, QColor(255, 220, 80));
+            } else if (MazeRuin::isPlazaRock(x, y)) {
+                painter.fillRect(tile, QColor(52, 50, 58));
+            } else if (ruin.onRoute(x, y)) {
+                painter.fillRect(tile, QColor(220, 36, 32));
+            } else if (plaza) {
+                painter.fillRect(tile, QColor(176, 64, 56));
+            } else {
+                painter.fillRect(tile, QColor(214, 190, 140));
+            }
+        }
+    }
+    painter.setPen(Qt::NoPen);
+    painter.setBrush(QColor(220, 40, 48));
+    const float ex = ox + (float(MazeRuin::kCenter) + 0.5f) * cell;
+    const float ey = oy + (float(MazeRuin::kCenter) + 0.5f) * cell;
+    painter.drawEllipse(QRectF(ex - 2.f, ey - 2.f, 4.f, 4.f));
+    const float px = ox + (player.x / float(kTile) - float(ruin.originX)) * cell;
+    const float py = oy + (player.y / float(kTile) - float(ruin.originY)) * cell;
+    painter.setPen(QPen(QColor(20, 16, 14), 1));
+    painter.setBrush(QColor(255, 255, 255));
+    painter.drawEllipse(QRectF(px - 2.5f, py - 2.5f, 5.f, 5.f));
+    painter.setPen(QColor(228, 212, 188));
+    painter.setFont(QFont(Platform::uiFontFamily(), 8));
+    painter.drawText(QRect(plate.x(), plate.y() - 14, plate.width(), 12), Qt::AlignCenter, QStringLiteral("迷宫路线"));
+}
+
+void GameWidget::drawBossBar(QPainter& painter, const QRect& view) {
+    const MazeRuin& ruin = session_.ruin();
+    if (!ruin.active || ruin.phase != MazeRuin::Phase::Live || ruin.bossDead) {
+        return;
+    }
+    if (!ruin.enteredPlaza || !ruin.contains(tileOf(session_.player().x), tileOf(session_.player().y))) {
+        return;
+    }
+    const Monster* eye = nullptr;
+    for (const Monster& monster : session_.monsters()) {
+        if (monster.kind == MonsterKind::Eye && monster.state != ActorState::Dead) {
+            eye = &monster;
+            break;
+        }
+    }
+    if (!eye) {
+        return;
+    }
+
+    const int left = view.x() + 232;
+    const int right = view.right() - (touchUi_ ? 148 : 96);
+    const int barW = std::min(420, std::max(200, right - left));
+    const int barX = left + std::max(0, (right - left - barW) / 2);
+    const int barY = view.y() + 30;
+    const QRect plate(barX, barY, barW, 64);
+    painter.setPen(QPen(QColor(62, 18, 20), 1));
+    painter.setBrush(QColor(8, 4, 6, 225));
+    painter.drawRect(plate);
+    painter.setPen(Qt::NoPen);
+    painter.setBrush(QColor(0, 0, 0, 90));
+    painter.drawRect(QRect(plate.x(), plate.y(), plate.width(), 8));
+    painter.drawRect(QRect(plate.x(), plate.bottom() - 7, plate.width(), 8));
+
+    painter.setFont(QFont(Platform::uiFontFamily(), 8, QFont::Bold));
+    painter.setPen(QColor(112, 42, 40));
+    painter.drawText(QRect(plate.x() + 8, plate.y() + 3, 36, 14), Qt::AlignVCenter | Qt::AlignLeft, QStringLiteral("BOSS"));
+    painter.setFont(QFont(Platform::uiFontFamily(), 11, QFont::Bold));
+    painter.setPen(QColor(168, 132, 118));
+    const QString bossName = QStringLiteral("克苏鲁之眼");
+    painter.drawText(QRect(plate.x() + 44, plate.y() + 2, plate.width() - 150, 16), Qt::AlignVCenter | Qt::AlignLeft, bossName);
+    const int nameW = painter.fontMetrics().horizontalAdvance(bossName);
+    const QRect tag(plate.x() + 48 + nameW, plate.y() + 3, 34, 14);
+    painter.setPen(QPen(QColor(92, 28, 32), 1));
+    painter.setBrush(QColor(16, 6, 8, 230));
+    painter.drawRoundedRect(tag, 2, 2);
+    painter.setFont(QFont(Platform::uiFontFamily(), 8, QFont::Bold));
+    painter.setPen(QColor(176, 96, 88));
+    painter.drawText(tag, Qt::AlignCenter, QStringLiteral("投影"));
+    painter.setPen(QColor(132, 104, 96));
+    painter.drawText(QRect(plate.x() + 8, plate.y() + 2, plate.width() - 16, 16), Qt::AlignVCenter | Qt::AlignRight,
+        QString("Lv%1").arg(eye->level));
+    const int hpShown = eye->hp <= 0.f ? 0 : int(std::ceil(eye->hp));
+
+    const float dist = std::hypot(session_.player().x - eye->x, session_.player().y - eye->y);
+    QString status;
+    if (ruin.arrive > 0.f) {
+        status = QStringLiteral("状态  投影正在降临");
+    } else if (eye->stunT > 0.f) {
+        status = QStringLiteral("状态  韧性崩溃，攻击中断");
+    } else if (ruin.pulseR >= 0.f) {
+        status = QStringLiteral("状态  血环正在向外扩张");
+    } else if (dist > 320.f) {
+        status = QStringLiteral("状态  盘踞广场中央，尚未锁定");
+    } else {
+        switch (ruin.attackStep % 3) {
+        case 0:
+            status = QStringLiteral("状态  盯住你，下一击是单发飞弹");
+            break;
+        case 1:
+            status = QStringLiteral("状态  瞳孔散开，下一击是五发扇形");
+            break;
+        default:
+            status = QStringLiteral("状态  眼裂张开，下一击是扩散血环");
+            break;
+        }
+    }
+    painter.setPen(QColor(104, 74, 70));
+    painter.drawText(QRect(plate.x() + 8, plate.y() + 18, plate.width() - 16, 14), Qt::AlignVCenter | Qt::AlignLeft, status);
+
+    const int trackX = plate.x() + 8;
+    const int trackW = plate.width() - 16;
+    const int trackY = plate.y() + 36;
+    const float hpRatio = eye->maxHp <= 0.f ? 0.f : std::clamp(eye->hp / eye->maxHp, 0.f, 1.f);
+    painter.setPen(Qt::NoPen);
+    painter.setBrush(QColor(16, 6, 8));
+    painter.drawRect(QRect(trackX, trackY, trackW, 8));
+    painter.setBrush(QColor(78, 14, 18));
+    painter.drawRect(QRect(trackX, trackY, int(trackW * hpRatio), 8));
+    painter.setPen(QColor(210, 180, 170));
+    painter.setFont(QFont(Platform::uiFontFamily(), 7, QFont::Bold));
+    painter.drawText(QRect(trackX, trackY - 1, trackW, 10), Qt::AlignCenter,
+        QString("%1 / %2").arg(hpShown).arg(int(std::lround(eye->maxHp))));
+    painter.setPen(Qt::NoPen);
+    if (eye->maxShield > 0.f) {
+        const float shieldRatio = std::clamp(eye->shield / eye->maxShield, 0.f, 1.f);
+        painter.setBrush(QColor(18, 16, 20));
+        painter.drawRect(QRect(trackX, trackY + 9, trackW, 3));
+        painter.setBrush(QColor(58, 66, 76));
+        painter.drawRect(QRect(trackX, trackY + 9, int(trackW * shieldRatio), 3));
+    }
+    const int poiseY = trackY + 14;
+    painter.setBrush(QColor(20, 14, 8));
+    painter.drawRect(QRect(trackX, poiseY, trackW, 5));
+    if (eye->stunT > 0.f) {
+        painter.setBrush(QColor(110, 48, 28));
+        painter.drawRect(QRect(trackX, poiseY, int(trackW * std::clamp(eye->stunT / 1.6f, 0.f, 1.f)), 5));
+        painter.setPen(QColor(210, 160, 120));
+        painter.setFont(QFont(Platform::uiFontFamily(), 7, QFont::Bold));
+        painter.drawText(QRect(trackX, poiseY - 1, trackW, 7), Qt::AlignCenter, QStringLiteral("韧性崩溃"));
+    } else {
+        const float poiseRatio = eye->maxPoise <= 0.f ? 0.f : std::clamp(eye->poise / eye->maxPoise, 0.f, 1.f);
+        painter.setBrush(QColor(168, 124, 42));
+        painter.drawRect(QRect(trackX, poiseY, int(trackW * poiseRatio), 5));
+    }
 }
 
 void GameWidget::paintEvent(QPaintEvent* event) {
@@ -2013,6 +2528,15 @@ void GameWidget::paintEvent(QPaintEvent* event) {
         world.fillRect(canvas_.rect(), QColor(128, 112, 98));
         world.setCompositionMode(QPainter::CompositionMode_SourceOver);
         world.drawImage(0, 0, vignette_);
+        const float plazaRed = session_.plazaRed();
+        if (plazaRed > 0.01f) {
+            QRadialGradient red(kViewW * 0.5, kViewH * 0.5, kViewW * 0.72);
+            red.setColorAt(0.28, QColor(120, 0, 0, 0));
+            red.setColorAt(1.0, QColor(150, 0, 0, int(190.f * plazaRed)));
+            world.setPen(Qt::NoPen);
+            world.setBrush(red);
+            world.drawRect(canvas_.rect());
+        }
     }
     painter.setRenderHint(QPainter::SmoothPixmapTransform, false);
     painter.drawImage(view, canvas_);
@@ -2048,12 +2572,13 @@ void GameWidget::paintEvent(QPaintEvent* event) {
         painter.drawText(QRect(originX + 20, originY + 138 + index * 16, 200, 16), Qt::AlignLeft | Qt::AlignVCenter,
             QString("%1  %2 / %3").arg(name).arg(int(std::min(current, need))).arg(int(need)));
     };
-    painter.fillRect(QRect(originX + 14, originY + 136, 210, 66), QColor(12, 10, 9, 190));
+    painter.fillRect(QRect(originX + 14, originY + 136, 210, 84), QColor(12, 10, 9, 190));
     painter.setPen(QColor(168, 148, 128));
     talentLine(0, "重手", player.damageDealt, 250.f);
     talentLine(1, "远行", player.distanceMoved, 900.f);
     talentLine(2, "轻身", float(player.dodgeCount), 6.f);
     talentLine(3, "熟练", float(player.skillCasts), 12.f);
+    talentLine(4, "指引", float(player.worldKills), 20.f);
     painter.setPen(QColor(228, 212, 188));
     painter.drawText(QRect(originX, originY + 10, viewW, 22), Qt::AlignHCenter | Qt::AlignTop, formatTime(session_.time()));
     if (touchUi_) {
@@ -2062,7 +2587,9 @@ void GameWidget::paintEvent(QPaintEvent* event) {
     } else {
         painter.drawText(QRect(originX, originY + 10, viewW - 16, 22), Qt::AlignRight | Qt::AlignTop, QString("SCORE %1").arg(session_.score()));
     }
+    drawBossBar(painter, view);
     drawRadar(painter, view);
+    drawMazeMap(painter, view);
     struct Chip {
         QString key;
         QString name;
@@ -2091,6 +2618,8 @@ void GameWidget::paintEvent(QPaintEvent* event) {
                 : QString("%1/3").arg(player.stacksThrust);
         } else if (skill == kSkillFlight || skill == kSkillJetpack) {
             chip.sub = player.flying ? QString("飞行中") : QString("关");
+        } else if (skill == kSkillSeek) {
+            chip.sub = player.seekOn ? QString("开") : QString("关");
         } else if (skill == kSkillMirror && player.mirrorT > 0.f) {
             chip.sub = QString("%1/%2").arg(int(player.mirrorAbsorbed)).arg(int(player.mirrorCap));
             chip.remain = player.mirrorT;
@@ -2149,13 +2678,23 @@ void GameWidget::paintEvent(QPaintEvent* event) {
     if (player.hero == HeroClass::Mage && player.skillV >= 0) {
         pushSkillChip("V", player.skillV, player.cdV);
     }
+    if (player.talentGuide) {
+        pushSkillChip("G", kSkillSeek, 0.f);
+    }
     if (touchUi_) {
         chips.clear();
     }
-    const int chipW = 84;
-    const int chipH = 38;
     const int gap = 6;
-    const int rowW = int(chips.size()) * chipW + int(chips.size() - 1) * gap;
+    int chipW = 84;
+    const int chipH = 38;
+    if (!chips.isEmpty()) {
+        const int maxW = viewW - 8;
+        const int gaps = (chips.size() - 1) * gap;
+        if (chips.size() * chipW + gaps > maxW) {
+            chipW = std::max(56, (maxW - gaps) / int(chips.size()));
+        }
+    }
+    const int rowW = chips.isEmpty() ? 0 : int(chips.size()) * chipW + int(chips.size() - 1) * gap;
     int chipX = originX + (viewW - rowW) / 2;
     const int chipY = originY + viewH - chipH - 10;
     painter.setFont(QFont(Platform::uiFontFamily(), 10));

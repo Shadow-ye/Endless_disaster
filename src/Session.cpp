@@ -1,5 +1,7 @@
 #include "Session.h"
 
+#include "Audio.h"
+
 #include <QJsonArray>
 #include <algorithm>
 #include <cmath>
@@ -54,6 +56,11 @@ void setupMonster(Monster& monster, int level) {
         monster.maxShield = 12.f;
         monster.maxPoise = 14.f;
         break;
+    case MonsterKind::Eye:
+        monster.maxHp = 560.f;
+        monster.maxShield = 48.f;
+        monster.maxPoise = 36.f;
+        break;
     case MonsterKind::Slime:
         monster.maxHp = 16.f;
         monster.maxShield = 0.f;
@@ -86,6 +93,9 @@ int scoreFor(MonsterKind kind, int level) {
         break;
     case MonsterKind::Killbot:
         base = 35;
+        break;
+    case MonsterKind::Eye:
+        base = 180;
         break;
     case MonsterKind::Slime:
         base = 10;
@@ -131,6 +141,14 @@ bool Session::consumeRecoverBgm() {
         return false;
     }
     recoverBgmPending_ = false;
+    return true;
+}
+
+bool Session::consumeVoidPrompt() {
+    if (!voidPrompt_) {
+        return false;
+    }
+    voidPrompt_ = false;
     return true;
 }
 
@@ -272,6 +290,13 @@ void Session::newGame(uint32_t seed, uint32_t runId, HeroClass hero, int skillD,
     paths_.rebuild(map_, tileOf(player_.x), tileOf(player_.y));
     pathTileX_ = tileOf(player_.x);
     pathTileY_ = tileOf(player_.y);
+    ruin_.clear();
+    shakeT_ = 0.f;
+    plazaRed_ = 0.f;
+    voidPrompt_ = false;
+    eyeDefeats_ = 0;
+    wallStrikeId_ = -1;
+    spawnRuin();
 }
 
 bool Session::loadFrom(const QJsonObject& game) {
@@ -309,12 +334,22 @@ bool Session::loadFrom(const QJsonObject& game) {
     player_.talentStride = p.value("talentStride").toBool();
     player_.talentLight = p.value("talentLight").toBool();
     player_.talentMastery = p.value("talentMastery").toBool();
+    player_.talentGuide = p.value("talentGuide").toBool();
+    player_.worldKills = std::max(0, p.value("worldKills").toInt());
     player_.skillCasts = p.value("skillCasts").toInt();
     player_.stacksQi = p.value("stacksQi").toInt(3);
     player_.stacksThrust = p.value("stacksThrust").toInt(3);
-    player_.skillV = p.value("skillV").toInt(player_.hero == HeroClass::Mage ? kSkillBurial : -1);
+    const int savedV = p.value("skillV").toInt(player_.hero == HeroClass::Mage ? kSkillBurial : -1);
+    if (player_.hero == HeroClass::Mage && isMageSkill(savedV)) {
+        player_.skillV = savedV;
+    } else if (player_.hero == HeroClass::Mage) {
+        player_.skillV = kSkillBurial;
+    } else {
+        player_.skillV = -1;
+    }
     player_.speedBonus = float(p.value("speedBonus").toDouble(player_.speedBonus));
     player_.critBonus = p.value("critBonus").toInt(player_.critBonus);
+    player_.seekOn = p.value("seekOn").toBool(false);
     if (p.contains("baseMaxHp")) {
         baseMaxHp_ = float(p.value("baseMaxHp").toDouble());
         baseMaxMp_ = float(p.value("baseMaxMp").toDouble());
@@ -358,6 +393,8 @@ bool Session::loadFrom(const QJsonObject& game) {
             monster.kind = MonsterKind::Caster;
         } else if (kind == 5) {
             monster.kind = MonsterKind::Killbot;
+        } else if (kind == 6) {
+            continue;
         }
         setupMonster(monster, std::max(1, m.value("level").toInt(1)));
         monster.x = float(m.value("x").toDouble());
@@ -370,6 +407,9 @@ bool Session::loadFrom(const QJsonObject& game) {
     paths_.rebuild(map_, tileOf(player_.x), tileOf(player_.y));
     pathTileX_ = tileOf(player_.x);
     pathTileY_ = tileOf(player_.y);
+    restoreRuin(game);
+    eyeDefeats_ = std::max(0, game.value("eyeDefeats").toInt());
+    checkTalents();
     return true;
 }
 
@@ -379,6 +419,7 @@ QJsonObject Session::toJson() const {
     game.insert("seed", double(map_.seed()));
     game.insert("time", time_);
     game.insert("score", score_);
+    game.insert("eyeDefeats", eyeDefeats_);
     game.insert("spawnCd", spawnCd_);
     game.insert("flyerCd", flyerCd_);
     QJsonObject p;
@@ -403,6 +444,8 @@ QJsonObject Session::toJson() const {
     p.insert("talentStride", player_.talentStride);
     p.insert("talentLight", player_.talentLight);
     p.insert("talentMastery", player_.talentMastery);
+    p.insert("talentGuide", player_.talentGuide);
+    p.insert("worldKills", player_.worldKills);
     p.insert("skillCasts", player_.skillCasts);
     p.insert("stacksQi", player_.stacksQi);
     p.insert("stacksThrust", player_.stacksThrust);
@@ -416,6 +459,7 @@ QJsonObject Session::toJson() const {
     p.insert("baseArmor", baseArmor_);
     p.insert("speedBonus", player_.speedBonus);
     p.insert("critBonus", player_.critBonus);
+    p.insert("seekOn", player_.seekOn);
     game.insert("player", p);
     auto writeItem = [](const Item& item) {
         QJsonObject obj;
@@ -452,6 +496,8 @@ QJsonObject Session::toJson() const {
             kind = 4;
         } else if (m.kind == MonsterKind::Killbot) {
             kind = 5;
+        } else if (m.kind == MonsterKind::Eye) {
+            continue;
         }
         obj.insert("kind", kind);
         obj.insert("level", m.level);
@@ -463,6 +509,33 @@ QJsonObject Session::toJson() const {
         list.append(obj);
     }
     game.insert("monsters", list);
+#ifdef Q_OS_WIN
+    if (ruin_.phase != MazeRuin::Phase::None) {
+        QJsonObject ruin;
+        ruin.insert("phase", int(ruin_.phase));
+        ruin.insert("ox", ruin_.originX);
+        ruin.insert("oy", ruin_.originY);
+        ruin.insert("seed", double(ruin_.seed));
+        ruin.insert("bossDead", ruin_.bossDead);
+        ruin.insert("entered", ruin_.enteredPlaza);
+        ruin.insert("cooldown", ruin_.cooldown);
+        QString wallBits;
+        wallBits.reserve(int(ruin_.wall.size()));
+        for (uint8_t cell : ruin_.wall) {
+            wallBits += cell ? QLatin1Char('1') : QLatin1Char('0');
+        }
+        ruin.insert("walls", wallBits);
+        for (const Monster& m : monsters_) {
+            if (m.kind == MonsterKind::Eye && m.state != ActorState::Dead) {
+                ruin.insert("eyeHp", m.hp);
+                ruin.insert("eyeShield", m.shield);
+                ruin.insert("eyeLevel", m.level);
+                break;
+            }
+        }
+        game.insert("ruin", ruin);
+    }
+#endif
     return game;
 }
 
@@ -505,6 +578,10 @@ void Session::checkTalents() {
     if (!player_.talentMastery && player_.skillCasts >= 12) {
         player_.talentMastery = true;
         note("天赋：战斗熟练度");
+    }
+    if (!player_.talentGuide && player_.worldKills >= 20) {
+        player_.talentGuide = true;
+        note("天赋：世界指引");
     }
 }
 
@@ -655,6 +732,9 @@ void Session::hurtMonster(Monster& monster, float damage, float poiseDamage, boo
     if (monster.state == ActorState::Dead) {
         return;
     }
+    if (monster.kind == MonsterKind::Eye && ruin_.arrive >= 0.f) {
+        return;
+    }
     if (monster.defenseT > 0.f) {
         damage *= 0.4f;
         poiseDamage *= 0.35f;
@@ -671,7 +751,7 @@ void Session::hurtMonster(Monster& monster, float damage, float poiseDamage, boo
     monster.lastHitBy = player_.attackId;
     pushFloat(monster.x, monster.y, damage, crit);
     queueSfx(crit ? SfxId::Crit : SfxId::Hit);
-    if (knockback > 0.f) {
+    if (knockback > 0.f && monster.kind != MonsterKind::Eye) {
         float kx = monster.x - player_.x;
         float ky = monster.y - player_.y;
         float kd = lengthOf(kx, ky);
@@ -689,7 +769,7 @@ void Session::hurtMonster(Monster& monster, float damage, float poiseDamage, boo
     }
     if (monster.poise <= 0.f) {
         monster.poise = monster.maxPoise;
-        monster.stunT = 0.7f;
+        monster.stunT = monster.kind == MonsterKind::Eye ? 1.6f : 0.7f;
     }
     checkTalents();
 }
@@ -742,6 +822,7 @@ void Session::fireMageLaser() {
             hurtMonster(monster, rollDamage(22.f, &crit), 14.f, crit, 20.f);
         }
     }
+    breakMazeWallsBeam(kRange, kHalfWidth);
     checkTalents();
 }
 
@@ -769,6 +850,7 @@ void Session::castHeavySwordQi() {
             }
         }
     }
+    breakMazeWallsCone(kRange, 0.35f);
     checkTalents();
 }
 
@@ -791,6 +873,136 @@ void Session::slashHostileBolts() {
         if (dot > 0.15f) {
             bolt.life = 0.f;
         }
+    }
+}
+
+bool Session::canBreakMazeWalls() const {
+#ifndef Q_OS_WIN
+    return false;
+#else
+    if (!ruin_.active || ruin_.wall.size() != size_t(MazeRuin::kSize * MazeRuin::kSize)) {
+        return false;
+    }
+    if (player_.hero == HeroClass::Warrior || player_.hero == HeroClass::Sword) {
+        return true;
+    }
+    return ruin_.bossDead;
+#endif
+}
+
+bool Session::breakMazeWallTile(int tileX, int tileY) {
+    if (!canBreakMazeWalls() || !ruin_.isWallAt(tileX, tileY)) {
+        return false;
+    }
+    const int lx = tileX - ruin_.originX;
+    const int ly = tileY - ruin_.originY;
+    ruin_.wall[size_t(ly * MazeRuin::kSize + lx)] = 0;
+    return true;
+}
+
+void Session::commitBrokenWalls(bool broken) {
+    if (!broken) {
+        return;
+    }
+    syncRuinMap();
+    paths_.rebuild(map_, tileOf(player_.x), tileOf(player_.y));
+    pathTileX_ = tileOf(player_.x);
+    pathTileY_ = tileOf(player_.y);
+    queueSfx(SfxId::Hit);
+}
+
+void Session::breakMazeWallsCone(float range, float minDot) {
+    if (!canBreakMazeWalls()) {
+        return;
+    }
+    const float fl = lengthOf(player_.facingX, player_.facingY);
+    if (fl < 0.01f) {
+        return;
+    }
+    const float nx = player_.facingX / fl;
+    const float ny = player_.facingY / fl;
+    const int span = int(std::ceil(range / float(kTile))) + 1;
+    const int cx = tileOf(player_.x);
+    const int cy = tileOf(player_.y);
+    bool broken = false;
+    for (int ty = cy - span; ty <= cy + span; ++ty) {
+        for (int tx = cx - span; tx <= cx + span; ++tx) {
+            const float dx = (float(tx) + 0.5f) * float(kTile) - player_.x;
+            const float dy = (float(ty) + 0.5f) * float(kTile) - player_.y;
+            const float dist = lengthOf(dx, dy);
+            if (dist > range || dist < 0.01f) {
+                continue;
+            }
+            if ((dx / dist) * nx + (dy / dist) * ny < minDot) {
+                continue;
+            }
+            broken = breakMazeWallTile(tx, ty) || broken;
+        }
+    }
+    commitBrokenWalls(broken);
+}
+
+void Session::breakMazeWallsRadius(float x, float y, float radius) {
+    if (!canBreakMazeWalls() || radius <= 0.f) {
+        return;
+    }
+    const int span = int(std::ceil(radius / float(kTile))) + 1;
+    const int cx = tileOf(x);
+    const int cy = tileOf(y);
+    bool broken = false;
+    for (int ty = cy - span; ty <= cy + span; ++ty) {
+        for (int tx = cx - span; tx <= cx + span; ++tx) {
+            const float dx = (float(tx) + 0.5f) * float(kTile) - x;
+            const float dy = (float(ty) + 0.5f) * float(kTile) - y;
+            if (lengthOf(dx, dy) > radius) {
+                continue;
+            }
+            broken = breakMazeWallTile(tx, ty) || broken;
+        }
+    }
+    commitBrokenWalls(broken);
+}
+
+void Session::breakMazeWallsBeam(float range, float halfWidth) {
+    if (!canBreakMazeWalls()) {
+        return;
+    }
+    const float fl = lengthOf(player_.facingX, player_.facingY);
+    if (fl < 0.01f) {
+        return;
+    }
+    const float nx = player_.facingX / fl;
+    const float ny = player_.facingY / fl;
+    const int span = int(std::ceil(range / float(kTile))) + 1;
+    const int cx = tileOf(player_.x);
+    const int cy = tileOf(player_.y);
+    bool broken = false;
+    for (int ty = cy - span; ty <= cy + span; ++ty) {
+        for (int tx = cx - span; tx <= cx + span; ++tx) {
+            const float dx = (float(tx) + 0.5f) * float(kTile) - player_.x;
+            const float dy = (float(ty) + 0.5f) * float(kTile) - player_.y;
+            const float along = dx * nx + dy * ny;
+            if (along < 0.f || along > range) {
+                continue;
+            }
+            const float perp = std::abs(dx * (-ny) + dy * nx);
+            if (perp > halfWidth) {
+                continue;
+            }
+            broken = breakMazeWallTile(tx, ty) || broken;
+        }
+    }
+    commitBrokenWalls(broken);
+}
+
+void Session::applyEyeLevel() {
+    const int bossLevel = std::max(1, player_.level) + 99;
+    for (Monster& monster : monsters_) {
+        if (monster.kind != MonsterKind::Eye || monster.state == ActorState::Dead) {
+            continue;
+        }
+        setupMonster(monster, std::max(1, bossLevel - 99));
+        monster.level = bossLevel;
     }
 }
 
@@ -828,6 +1040,11 @@ Monster* Session::findMonster(int id) {
 }
 
 void Session::castSlot(int skill, float& cooldown) {
+    if (skill == kSkillSeek) {
+        player_.seekOn = !player_.seekOn;
+        note(player_.seekOn ? "寻路开启" : "寻路关闭");
+        return;
+    }
     if (skill == kSkillSwordQi) {
         castSwordQi();
         return;
@@ -998,6 +1215,7 @@ void Session::explodeBolt(const Bolt& bolt) {
     fx.maxLife = 0.3f;
     attackFx_.push_back(fx);
     queueSfx(SfxId::Explode);
+    breakMazeWallsRadius(bolt.x, bolt.y, bolt.blast);
     for (Monster& monster : monsters_) {
         if (monster.state != ActorState::Dead && lengthOf(monster.x - bolt.x, monster.y - bolt.y) <= bolt.blast) {
             hurtMonster(monster, bolt.damage, 16.f, bolt.crit, 18.f);
@@ -1175,6 +1393,7 @@ void Session::explodeDrone(const Drone& drone, bool harmful) {
         return;
     }
     queueSfx(SfxId::Explode);
+    breakMazeWallsRadius(drone.x, drone.y, kDroneBlast);
     for (Monster& monster : monsters_) {
         if (monster.state == ActorState::Dead) {
             continue;
@@ -1232,6 +1451,7 @@ void Session::castSpin() {
             hurtMonster(monster, dmg, 12.f, crit, 14.f);
         }
     }
+    breakMazeWallsRadius(player_.x, player_.y, 42.f);
 }
 
 void Session::castBolt() {
@@ -1266,6 +1486,7 @@ void Session::castNova() {
             hurtMonster(monster, dmg, 8.f, crit, 12.f);
         }
     }
+    breakMazeWallsRadius(player_.x, player_.y, 64.f);
 }
 
 void Session::castWave() {
@@ -1307,6 +1528,7 @@ void Session::castSwordQi() {
             }
         }
     }
+    breakMazeWallsCone(kQiRange, 0.35f);
     checkTalents();
 }
 
@@ -1342,6 +1564,7 @@ void Session::castThrustStack() {
             }
         }
     }
+    breakMazeWallsCone(48.f, 0.2f);
     checkTalents();
 }
 
@@ -1361,6 +1584,7 @@ void Session::castBurial(float& cooldown) {
     player_.attackId += 1;
     pushFx(AttackFxKind::Pulse, player_.burialR, 0.f, 0.55f);
     queueSfx(SfxId::Skill);
+    Audio::instance().playBurialVoice();
     for (Monster& monster : monsters_) {
         if (monster.state == ActorState::Dead) {
             continue;
@@ -1371,6 +1595,7 @@ void Session::castBurial(float& cooldown) {
             hurtMonster(monster, dmg, 22.f, crit, 10.f);
         }
     }
+    breakMazeWallsRadius(player_.x, player_.y, player_.burialR);
     note("万葬");
     checkTalents();
 }
@@ -1576,6 +1801,7 @@ void Session::update(float dt, const InputState& input, float mouseX, float mous
     updateBolts(dt);
     updateFloats(dt);
     updateAttackFx(dt);
+    updateRuin(dt);
     if (player_.state != ActorState::Dead) {
         spawn(dt);
     } else if (player_.animT > 0.85f) {
@@ -1750,11 +1976,19 @@ void Session::updatePlayer(float dt, const InputState& input, float mouseX, floa
     if (input.vEdge && player_.hero == HeroClass::Mage && player_.skillV >= 0) {
         castSlot(player_.skillV, player_.cdV);
     }
+    if (input.gEdge && player_.talentGuide) {
+        player_.seekOn = !player_.seekOn;
+        note(player_.seekOn ? "寻路开启" : "寻路关闭");
+    }
 
     const float as = atkSpeedMul();
     if (player_.attackT > 0.f) {
         player_.attackT -= dt;
         slashHostileBolts();
+        if (!rangedHero() && !player_.heavy && player_.attackT > 0.12f && player_.attackT < 0.30f && wallStrikeId_ != player_.attackId) {
+            wallStrikeId_ = player_.attackId;
+            breakMazeWallsCone(34.f, 0.35f);
+        }
         if (player_.attackT <= 0.f) {
             player_.state = ActorState::Idle;
             player_.heavy = false;
@@ -1882,6 +2116,9 @@ bool Session::findSpawn(float& x, float& y) {
         const float dist = 170.f + float(nextRand() % 140);
         const float sx = player_.x + std::cos(angle) * dist;
         const float sy = player_.y + std::sin(angle) * dist;
+        if (map_.inRuin(tileOf(sx), tileOf(sy))) {
+            continue;
+        }
         if (map_.walkable(tileOf(sx), tileOf(sy))) {
             x = (tileOf(sx) + 0.5f) * kTile;
             y = (tileOf(sy) + 0.5f) * kTile;
@@ -1976,6 +2213,8 @@ void Session::updateBolts(float dt) {
         if (map_.blocks(tileOf(bolt.x), tileOf(bolt.y), 0)) {
             if (bolt.blast > 0.f) {
                 explodeBolt(bolt);
+            } else if (!bolt.hostile) {
+                commitBrokenWalls(breakMazeWallTile(tileOf(bolt.x), tileOf(bolt.y)));
             }
             bolt.life = 0.f;
             continue;
@@ -1989,6 +2228,9 @@ void Session::updateBolts(float dt) {
         }
         for (Monster& monster : monsters_) {
             if (monster.state == ActorState::Dead) {
+                continue;
+            }
+            if (monster.kind == MonsterKind::Eye && ruin_.arrive >= 0.f) {
                 continue;
             }
             if (lengthOf(monster.x - bolt.x, monster.y - bolt.y) < 14.f) {
@@ -2025,6 +2267,12 @@ void Session::updateMonsters(float dt) {
                 score_ += gained;
                 gainXp(gained);
                 monster.scored = true;
+                if (monster.kind == MonsterKind::Eye) {
+                    onEyeDefeated();
+                } else {
+                    player_.worldKills += 1;
+                    checkTalents();
+                }
             }
             continue;
         }
@@ -2034,6 +2282,11 @@ void Session::updateMonsters(float dt) {
         const float dist = lengthOf(dx, dy);
         faceToward(monster.facingX, monster.facingY, monster.flip, dx, dy);
         const int pass = monster.kind == MonsterKind::Flyer ? 2 : 0;
+
+        if (monster.kind == MonsterKind::Eye) {
+            updateEye(monster, dt);
+            continue;
+        }
 
         if (!rangedHero() && player_.state == ActorState::Attack && !player_.heavy && player_.attackT > 0.12f && player_.attackT < 0.30f && monster.lastHitBy != player_.attackId) {
             if (dist < 34.f && dist > 0.01f) {
@@ -2218,6 +2471,9 @@ void Session::updateMonsters(float dt) {
             if (monsters_[i].state == ActorState::Dead || monsters_[j].state == ActorState::Dead) {
                 continue;
             }
+            if (monsters_[i].kind == MonsterKind::Eye || monsters_[j].kind == MonsterKind::Eye) {
+                continue;
+            }
             float dx = monsters_[j].x - monsters_[i].x;
             float dy = monsters_[j].y - monsters_[i].y;
             float d = lengthOf(dx, dy);
@@ -2315,4 +2571,327 @@ void Session::recomputeGear() {
     player_.armor = baseArmor_;
     player_.hp = std::min(player_.hp, player_.maxHp);
     player_.mp = std::min(player_.mp, player_.maxMp);
+}
+
+void Session::syncRuinMap() {
+    if (ruin_.active) {
+        map_.setRuin(ruin_.originX, ruin_.originY, MazeRuin::kSize, MazeRuin::kSize, ruin_.walls());
+    } else {
+        map_.clearRuin();
+    }
+}
+
+void Session::dismissRuin() {
+    ruin_.active = false;
+    ruin_.wall.clear();
+    ruin_.route.clear();
+    ruin_.pulseR = -1.f;
+    map_.clearRuin();
+    monsters_.erase(std::remove_if(monsters_.begin(), monsters_.end(), [](const Monster& monster) {
+        return monster.kind == MonsterKind::Eye;
+    }), monsters_.end());
+}
+
+void Session::spawnEye(float hp, float shield, int level) {
+    Monster monster;
+    monster.id = nextId_++;
+    monster.kind = MonsterKind::Eye;
+    monster.x = ruin_.centerX();
+    monster.y = ruin_.centerY();
+    const bool locked = level > 0;
+    const int shown = locked ? level : 1;
+    setupMonster(monster, locked ? std::max(1, shown - 99) : 1);
+    monster.level = shown;
+    if (hp >= 0.f) {
+        monster.hp = std::min(monster.maxHp, hp);
+    }
+    if (shield >= 0.f) {
+        monster.shield = std::min(monster.maxShield, shield);
+    }
+    monsters_.push_back(monster);
+    ruin_.attackStep = 0;
+    ruin_.attackCd = 1.2f;
+    ruin_.pulseR = -1.f;
+    ruin_.pulseHit = false;
+}
+
+bool Session::spawnRuin() {
+#ifndef Q_OS_WIN
+    return false;
+#else
+    const int px = tileOf(player_.x);
+    const int py = tileOf(player_.y);
+    for (int attempt = 0; attempt < 40; ++attempt) {
+        const float angle = float(nextRand() % 628u) / 100.f;
+        const int dist = 52 + int(nextRand() % 48u);
+        const int cx = px + int(std::cos(angle) * float(dist));
+        const int cy = py + int(std::sin(angle) * float(dist));
+        const int ox = cx - MazeRuin::kSize / 2;
+        const int oy = cy - MazeRuin::kSize / 2;
+        const int x1 = ox + MazeRuin::kSize - 1;
+        const int y1 = oy + MazeRuin::kSize - 1;
+        const int nearX = std::clamp(px, ox, x1);
+        const int nearY = std::clamp(py, oy, y1);
+        if (std::max(std::abs(px - nearX), std::abs(py - nearY)) < 36) {
+            continue;
+        }
+        if (!ruin_.generate(ox, oy, nextRand() | 1u)) {
+            continue;
+        }
+        ruin_.phase = MazeRuin::Phase::Live;
+        ruin_.cooldown = 0.f;
+        syncRuinMap();
+        spawnEye();
+        for (Monster& monster : monsters_) {
+            if (monster.kind == MonsterKind::Eye || monster.state == ActorState::Dead) {
+                continue;
+            }
+            if (!ruin_.contains(tileOf(monster.x), tileOf(monster.y))) {
+                continue;
+            }
+            float ox = monster.x;
+            float oy = monster.y;
+            if (ruin_.entranceX == 0) {
+                ox = (float(ruin_.originX) - 0.5f) * float(kTile);
+                oy = (float(ruin_.originY + ruin_.entranceY) + 0.5f) * float(kTile);
+            } else if (ruin_.entranceX == MazeRuin::kSize - 1) {
+                ox = (float(ruin_.originX + MazeRuin::kSize) + 0.5f) * float(kTile);
+                oy = (float(ruin_.originY + ruin_.entranceY) + 0.5f) * float(kTile);
+            } else if (ruin_.entranceY == 0) {
+                ox = (float(ruin_.originX + ruin_.entranceX) + 0.5f) * float(kTile);
+                oy = (float(ruin_.originY) - 0.5f) * float(kTile);
+            } else {
+                ox = (float(ruin_.originX + ruin_.entranceX) + 0.5f) * float(kTile);
+                oy = (float(ruin_.originY + MazeRuin::kSize) + 0.5f) * float(kTile);
+            }
+            monster.x = ox;
+            monster.y = oy;
+        }
+        note("迷宫遗迹出现");
+        return true;
+    }
+    ruin_.clear();
+    map_.clearRuin();
+    return false;
+#endif
+}
+
+void Session::updateEye(Monster& monster, float dt) {
+    monster.x = ruin_.centerX();
+    monster.y = ruin_.centerY();
+    if (ruin_.phase != MazeRuin::Phase::Live || ruin_.bossDead) {
+        monster.state = ActorState::Idle;
+        return;
+    }
+    const float dx = player_.x - monster.x;
+    const float dy = player_.y - monster.y;
+    const float dist = lengthOf(dx, dy);
+    faceToward(monster.facingX, monster.facingY, monster.flip, dx, dy);
+    if (player_.state == ActorState::Dead || ruin_.arrive > 0.f || !ruin_.enteredPlaza) {
+        monster.state = ActorState::Idle;
+        return;
+    }
+    if (monster.stunT > 0.f) {
+        ruin_.pulseR = -1.f;
+        monster.state = ActorState::Hurt;
+        return;
+    }
+    const bool inPlaza = ruin_.inPlaza(tileOf(player_.x), tileOf(player_.y));
+    if (ruin_.pulseR >= 0.f) {
+        const float prev = ruin_.pulseR;
+        ruin_.pulseR += 68.f * dt;
+        if (!ruin_.pulseHit && inPlaza && dist >= prev - 2.f && dist <= ruin_.pulseR + 8.f) {
+            ruin_.pulseHit = true;
+            const int statLevel = std::max(1, monster.level - 99);
+            hurtPlayer(16.f * (1.f + float(statLevel - 1) * 0.1f), &monster);
+        }
+        if (ruin_.pulseR > 128.f) {
+            ruin_.pulseR = -1.f;
+        }
+        monster.state = ActorState::Attack;
+        return;
+    }
+    ruin_.attackCd -= dt;
+    if (ruin_.attackCd > 0.f || dist < 8.f || dist > 320.f) {
+        if (monster.state != ActorState::Hurt) {
+            monster.state = ActorState::Idle;
+        }
+        return;
+    }
+    auto shoot = [&](float angle, float speed, float damage, float life) {
+        Bolt bolt;
+        bolt.hostile = true;
+        bolt.x = monster.x;
+        bolt.y = monster.y - 18.f;
+        bolt.vx = std::cos(angle) * speed;
+        bolt.vy = std::sin(angle) * speed;
+        bolt.life = life;
+        const int statLevel = std::max(1, monster.level - 99);
+        bolt.damage = damage * (1.f + float(statLevel - 1) * 0.1f);
+        bolts_.push_back(bolt);
+    };
+    const float aim = std::atan2(dy, dx);
+    switch (ruin_.attackStep % 3) {
+    case 0:
+        shoot(aim, 190.f, 12.f, 1.4f);
+        ruin_.attackCd = 1.35f;
+        break;
+    case 1:
+        for (int i = -2; i <= 2; ++i) {
+            shoot(aim + float(i) * 0.30f, 145.f, 7.f, 1.7f);
+        }
+        ruin_.attackCd = 1.9f;
+        break;
+    default:
+        ruin_.pulseR = 8.f;
+        ruin_.pulseHit = false;
+        ruin_.attackCd = 0.9f;
+        break;
+    }
+    ruin_.attackStep = (ruin_.attackStep + 1) % 3;
+    monster.state = ActorState::Attack;
+}
+
+void Session::onEyeDefeated() {
+    ruin_.bossDead = true;
+    ruin_.phase = MazeRuin::Phase::Leave;
+    ruin_.pulseR = -1.f;
+    triggerShake();
+    note("克苏鲁之眼被击败");
+    eyeDefeats_ += 1;
+    if (eyeDefeats_ == 2 || (nextRand() % 5u) == 0u) {
+        voidPrompt_ = true;
+    }
+}
+
+void Session::triggerShake() {
+    shakeT_ = 0.9f;
+}
+
+void Session::cameraShake(float& sx, float& sy) const {
+    if (shakeT_ <= 0.f) {
+        sx = 0.f;
+        sy = 0.f;
+        return;
+    }
+    constexpr float kDur = 0.9f;
+    const float amp = 6.f * (shakeT_ / kDur);
+    const float t = kDur - shakeT_;
+    sx = amp * std::sin(t * 11.f * 6.2831853f);
+    sy = amp * 0.65f * std::sin(t * 7.f * 6.2831853f + 0.7f);
+}
+
+void Session::updateRuin(float dt) {
+    shakeT_ = std::max(0.f, shakeT_ - dt);
+#ifndef Q_OS_WIN
+    (void)dt;
+    return;
+#else
+    const bool wantRed = ruin_.phase == MazeRuin::Phase::Live && !ruin_.bossDead
+        && ruin_.inPlaza(tileOf(player_.x), tileOf(player_.y));
+    const float target = wantRed ? 1.f : 0.f;
+    plazaRed_ += (target - plazaRed_) * std::min(1.f, dt * 3.f);
+    if (plazaRed_ < 0.01f) {
+        plazaRed_ = 0.f;
+    }
+
+    if (ruin_.phase == MazeRuin::Phase::None || (ruin_.phase == MazeRuin::Phase::Wait && ruin_.cooldown <= 0.f)) {
+        if (!spawnRuin()) {
+            ruin_.phase = MazeRuin::Phase::Wait;
+            ruin_.cooldown = 5.f;
+        }
+        return;
+    }
+    if (ruin_.phase == MazeRuin::Phase::Wait) {
+        ruin_.cooldown -= dt;
+        return;
+    }
+    if (ruin_.phase == MazeRuin::Phase::Live) {
+        if (ruin_.arrive > 0.f) {
+            ruin_.arrive -= dt;
+            if (ruin_.arrive <= 0.f) {
+                ruin_.arrive = -1.f;
+            }
+        }
+        if (!ruin_.enteredPlaza && ruin_.inPlaza(tileOf(player_.x), tileOf(player_.y))) {
+            applyEyeLevel();
+            ruin_.enteredPlaza = true;
+            ruin_.arrive = 1.7f;
+            triggerShake();
+            note("投影降临");
+        }
+        return;
+    }
+    if (ruin_.phase == MazeRuin::Phase::Leave && !ruin_.contains(tileOf(player_.x), tileOf(player_.y))) {
+        dismissRuin();
+        ruin_.phase = MazeRuin::Phase::Wait;
+        ruin_.bossDead = false;
+        ruin_.enteredPlaza = false;
+        ruin_.cooldown = 45.f;
+        note("遗迹沉入地下");
+    }
+#endif
+}
+
+void Session::restoreRuin(const QJsonObject& game) {
+#ifndef Q_OS_WIN
+    (void)game;
+    ruin_.clear();
+    map_.clearRuin();
+    monsters_.erase(std::remove_if(monsters_.begin(), monsters_.end(), [](const Monster& monster) {
+        return monster.kind == MonsterKind::Eye;
+    }), monsters_.end());
+    return;
+#else
+    monsters_.erase(std::remove_if(monsters_.begin(), monsters_.end(), [](const Monster& monster) {
+        return monster.kind == MonsterKind::Eye;
+    }), monsters_.end());
+    if (!game.contains("ruin")) {
+        dismissRuin();
+        ruin_.phase = MazeRuin::Phase::None;
+        if (!spawnRuin()) {
+            ruin_.phase = MazeRuin::Phase::Wait;
+            ruin_.cooldown = 5.f;
+        }
+        return;
+    }
+    const QJsonObject ruin = game.value("ruin").toObject();
+    const auto phase = MazeRuin::Phase(std::clamp(ruin.value("phase").toInt(), 0, 3));
+    if (phase == MazeRuin::Phase::None || phase == MazeRuin::Phase::Wait) {
+        dismissRuin();
+        ruin_.phase = MazeRuin::Phase::Wait;
+        ruin_.cooldown = float(ruin.value("cooldown").toDouble(45.0));
+        if (phase == MazeRuin::Phase::None) {
+            ruin_.cooldown = 0.f;
+        }
+        return;
+    }
+    const int ox = ruin.value("ox").toInt();
+    const int oy = ruin.value("oy").toInt();
+    const uint32_t mazeSeed = uint32_t(ruin.value("seed").toDouble());
+    if (!ruin_.generate(ox, oy, mazeSeed == 0 ? 1u : mazeSeed)) {
+        dismissRuin();
+        ruin_.phase = MazeRuin::Phase::Wait;
+        ruin_.cooldown = 5.f;
+        return;
+    }
+    ruin_.phase = phase;
+    ruin_.bossDead = ruin.value("bossDead").toBool(false);
+    ruin_.enteredPlaza = ruin.value("entered").toBool(false);
+    ruin_.arrive = ruin_.enteredPlaza ? -1.f : 0.f;
+    ruin_.cooldown = float(ruin.value("cooldown").toDouble(0));
+    const QString wallBits = ruin.value("walls").toString();
+    if (wallBits.size() == int(ruin_.wall.size())) {
+        for (int i = 0; i < wallBits.size(); ++i) {
+            ruin_.wall[size_t(i)] = wallBits.at(i) == QLatin1Char('1') ? 1 : 0;
+        }
+    }
+    syncRuinMap();
+    if (phase == MazeRuin::Phase::Live && !ruin_.bossDead) {
+        const float hp = ruin.contains("eyeHp") ? float(ruin.value("eyeHp").toDouble()) : -1.f;
+        const float shield = ruin.contains("eyeShield") ? float(ruin.value("eyeShield").toDouble()) : -1.f;
+        const int level = ruin.value("eyeLevel").toInt(-1);
+        spawnEye(hp, shield, level);
+    }
+#endif
 }

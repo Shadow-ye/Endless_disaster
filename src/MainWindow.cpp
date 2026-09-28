@@ -20,6 +20,7 @@
 #include <QGraphicsOpacityEffect>
 #include <QGridLayout>
 #include <QHBoxLayout>
+#include <QImage>
 #include <QJsonObject>
 #include <QLabel>
 #include <QMessageBox>
@@ -91,36 +92,72 @@ QString findStoryBackground() {
     return {};
 }
 
-QString findCharacterImage(const QString& fileName) {
-    const QString appDir = QCoreApplication::applicationDirPath();
-    QStringList candidates;
+QString findHeroIdleSheet(const QString& folder) {
+    const QString relative = QStringLiteral("/assets/") + folder + QStringLiteral("/idle.png");
     for (const QString& root : Platform::dataRoots()) {
-        candidates << root + QStringLiteral("/character-img/") + fileName
-                   << root + QStringLiteral("/assets/character-img/") + fileName;
-    }
-    candidates << QDir(appDir).absoluteFilePath(QStringLiteral("../assets/character-img/") + fileName)
-               << QDir(appDir).absoluteFilePath(QStringLiteral("../build/character-img/") + fileName);
-    for (const QString& path : candidates) {
+        const QString path = root + relative;
         if (QFile::exists(path)) {
             return path;
+        }
+    }
+    QDir dir(QCoreApplication::applicationDirPath());
+    for (int i = 0; i < 6; ++i) {
+        const QString path = dir.filePath(QStringLiteral("assets/") + folder + QStringLiteral("/idle.png"));
+        if (QFile::exists(path)) {
+            return path;
+        }
+        if (!dir.cdUp()) {
+            break;
         }
     }
     return {};
 }
 
-QPixmap loadCharacterPixmap(const QString& fileName) {
-    const QString path = findCharacterImage(fileName);
-    if (path.isEmpty()) {
+// 取待机第 0 帧，裁掉透明边，最近邻放到槽位里才不会发糊。
+QPixmap loadHeroPixelPortrait(const QString& folder, int frameSize, bool faceLeft) {
+    const QString path = findHeroIdleSheet(folder);
+    if (path.isEmpty() || frameSize <= 0) {
         return {};
     }
-    return QPixmap(path);
+    QImage sheet(path);
+    if (sheet.isNull() || sheet.width() < frameSize || sheet.height() < frameSize) {
+        return {};
+    }
+    const QImage frame = sheet.copy(0, 0, frameSize, frameSize).convertToFormat(QImage::Format_ARGB32);
+    int minX = frameSize;
+    int minY = frameSize;
+    int maxX = -1;
+    int maxY = -1;
+    for (int y = 0; y < frame.height(); ++y) {
+        const auto* line = reinterpret_cast<const QRgb*>(frame.constScanLine(y));
+        for (int x = 0; x < frame.width(); ++x) {
+            if (qAlpha(line[x]) == 0) {
+                continue;
+            }
+            minX = std::min(minX, x);
+            minY = std::min(minY, y);
+            maxX = std::max(maxX, x);
+            maxY = std::max(maxY, y);
+        }
+    }
+    if (maxX < minX) {
+        return {};
+    }
+    QImage body = frame.copy(minX, minY, maxX - minX + 1, maxY - minY + 1);
+    if (faceLeft) {
+        body = body.mirrored(true, false);
+    }
+    return QPixmap::fromImage(body);
 }
 
 void placePrepareArt(QLabel* label, const QPixmap& src, const QRect& slot, Qt::Alignment align) {
     if (!label || src.isNull() || slot.width() <= 0 || slot.height() <= 0) {
         return;
     }
-    const QPixmap scaled = src.scaled(slot.size(), Qt::KeepAspectRatio, Qt::SmoothTransformation);
+    const int fit = std::min(slot.width() / src.width(), slot.height() / src.height());
+    const QPixmap scaled = fit >= 1
+        ? src.scaled(src.width() * fit, src.height() * fit, Qt::IgnoreAspectRatio, Qt::FastTransformation)
+        : src.scaled(slot.size(), Qt::KeepAspectRatio, Qt::FastTransformation);
     label->setPixmap(scaled);
     QRect geo(slot.topLeft(), scaled.size());
     if (align.testFlag(Qt::AlignBottom)) {
@@ -272,9 +309,9 @@ MainWindow::MainWindow(QWidget* parent) : QWidget(parent) {
     prepareWarriorArt_ = makeArtLabel(QStringLiteral("prepareWarriorArt"));
     prepareMageArt_ = makeArtLabel(QStringLiteral("prepareMageArt"));
     prepareSwordArt_ = makeArtLabel(QStringLiteral("prepareSwordArt"));
-    prepareWarriorPix_ = loadCharacterPixmap(QStringLiteral("战士.png"));
-    prepareMagePix_ = loadCharacterPixmap(QStringLiteral("法师.png"));
-    prepareSwordPix_ = loadCharacterPixmap(QStringLiteral("女剑士.png"));
+    prepareWarriorPix_ = loadHeroPixelPortrait(QStringLiteral("hero_warrior"), 64, true);
+    prepareMagePix_ = loadHeroPixelPortrait(QStringLiteral("hero_mage"), 64, true);
+    prepareSwordPix_ = loadHeroPixelPortrait(QStringLiteral("hero_sword"), 64, false);
     prepareWarriorOpacity_ = new QGraphicsOpacityEffect(prepareWarriorArt_);
     prepareMageOpacity_ = new QGraphicsOpacityEffect(prepareMageArt_);
     prepareSwordOpacity_ = new QGraphicsOpacityEffect(prepareSwordArt_);
@@ -682,16 +719,26 @@ void MainWindow::refreshPrepareSkills() {
         for (int i = 0; i < 4; ++i) {
             html += line(kSlotKeys[i], skillText(mageSkillBoxes_[i]->currentData().toInt()));
         }
+#ifdef Q_OS_WIN
+        html += "<p style='margin:8px 0 0 0; color:#a89888;'>可选技能共六个，带走其中四个。击杀 20 个入侵怪物可获得天赋「世界指引」，按 G 使用寻路。</p>";
+#else
         html += "<p style='margin:8px 0 0 0; color:#a89888;'>可选技能共六个，带走其中四个。</p>";
+#endif
     } else {
         const auto& boxes = robot ? robotSkillBoxes_ : warriorSkillBoxes_;
         skillHint_->setText(QString("Q 防御　E 恢复　%1技能栏：R / F / C（自选，不可重复）").arg(info.role));
         for (int i = 0; i < 3; ++i) {
             html += line(kSlotKeys[i], skillText(boxes[i]->currentData().toInt()));
         }
+#ifdef Q_OS_WIN
+        html += robot
+            ? "<p style='margin:8px 0 0 0; color:#a89888;'>散射 / 爆破弹 / 推进 / 过载 / 蜂群 / 磁力场 / 战术医疗包 / 喷气背包，八选三分配到三个键位。击杀 20 个入侵怪物可获得天赋「世界指引」，按 G 使用寻路。</p>"
+            : "<p style='margin:8px 0 0 0; color:#a89888;'>回旋斩 / 剑气 / 突刺 / 狂化，四选三分配到三个键位。击杀 20 个入侵怪物可获得天赋「世界指引」，按 G 使用寻路。</p>";
+#else
         html += robot
             ? "<p style='margin:8px 0 0 0; color:#a89888;'>散射 / 爆破弹 / 推进 / 过载 / 蜂群 / 磁力场 / 战术医疗包 / 喷气背包，八选三分配到三个键位。</p>"
             : "<p style='margin:8px 0 0 0; color:#a89888;'>回旋斩 / 剑气 / 突刺 / 狂化，四选三分配到三个键位。</p>";
+#endif
     }
     if (Platform::touchUi()) {
         html += "<p style='margin:8px 0 0 0; color:#a89888;'>" + glossary_->text().replace('\n', "<br>") + "</p>";
@@ -798,7 +845,7 @@ void MainWindow::layoutPrepareArt() {
         return;
     }
 
-    // 布局图：女剑士左下；战士右上角、法师右下角缩小贴边；菜单居中。
+    // 像素立绘：女剑客左下朝向菜单；战士右上、法师右下朝向菜单。
     const int w = r.width();
     const int h = r.height();
     const QRect swordSlot(0, int(h * 0.12), int(w * 0.30), int(h * 0.88));

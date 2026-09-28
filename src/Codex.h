@@ -28,6 +28,7 @@ inline constexpr int kSkillSwarm = 24;
 inline constexpr int kSkillMagField = 25;
 inline constexpr int kSkillMedkit = 26;
 inline constexpr int kSkillJetpack = 27;
+inline constexpr int kSkillSeek = 30;
 
 inline constexpr int kWarriorSkillPool[] = {
     kSkillSpin, kSkillSwordQi, kSkillThrust, kSkillBerserk};
@@ -103,6 +104,8 @@ inline SkillText skillText(int id) {
         return {"喷气背包", "开关喷气背包，离地飞行，可越过岩石和灌木。每秒消耗 22，优先扣 STA，再扣 MP，耗尽后落地；飞行中 STA 不回复。"};
     case kSkillSwarm:
         return {"蜂群", "身边召唤 6 架小型无人机，成群撞向离自己最近的怪物并爆炸，半径 26 内基础伤害 11 并击退。无人机会被怪物子弹打爆，12 秒后自毁。消耗 22 MP，冷却 7 秒。"};
+    case kSkillSeek:
+        return {"寻路", "按 G 开关。雷达标出迷宫遗迹方向；身在迷宫中时，另一份地图实时画出进出中央广场的唯一路线。不消耗 MP。由天赋「世界指引」获得。"};
     default:
         return {"未知", ""};
     }
@@ -138,4 +141,8 @@ inline QString talentLightDetail() {
 
 inline QString talentMasteryDetail() {
     return "战斗熟练度：技能冷却 -25%，攻击速度 +25%。累计释放技能 12 次后获得。";
+}
+
+inline QString talentGuideDetail() {
+    return "击杀 20 个入侵世界的怪物后获得额外技能寻路，按 G 开关。";
 }

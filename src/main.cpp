@@ -29,6 +29,10 @@ QString findGameIcon() {
 }  // namespace
 
 int main(int argc, char* argv[]) {
+#ifdef Q_OS_WIN
+    // FFmpeg 后端会在声道未就绪时反复初始化重采样。Windows 改走系统播放器，这条循环不会跑。
+    qputenv("QT_MEDIA_BACKEND", "windows");
+#endif
     Platform::configureDisplay();
     QApplication app(argc, argv);
     QCoreApplication::setOrganizationName("EndlessDisaster");

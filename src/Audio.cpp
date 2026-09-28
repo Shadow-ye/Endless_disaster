@@ -4,6 +4,8 @@
 #include <QAudioOutput>
 #include <QCoreApplication>
 #include <QDir>
+#include <QDateTime>
+#include <QFileInfo>
 #include <QMediaPlayer>
 #include <QSoundEffect>
 #include <QUrl>
@@ -49,6 +51,8 @@ struct AudioState {
     std::array<int, int(SfxId::Count)> cursor{};
     QMediaPlayer* bgm = nullptr;
     QAudioOutput* bgmOut = nullptr;
+    QMediaPlayer* burialVoice = nullptr;
+    QAudioOutput* burialOut = nullptr;
 };
 
 AudioState& state() {
@@ -56,20 +60,46 @@ AudioState& state() {
     return s;
 }
 
-QString resolveBgmDir(const QString& assetDir) {
-    const QStringList candidates = {
+QStringList bgmDirCandidates(const QString& assetDir) {
+    return {
         QDir(assetDir).absoluteFilePath("../BGM"),
         QCoreApplication::applicationDirPath() + "/BGM",
         assetDir + "/BGM",
         QDir(assetDir).absoluteFilePath("../../BGM"),
     };
-    for (const QString& path : candidates) {
+}
+
+QString resolveBgmDir(const QString& assetDir) {
+    for (const QString& path : bgmDirCandidates(assetDir)) {
         const QDir dir(QDir::cleanPath(path));
         if (dir.exists()) {
             return dir.absolutePath();
         }
     }
     return QCoreApplication::applicationDirPath() + "/BGM";
+}
+
+QString findClip(const QString& assetDir, const QString& token) {
+    const QStringList filters = {"*.wav", "*.mp3", "*.m4a", "*.ogg", "*.flac"};
+    QString best;
+    QDateTime bestTime;
+    for (const QString& path : bgmDirCandidates(assetDir)) {
+        const QDir dir(QDir::cleanPath(path));
+        if (!dir.exists()) {
+            continue;
+        }
+        for (const QString& name : dir.entryList(filters, QDir::Files, QDir::Name)) {
+            if (!name.contains(token)) {
+                continue;
+            }
+            const QFileInfo info(dir.absoluteFilePath(name));
+            if (best.isEmpty() || info.lastModified() > bestTime) {
+                best = info.absoluteFilePath();
+                bestTime = info.lastModified();
+            }
+        }
+    }
+    return best;
 }
 }  // namespace
 
@@ -103,6 +133,14 @@ void Audio::load(const QString& assetDir) {
                     Audio::instance().notifyBgmEnded();
                 }
             });
+        state().burialOut = new QAudioOutput(QCoreApplication::instance());
+        state().burialVoice = new QMediaPlayer(QCoreApplication::instance());
+        state().burialVoice->setAudioOutput(state().burialOut);
+        state().burialVoice->setLoops(1);
+        const QString burial = findClip(assetDir, QStringLiteral("万葬"));
+        if (!burial.isEmpty()) {
+            state().burialVoice->setSource(Platform::mediaUrl(burial));
+        }
         loaded_ = true;
     }
     rebuildSfxVolumes();
@@ -167,6 +205,9 @@ void Audio::rebuildSfxVolumes() {
             }
         }
     }
+    if (state().burialOut) {
+        state().burialOut->setVolume(vol);
+    }
 }
 
 void Audio::rebuildBgmVolume() {
@@ -195,6 +236,19 @@ void Audio::play(SfxId id) {
         effect->stop();
     }
     effect->play();
+}
+
+void Audio::playBurialVoice() {
+    QMediaPlayer* voice = state().burialVoice;
+    if (!loaded_ || !sfxEnabled_ || sfxVolumePercent_ <= 0 || !voice || voice->source().isEmpty()) {
+        return;
+    }
+    if (state().burialOut) {
+        state().burialOut->setVolume(float(sfxVolumePercent_) / 100.f);
+    }
+    voice->stop();
+    voice->setPosition(0);
+    voice->play();
 }
 
 void Audio::playBgm(BgmId id, bool loop) {

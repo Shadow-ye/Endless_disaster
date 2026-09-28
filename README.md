@@ -60,6 +60,7 @@
 
 | 版本 | 主要内容 |
 |------|----------|
+| [v0.5.0](https://github.com/Shadow-ye/Endless_disaster/releases/tag/v0.5.0) | Windows：迷宫遗迹与克苏鲁之眼；击杀 20 个入侵怪物获得天赋「世界指引」，按 G 寻路；万葬播放配音；出发界面改用角色像素图 |
 | [v0.4.0](https://github.com/Shadow-ye/Endless_disaster/releases/tag/v0.4.0) | 新职业机甲人（8 方向，弹匣与换弹，八选三技能：蜂群、磁力场、医疗包、喷气背包等）；新怪物机器人小兵；修复飞行 / 跳跃落在岩石上卡住 |
 | [v0.3.4](https://github.com/Shadow-ye/Endless_disaster/releases/tag/v0.3.4) | 安卓：自动索敌（可开关），攻击与技能朝向最近的敌人，闪避仍按摇杆方向 |
 | [v0.3.3](https://github.com/Shadow-ye/Endless_disaster/releases/tag/v0.3.3) | 安卓：摇杆不再被另一只手的触屏干扰，左半屏专管摇杆，底座跟随手指 |

@@ -60,13 +60,16 @@ private:
     void leaveToMenu();
     void saveGame();
     void askSettle();
+    void showVoidPrompt();
     void commitEnd();
     void layoutOverlays();
     void syncKey(int key, bool down);
     QRect viewRect() const;
     QPointF mouseWorld() const;
     void drawWorld(QPainter& painter);
+    void drawBossBar(QPainter& painter, const QRect& view);
     void drawRadar(QPainter& painter, const QRect& view);
+    void drawMazeMap(QPainter& painter, const QRect& view);
 
     qreal touchUnit() const;
     QPointF stickHome() const;
@@ -80,6 +83,7 @@ private:
     void pressTouch(TouchControl control, bool down);
     void releaseAllTouches();
     void toggleAutoAim();
+    bool aimLockEnabled() const;
     void updateAimTarget();
     const Monster* aimTarget() const;
     const QImage& touchSprite(qreal radius, const QColor& rim, const QColor& fill, const QString& label, int fontPx, const QColor& textColor);
@@ -124,4 +128,5 @@ private:
     QWidget* resultPanel_ = nullptr;
     QLabel* resultText_ = nullptr;
     QWidget* confirmPanel_ = nullptr;
+    QWidget* voidPanel_ = nullptr;
 };
