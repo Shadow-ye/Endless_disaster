@@ -1,0 +1,173 @@
+<!doctype html>
+<html lang="zh-CN">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>无尽之灾 Endless Disaster · 肉鸽动作生存</title>
+  <meta name="description" content="无尽之灾：2D 俯视角肉鸽动作生存游戏。怪物入侵世界，而你要做的是活下去。支持 Windows / Linux / Android。">
+  <meta property="og:title" content="无尽之灾 Endless Disaster">
+  <meta property="og:description" content="怪物入侵世界，而你要做的是活下去。">
+  <meta property="og:image" content="img/story_bg.jpg">
+  <link rel="icon" href="favicon.ico">
+  <link rel="stylesheet" href="style.css">
+</head>
+<body>
+  <header class="nav" id="nav">
+    <a class="brand" href="#top"><img src="img/icon.jpg" alt="">无尽之灾</a>
+    <nav>
+      <a href="#story">世界</a>
+      <a href="#heroes">职业</a>
+      <a href="#bestiary">图鉴</a>
+      <a href="#ruin">遗迹</a>
+      <a href="#talents">天赋</a>
+      <a href="#controls">操作</a>
+      <a href="#versions">版本</a>
+      <a class="nav-cta" href="#download">下载</a>
+    </nav>
+  </header>
+
+  <section class="hero" id="top">
+    <canvas id="battle" aria-hidden="true"></canvas>
+    <div class="hero-shade"></div>
+    <div class="hud" aria-hidden="true">
+      <div class="hud-class"><span id="hudClass">战士</span><small id="hudLevel">Lv 1</small></div>
+      <div class="hud-bar hp"><i id="hudHp"></i></div>
+      <div class="hud-bar mp"><i id="hudMp"></i></div>
+      <div class="hud-bar xp"><i id="hudXp"></i></div>
+    </div>
+    <div class="hud-stats" aria-hidden="true">
+      <span>生存 <b id="hudTime">00:00</b></span>
+      <span>击杀 <b id="hudKills">0</b></span>
+    </div>
+    <div class="hero-content">
+      <p class="badge"><span id="latestTag">v0.5.1</span> · Roguelike 动作生存</p>
+      <h1 class="title" data-text="无尽之灾">无尽之灾</h1>
+      <p class="subtitle">ENDLESS&nbsp;DISASTER</p>
+      <p class="tagline">怪物入侵世界，而你要做的是——<em>活下去</em>。</p>
+      <div class="cta">
+        <a class="btn primary" href="#download">免费下载</a>
+        <a class="btn ghost" href="https://github.com/Shadow-ye/Endless_disaster" target="_blank" rel="noopener">GitHub 源码</a>
+      </div>
+    </div>
+    <a class="scroll-hint" href="#story" aria-label="向下滚动"><span></span></a>
+  </section>
+
+  <section class="story" id="story">
+    <div class="story-bg" style="background-image:url(img/story_bg.jpg)"></div>
+    <div class="story-inner reveal">
+      <h2 class="section-title">怪物潮汐，永无止境</h2>
+      <p>史莱姆、骷髅、蘑菇、飞行怪、施法怪……还有会绕着你点射的机器人小兵。它们从世界的每一个角落涌来，一波比一波更凶。</p>
+      <p>在一次次开局中选择职业与技能、解锁天赋、冲击更长的生存时间与更高的积分。<b>死亡即结束本局</b>，而最高记录会一直留着。</p>
+    </div>
+    <ol class="loop reveal" id="loop">
+      <li><b>出发</b><span>主菜单踏上旅途</span></li>
+      <li><b>自选职业与技能</b><span>为技能键装配招式</span></li>
+      <li><b>无尽刷怪求生</b><span>升级、捡装备、解锁天赋</span></li>
+      <li><b>结算记录</b><span>最高用时与最高积分</span></li>
+      <li><b>再开一局</b><span>换一套构筑重新来过</span></li>
+    </ol>
+  </section>
+
+  <section class="heroes" id="heroes">
+    <h2 class="section-title reveal">四名职业，四种打法</h2>
+    <p class="section-sub reveal">出发前点立绘切换职业，并为技能键装配技能。</p>
+    <div class="hero-tabs reveal" role="tablist" id="heroTabs"></div>
+    <div class="hero-panel reveal" id="heroPanel">
+      <div class="hp-art">
+        <div class="hp-glow"></div>
+        <img id="heroPortrait" alt="">
+        <canvas id="heroHolo" class="holo" width="192" height="192"></canvas>
+      </div>
+      <div class="hp-stage">
+        <canvas id="heroStage" width="256" height="256"></canvas>
+        <div class="anim-buttons" id="animButtons"></div>
+      </div>
+      <div class="hp-info">
+        <p class="hp-role" id="heroRole"></p>
+        <h3 id="heroName"></h3>
+        <p class="hp-desc" id="heroDesc"></p>
+        <div class="stats" id="heroStats"></div>
+        <p class="pool-title" id="poolTitle"></p>
+        <div class="skills" id="heroSkills"></div>
+        <p class="skill-detail" id="skillDetail"></p>
+      </div>
+    </div>
+  </section>
+
+  <section class="bestiary" id="bestiary">
+    <h2 class="section-title reveal">怪物图鉴</h2>
+    <p class="section-sub reveal">把鼠标移到卡片上（手机上点一下），看看它们怎么出手、怎么倒下。</p>
+    <div class="monster-grid" id="monsterGrid"></div>
+  </section>
+
+  <section class="ruin" id="ruin">
+    <div class="ruin-text reveal">
+      <h2 class="section-title left">迷宫遗迹 · 克苏鲁之眼</h2>
+      <p>荒野中会升起一座<b>迷宫遗迹</b>：外墙只有一个入口，生成树保证通往中央广场的路只有一条。</p>
+      <p>击杀 20 个入侵世界的怪物，获得天赋<b>「世界指引」</b>，按 <kbd>G</kbd> 寻路——雷达标出遗迹方向，进入迷宫后实时画出唯一通路。</p>
+      <p>广场中央等待你的，是<b class="red">克苏鲁之眼</b>。</p>
+      <p class="muted">右侧演示：每次随机生成一座迷宫，再由「寻路」找出通往广场的路线。</p>
+    </div>
+    <div class="ruin-view reveal">
+      <canvas id="mazeCanvas" width="420" height="420"></canvas>
+      <p class="maze-caption" id="mazeCaption">生成迷宫……</p>
+    </div>
+  </section>
+
+  <section class="talents" id="talents">
+    <h2 class="section-title reveal">天赋：按行为解锁</h2>
+    <p class="section-sub reveal">不是点天赋树，而是由你怎么玩决定你会变成什么样。</p>
+    <div class="talent-grid" id="talentGrid"></div>
+  </section>
+
+  <section class="controls" id="controls">
+    <h2 class="section-title reveal">操作一览</h2>
+    <div class="controls-wrap reveal">
+      <div class="keyboard" id="keyboard"></div>
+      <div class="key-legend" id="keyLegend"></div>
+    </div>
+    <div class="touch-note reveal">
+      <h3>安卓触屏</h3>
+      <p><b>左下</b> 摇杆移动并决定朝向 · <b>右下</b> 攻击（点按轻击、长按重击），内圈闪避 / 防御 / 跳跃，外圈技能与恢复 · <b>右上</b> 索敌、说明、暂停。开启索敌后，攻击与技能自动朝向最近的敌人。</p>
+    </div>
+  </section>
+
+  <section class="versions" id="versions">
+    <h2 class="section-title reveal">版本时间线</h2>
+    <ol class="timeline" id="timeline"></ol>
+  </section>
+
+  <section class="download" id="download">
+    <h2 class="section-title reveal">立即游玩</h2>
+    <p class="section-sub reveal">所有安装包都来自 GitHub Releases，自带运行库，解压 / 安装即玩。</p>
+    <div class="dl-grid">
+      <a class="dl-card reveal" href="https://github.com/Shadow-ye/Endless_disaster/releases/latest/download/EndlessDisaster-windows-x64.zip">
+        <span class="dl-icon win"></span>
+        <b>Windows</b>
+        <span>Windows 10 / 11 x64 · zip</span>
+        <small>解压后双击 EndlessDisaster.exe</small>
+      </a>
+      <a class="dl-card reveal" href="https://github.com/Shadow-ye/Endless_disaster/releases/latest/download/EndlessDisaster-x86_64.AppImage">
+        <span class="dl-icon linux"></span>
+        <b>Linux</b>
+        <span>AppImage 万能包 · x86_64</span>
+        <small>chmod +x 后直接运行；另有 .deb 见 Releases</small>
+      </a>
+      <a class="dl-card reveal" href="https://github.com/Shadow-ye/Endless_disaster/releases/latest/download/EndlessDisaster-android-arm64.apk">
+        <span class="dl-icon android"></span>
+        <b>Android</b>
+        <span>Android 9+ · arm64 · apk</span>
+        <small>固定横屏，v0.3.1 起可覆盖安装保留存档</small>
+      </a>
+    </div>
+    <p class="dl-more reveal"><a href="https://github.com/Shadow-ye/Endless_disaster/releases" target="_blank" rel="noopener">查看全部历史版本 →</a></p>
+  </section>
+
+  <footer class="footer">
+    <p>无尽之灾 Endless Disaster · Qt6 Widgets + Multimedia</p>
+    <p class="muted">角色像素资源基于「小苏早睡」素材改色复刻；机甲人与机器人小兵使用 CC0 素材（Hormelz、patvanmackelberg）。第三方美术 / 音频遵循各自授权。</p>
+  </footer>
+
+  <script src="main.js"></script>
+</body>
+</html>
