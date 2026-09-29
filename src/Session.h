@@ -59,6 +59,8 @@ struct Player {
     float animT = 0.f;
     float attackT = 0.f;
     bool heavy = false;
+    // 本次攻击是近战挥击（战士 / 剑客普攻、机甲人「肘击」技能键）：命中判定走身前扇形
+    bool meleeSwing = false;
     float heavyCharge = 0.f;
     int ammo = kRobotMagazine;
     // 长按换弹后到松开左键之前不再蓄力，松开也不开火
@@ -346,7 +348,7 @@ private:
     void castMagField(float& cooldown);
     void castMedkit(float& cooldown);
     void updateRobotBuffs(float dt);
-    // 机甲人带了「肘击」：普攻改为肘击挥击，技能键也能挥出一次
+    // 机甲人带了「肘击」：技能键挥出一次近战挥击；普攻不受影响，仍是点射
     bool robotMelee() const;
     void swingMelee();
     void castMelee(float& cooldown);

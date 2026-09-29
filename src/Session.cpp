@@ -1081,8 +1081,8 @@ void Session::castHeavySwordQi() {
 }
 
 void Session::slashHostileBolts() {
-    // 机甲人带了「肘击」时也能劈掉敌方飞弹
-    if (player_.state != ActorState::Attack || (rangedHero() && !robotMelee())) {
+    // 近战挥击（含机甲人的「肘击」）能劈掉敌方飞弹，远程点射不行
+    if (player_.state != ActorState::Attack || (rangedHero() && !player_.meleeSwing)) {
         return;
     }
     const float reach = player_.heavy ? 42.f : 34.f;
@@ -1288,6 +1288,8 @@ Monster* Session::findMonster(int id) {
 }
 
 void Session::castSlot(int skill, float& cooldown) {
+    // 技能键打断上一段近战判定窗口；「肘击」走到 swingMelee 时会重新置位
+    player_.meleeSwing = false;
     if (skill == kSkillSeek) {
         player_.seekOn = !player_.seekOn;
         note(player_.seekOn ? "寻路开启" : "寻路关闭");
@@ -1708,6 +1710,7 @@ void Session::swingMelee() {
     player_.state = ActorState::Attack;
     player_.attackT = 0.36f / atkSpeedMul();
     player_.heavy = false;
+    player_.meleeSwing = true;
     player_.animT = 0.f;
     player_.attackId += 1;
     pushSlashFx();
@@ -2234,6 +2237,7 @@ void Session::updatePlayer(float dt, const InputState& input, float mouseX, floa
         }
         player_.attackT = 0.f;
         player_.heavy = false;
+        player_.meleeSwing = false;
         player_.heavyCharge = 0.f;
         player_.animT = 0.f;
         if (player_.hero == HeroClass::Mage) {
@@ -2328,13 +2332,15 @@ void Session::updatePlayer(float dt, const InputState& input, float mouseX, floa
     if (player_.attackT > 0.f) {
         player_.attackT -= dt;
         slashHostileBolts();
-        if (!rangedHero() && !player_.heavy && player_.attackT > 0.12f && player_.attackT < 0.30f && wallStrikeId_ != player_.attackId) {
+        // 近战挥击都能砍墙（含机甲人的「肘击」；机甲人能否砍由 canBreakMazeWalls 决定，击败 boss 后才行）
+        if ((!rangedHero() || player_.meleeSwing) && !player_.heavy && player_.attackT > 0.12f && player_.attackT < 0.30f && wallStrikeId_ != player_.attackId) {
             wallStrikeId_ = player_.attackId;
             breakMazeWallsCone(34.f, 0.35f);
         }
         if (player_.attackT <= 0.f) {
             player_.state = ActorState::Idle;
             player_.heavy = false;
+            player_.meleeSwing = false;
         }
     } else if (input.lmb && player_.hero == HeroClass::Robot) {
         if (!player_.reloadLatch) {
@@ -2368,14 +2374,8 @@ void Session::updatePlayer(float dt, const InputState& input, float mouseX, floa
     if (input.lmbUp && player_.attackT <= 0.f && player_.heavyCharge > 0.f) {
         player_.heavyCharge = 0.f;
         const bool robot = player_.hero == HeroClass::Robot;
-        // 机甲人带了「肘击」：轻击改为肘击挥击，耗体力不耗弹药
-        if (robot && robotMelee()) {
-            if (player_.stamina < kMeleeStaminaCost) {
-                note("体力不足");
-            } else {
-                swingMelee();
-            }
-        } else if (robot && player_.ammo <= 0) {
+        // 机甲人普攻永远是点射（耗弹），「肘击」只由技能键挥出
+        if (robot && player_.ammo <= 0) {
             note("弹匣已空，长按左键换弹");
         } else {
             player_.state = ActorState::Attack;
@@ -2384,12 +2384,15 @@ void Session::updatePlayer(float dt, const InputState& input, float mouseX, floa
             player_.animT = 0.f;
             player_.attackId += 1;
             if (player_.hero == HeroClass::Mage) {
+                player_.meleeSwing = false;
                 fireMageBolt(false);
             } else if (robot) {
+                player_.meleeSwing = false;
                 player_.ammo -= 1;
                 fireRobotShot(0.f, 10.f);
                 queueSfx(SfxId::Swing);
             } else {
+                player_.meleeSwing = true;
                 pushSlashFx();
                 queueSfx(SfxId::Swing);
             }
@@ -2800,7 +2803,7 @@ void Session::updateMonsters(float dt) {
             continue;
         }
 
-        if ((!rangedHero() || robotMelee()) && player_.state == ActorState::Attack && !player_.heavy && player_.attackT > 0.12f && player_.attackT < 0.30f && monster.lastHitBy != player_.attackId) {
+        if ((!rangedHero() || player_.meleeSwing) && player_.state == ActorState::Attack && !player_.heavy && player_.attackT > 0.12f && player_.attackT < 0.30f && monster.lastHitBy != player_.attackId) {
             if (dist < 34.f && dist > 0.01f) {
                 const float dot = (-dx / dist) * player_.facingX + (-dy / dist) * player_.facingY;
                 if (dot > 0.35f) {

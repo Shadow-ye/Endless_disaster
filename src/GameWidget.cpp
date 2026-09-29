@@ -1642,11 +1642,7 @@ void GameWidget::drawTouchControls(QPainter& painter) {
             break;
         case TouchControl::Attack:
             if (player.hero == HeroClass::Robot) {
-                if (player.skillD == kSkillMelee || player.skillF == kSkillMelee || player.skillC == kSkillMelee) {
-                    sub = QStringLiteral("肘击 STA");
-                } else {
-                    sub = player.ammo > 0 ? QString("%1/%2").arg(player.ammo).arg(kRobotMagazine) : QStringLiteral("长按换弹");
-                }
+                sub = player.ammo > 0 ? QString("%1/%2").arg(player.ammo).arg(kRobotMagazine) : QStringLiteral("长按换弹");
             }
             break;
         default:
