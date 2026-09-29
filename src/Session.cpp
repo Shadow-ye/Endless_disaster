@@ -192,12 +192,16 @@ void Session::trackHpForBgm() {
     hpTrack_ = player_.hp;
 }
 
-void Session::newGame(uint32_t seed, uint32_t runId, HeroClass hero, int skillD, int skillF, int skillC, int skillV) {
+void Session::newGame(uint32_t seed, uint32_t runId, HeroClass hero, int skillD, int skillF, int skillC, int skillV,
+    bool guideAtStart) {
     map_ = TileMap(seed);
     player_ = Player{};
     player_.x = 8.f;
     player_.y = 8.f;
     player_.hero = hero;
+    if (guideAtStart) {
+        player_.talentGuide = true;
+    }
     if (hero == HeroClass::Mage) {
         player_.skillD = kSkillMageBolt;
         player_.skillF = kSkillNova;
@@ -317,6 +321,9 @@ void Session::newGame(uint32_t seed, uint32_t runId, HeroClass hero, int skillD,
     voidPrompt_ = false;
     eyeDefeats_ = 0;
     wallStrikeId_ = -1;
+    if (guideAtStart) {
+        note("天赋：世界指引（开局赠送）");
+    }
     spawnRuin();
 }
 
@@ -534,7 +541,6 @@ QJsonObject Session::toJson() const {
         list.append(obj);
     }
     game.insert("monsters", list);
-#ifdef Q_OS_WIN
     if (ruin_.phase != MazeRuin::Phase::None) {
         QJsonObject ruin;
         ruin.insert("phase", int(ruin_.phase));
@@ -560,7 +566,6 @@ QJsonObject Session::toJson() const {
         }
         game.insert("ruin", ruin);
     }
-#endif
     return game;
 }
 
@@ -746,6 +751,10 @@ void Session::pushFx(AttackFxKind kind, float radius, float halfAngle, float lif
     attackFx_.push_back(fx);
 }
 
+void Session::pushSlashFx() {
+    pushFx(AttackFxKind::Slash, 34.f, 1.0f, player_.attackT * 0.6f, player_.berserkT > 0.f ? 0xFF6A50 : 0);
+}
+
 void Session::updateAttackFx(float dt) {
     for (AttackFx& fx : attackFx_) {
         fx.life -= dt;
@@ -894,7 +903,8 @@ void Session::castHeavySwordQi() {
 }
 
 void Session::slashHostileBolts() {
-    if (player_.state != ActorState::Attack || rangedHero()) {
+    // 机甲人带了「肘击」时也能劈掉敌方飞弹
+    if (player_.state != ActorState::Attack || (rangedHero() && !robotMelee())) {
         return;
     }
     const float reach = player_.heavy ? 42.f : 34.f;
@@ -916,17 +926,17 @@ void Session::slashHostileBolts() {
 }
 
 bool Session::canBreakMazeWalls() const {
-#ifndef Q_OS_WIN
-    return false;
-#else
     if (!ruin_.active || ruin_.wall.size() != size_t(MazeRuin::kSize * MazeRuin::kSize)) {
         return false;
+    }
+    // 机甲人是远程职业：子弹、爆破弹、肘击、无人机爆炸都拆不动迷宫墙，只有打败克苏鲁之眼之后才行
+    if (player_.hero == HeroClass::Robot) {
+        return ruin_.bossDead;
     }
     if (player_.hero == HeroClass::Warrior || player_.hero == HeroClass::Sword) {
         return true;
     }
     return ruin_.bossDead;
-#endif
 }
 
 bool Session::breakMazeWallTile(int tileX, int tileY) {
@@ -1053,6 +1063,27 @@ int Session::playerPass() const {
     return map_.blockedAt(player_.x, player_.y, kPlayerRadius, 0) ? 1 : 0;
 }
 
+bool Session::nearestWalkableTile(int tileX, int tileY, int& outX, int& outY) const {
+    int best = std::abs(tileX - pathTileX_) + std::abs(tileY - pathTileY_);
+    bool found = false;
+    const int dirs[4][2] = {{1, 0}, {-1, 0}, {0, 1}, {0, -1}};
+    for (const auto& d : dirs) {
+        const int sx = tileX + d[0];
+        const int sy = tileY + d[1];
+        if (!map_.walkable(sx, sy)) {
+            continue;
+        }
+        const int score = std::abs(sx - pathTileX_) + std::abs(sy - pathTileY_);
+        if (score < best) {
+            best = score;
+            outX = sx;
+            outY = sy;
+            found = true;
+        }
+    }
+    return found;
+}
+
 void Session::tryMove(float& x, float& y, float vx, float vy, float dt, float radius, int pass, float* moved) {
     const float beforeX = x;
     const float beforeY = y;
@@ -1082,6 +1113,10 @@ void Session::castSlot(int skill, float& cooldown) {
     if (skill == kSkillSeek) {
         player_.seekOn = !player_.seekOn;
         note(player_.seekOn ? "寻路开启" : "寻路关闭");
+        return;
+    }
+    if (skill == kSkillMelee) {
+        castMelee(cooldown);
         return;
     }
     if (skill == kSkillSwordQi) {
@@ -1391,6 +1426,12 @@ void Session::updateDrones(float dt) {
         drone.y += drone.vy * dt;
         drone.age += dt;
         drone.life -= dt;
+        // 撞上迷宫墙壁就地爆炸：碎片仍在半径 26 内生效，但拆不掉墙（机甲人要等 boss 倒下才能拆）
+        if (map_.at(tileOf(drone.x), tileOf(drone.y)) == Tile::MazeWall) {
+            drone.life = 0.f;
+            explodeDrone(drone, true);
+            continue;
+        }
         if (drone.life <= 0.f) {
             explodeDrone(drone, false);
             continue;
@@ -1476,6 +1517,35 @@ void Session::castBoost() {
             hurtMonster(monster, rollDamage(10.f, &crit), 8.f, crit, 20.f);
         }
     }
+}
+
+bool Session::robotMelee() const {
+    return player_.hero == HeroClass::Robot
+        && (player_.skillD == kSkillMelee || player_.skillF == kSkillMelee || player_.skillC == kSkillMelee);
+}
+
+// 一次肘击：只扣体力，特效与判定都沿用战士普攻（伤害在 updateMonsters 里结算）
+void Session::swingMelee() {
+    player_.stamina = std::max(0.f, player_.stamina - kMeleeStaminaCost);
+    player_.state = ActorState::Attack;
+    player_.attackT = 0.36f / atkSpeedMul();
+    player_.heavy = false;
+    player_.animT = 0.f;
+    player_.attackId += 1;
+    pushSlashFx();
+    queueSfx(SfxId::Swing);
+}
+
+void Session::castMelee(float& cooldown) {
+    if (cooldown > 0.f || !robotMelee() || player_.state == ActorState::Dodge) {
+        return;
+    }
+    if (player_.stamina < kMeleeStaminaCost) {
+        note("体力不足");
+        return;
+    }
+    swingMelee();
+    cooldown = kMeleeCooldown * cdMul();
 }
 
 void Session::castSpin() {
@@ -2109,17 +2179,23 @@ void Session::updatePlayer(float dt, const InputState& input, float mouseX, floa
         player_.heavyCharge = 0.f;
     }
     if (input.lmbUp && player_.attackT <= 0.f && player_.heavyCharge > 0.f) {
-        if (player_.hero == HeroClass::Robot && player_.ammo <= 0) {
-            player_.heavyCharge = 0.f;
+        player_.heavyCharge = 0.f;
+        const bool robot = player_.hero == HeroClass::Robot;
+        // 机甲人带了「肘击」：轻击改为肘击挥击，耗体力不耗弹药
+        if (robot && robotMelee()) {
+            if (player_.stamina < kMeleeStaminaCost) {
+                note("体力不足");
+            } else {
+                swingMelee();
+            }
+        } else if (robot && player_.ammo <= 0) {
             note("弹匣已空，长按左键换弹");
         } else {
-            const bool robot = player_.hero == HeroClass::Robot;
             player_.state = ActorState::Attack;
             player_.attackT = (robot ? kRobotShotGap : 0.36f) / as;
             player_.heavy = false;
             player_.animT = 0.f;
             player_.attackId += 1;
-            player_.heavyCharge = 0.f;
             if (player_.hero == HeroClass::Mage) {
                 fireMageBolt(false);
             } else if (robot) {
@@ -2127,7 +2203,7 @@ void Session::updatePlayer(float dt, const InputState& input, float mouseX, floa
                 fireRobotShot(0.f, 10.f);
                 queueSfx(SfxId::Swing);
             } else {
-                pushFx(AttackFxKind::Slash, 34.f, 1.0f, player_.attackT * 0.6f, player_.berserkT > 0.f ? 0xFF6A50 : 0);
+                pushSlashFx();
                 queueSfx(SfxId::Swing);
             }
         }
@@ -2364,7 +2440,11 @@ bool Session::chaseOffscreen(Monster& monster, float dt) {
     // 玩家奔跑约 96。离画面越远越快，贴回边缘时回到原本速度
     const float speed = base + std::min(100.f, outside * 0.55f);
     // 飞行怪只被迷宫墙挡住；其余画面外可以迈过岩石和灌木，水和迷宫墙仍然绕开
-    const int pass = monster.kind == MonsterKind::Flyer ? 2 : 1;
+    int pass = monster.kind == MonsterKind::Flyer ? 2 : 1;
+    // 被击退或互相挤推进水里时放行：陷在过不去的地形里会永久卡住，先迈出来再绕行
+    if (pass < 2 && map_.blockedAt(monster.x, monster.y, kMonsterRadius, pass)) {
+        pass = 2;
+    }
 
     const float inv = 1.f / dist;
     const float towardX = dx * inv;
@@ -2380,6 +2460,17 @@ bool Session::chaseOffscreen(Monster& monster, float dt) {
         int ny = 0;
         bool following = false;
         if (paths_.nextTile(tileOf(monster.x), tileOf(monster.y), nx, ny)) {
+            const float gx = (nx + 0.5f) * kTile - monster.x;
+            const float gy = (ny + 0.5f) * kTile - monster.y;
+            const float gd = lengthOf(gx, gy);
+            if (gd > 0.5f && !probeBlocked(gx / gd, gy / gd)) {
+                dirX = gx / gd;
+                dirY = gy / gd;
+                following = true;
+            }
+        }
+        if (!following && nearestWalkableTile(tileOf(monster.x), tileOf(monster.y), nx, ny)) {
+            // 画面外能踩过岩石和灌木，脚下这格就不在寻路图里：先挪回相邻可走的格子
             const float gx = (nx + 0.5f) * kTile - monster.x;
             const float gy = (ny + 0.5f) * kTile - monster.y;
             const float gd = lengthOf(gx, gy);
@@ -2458,14 +2549,18 @@ void Session::updateMonsters(float dt) {
         const float dy = player_.y - monster.y;
         const float dist = lengthOf(dx, dy);
         faceToward(monster.facingX, monster.facingY, monster.flip, dx, dy);
-        const int pass = monster.kind == MonsterKind::Flyer ? 2 : 0;
+        // 画面外能踩过岩石和灌木，踏进画面时脚下若正压着这类地形就会卡死：放行到走出来为止
+        int pass = monster.kind == MonsterKind::Flyer ? 2 : 0;
+        if (pass == 0 && map_.blockedAt(monster.x, monster.y, kMonsterRadius, 0)) {
+            pass = 1;
+        }
 
         if (monster.kind == MonsterKind::Eye) {
             updateEye(monster, dt);
             continue;
         }
 
-        if (!rangedHero() && player_.state == ActorState::Attack && !player_.heavy && player_.attackT > 0.12f && player_.attackT < 0.30f && monster.lastHitBy != player_.attackId) {
+        if ((!rangedHero() || robotMelee()) && player_.state == ActorState::Attack && !player_.heavy && player_.attackT > 0.12f && player_.attackT < 0.30f && monster.lastHitBy != player_.attackId) {
             if (dist < 34.f && dist > 0.01f) {
                 const float dot = (-dx / dist) * player_.facingX + (-dy / dist) * player_.facingY;
                 if (dot > 0.35f) {
@@ -2604,28 +2699,9 @@ void Session::updateMonsters(float dt) {
         if (monster.kind != MonsterKind::Flyer && paths_.nextTile(tx, ty, nx, ny)) {
             gx = (nx + 0.5f) * kTile;
             gy = (ny + 0.5f) * kTile;
-        } else if (monster.kind != MonsterKind::Flyer && dist > 20.f) {
-            int bestX = tx;
-            int bestY = ty;
-            int best = std::abs(tx - pathTileX_) + std::abs(ty - pathTileY_);
-            const int dirs[4][2] = {{1, 0}, {-1, 0}, {0, 1}, {0, -1}};
-            for (const auto& d : dirs) {
-                const int sx = tx + d[0];
-                const int sy = ty + d[1];
-                if (!map_.walkable(sx, sy)) {
-                    continue;
-                }
-                const int score = std::abs(sx - pathTileX_) + std::abs(sy - pathTileY_);
-                if (score < best) {
-                    best = score;
-                    bestX = sx;
-                    bestY = sy;
-                }
-            }
-            if (bestX != tx || bestY != ty) {
-                gx = (bestX + 0.5f) * kTile;
-                gy = (bestY + 0.5f) * kTile;
-            }
+        } else if (monster.kind != MonsterKind::Flyer && dist > 20.f && nearestWalkableTile(tx, ty, nx, ny)) {
+            gx = (nx + 0.5f) * kTile;
+            gy = (ny + 0.5f) * kTile;
         }
         const float mx = gx - monster.x;
         const float my = gy - monster.y;
@@ -2664,11 +2740,20 @@ void Session::updateMonsters(float dt) {
                 d = 1.f;
             }
             if (d < 14.f) {
+                // 互推不看地形：先确认落点站得住，否则会把怪挤进水里或墙里再也出不来
                 const float push = (14.f - d) * 0.5f;
-                monsters_[i].x -= dx / d * push;
-                monsters_[i].y -= dy / d * push;
-                monsters_[j].x += dx / d * push;
-                monsters_[j].y += dy / d * push;
+                const float ux = dx / d * push;
+                const float uy = dy / d * push;
+                const int passI = monsters_[i].kind == MonsterKind::Flyer ? 2 : 0;
+                const int passJ = monsters_[j].kind == MonsterKind::Flyer ? 2 : 0;
+                if (!map_.blockedAt(monsters_[i].x - ux, monsters_[i].y - uy, kMonsterRadius, passI)) {
+                    monsters_[i].x -= ux;
+                    monsters_[i].y -= uy;
+                }
+                if (!map_.blockedAt(monsters_[j].x + ux, monsters_[j].y + uy, kMonsterRadius, passJ)) {
+                    monsters_[j].x += ux;
+                    monsters_[j].y += uy;
+                }
             }
         }
     }
@@ -2797,9 +2882,6 @@ void Session::spawnEye(float hp, float shield, int level) {
 }
 
 bool Session::spawnRuin() {
-#ifndef Q_OS_WIN
-    return false;
-#else
     const int px = tileOf(player_.x);
     const int py = tileOf(player_.y);
     for (int attempt = 0; attempt < 40; ++attempt) {
@@ -2854,7 +2936,6 @@ bool Session::spawnRuin() {
     ruin_.clear();
     map_.clearRuin();
     return false;
-#endif
 }
 
 void Session::updateEye(Monster& monster, float dt) {
@@ -2964,10 +3045,6 @@ void Session::cameraShake(float& sx, float& sy) const {
 
 void Session::updateRuin(float dt) {
     shakeT_ = std::max(0.f, shakeT_ - dt);
-#ifndef Q_OS_WIN
-    (void)dt;
-    return;
-#else
     const bool wantRed = ruin_.phase == MazeRuin::Phase::Live && !ruin_.bossDead
         && ruin_.inPlaza(tileOf(player_.x), tileOf(player_.y));
     const float target = wantRed ? 1.f : 0.f;
@@ -3011,19 +3088,9 @@ void Session::updateRuin(float dt) {
         ruin_.cooldown = 45.f;
         note("遗迹沉入地下");
     }
-#endif
 }
 
 void Session::restoreRuin(const QJsonObject& game) {
-#ifndef Q_OS_WIN
-    (void)game;
-    ruin_.clear();
-    map_.clearRuin();
-    monsters_.erase(std::remove_if(monsters_.begin(), monsters_.end(), [](const Monster& monster) {
-        return monster.kind == MonsterKind::Eye;
-    }), monsters_.end());
-    return;
-#else
     monsters_.erase(std::remove_if(monsters_.begin(), monsters_.end(), [](const Monster& monster) {
         return monster.kind == MonsterKind::Eye;
     }), monsters_.end());
@@ -3074,5 +3141,4 @@ void Session::restoreRuin(const QJsonObject& game) {
         const int level = ruin.value("eyeLevel").toInt(-1);
         spawnEye(hp, shield, level);
     }
-#endif
 }

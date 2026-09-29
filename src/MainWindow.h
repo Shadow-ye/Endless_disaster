@@ -84,6 +84,7 @@ private:
     QCheckBox* bgmCheck_ = nullptr;
     QSlider* bgmSlider_ = nullptr;
     QLabel* bgmVolumeLabel_ = nullptr;
+    QCheckBox* guideCheck_ = nullptr;
     HeroClass hero_ = HeroClass::Warrior;
     QPushButton* heroButton_ = nullptr;
     QLabel* heroStats_ = nullptr;

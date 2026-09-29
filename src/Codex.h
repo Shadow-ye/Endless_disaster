@@ -28,7 +28,12 @@ inline constexpr int kSkillSwarm = 24;
 inline constexpr int kSkillMagField = 25;
 inline constexpr int kSkillMedkit = 26;
 inline constexpr int kSkillJetpack = 27;
+inline constexpr int kSkillMelee = 28;
 inline constexpr int kSkillSeek = 30;
+
+// 机甲人「近战」：一次挥击消耗的体力与技能键冷却
+inline constexpr float kMeleeStaminaCost = 8.f;
+inline constexpr float kMeleeCooldown = 0.9f;
 
 inline constexpr int kWarriorSkillPool[] = {
     kSkillSpin, kSkillSwordQi, kSkillThrust, kSkillBerserk};
@@ -37,7 +42,8 @@ inline constexpr int kMageSkillPool[] = {
     kSkillMageBolt, kSkillNova, kSkillFlight, kSkillBurial, kSkillMirror, kSkillMageHeal};
 
 inline constexpr int kRobotSkillPool[] = {
-    kSkillScatter, kSkillMissile, kSkillBoost, kSkillOverload, kSkillSwarm, kSkillMagField, kSkillMedkit, kSkillJetpack};
+    kSkillScatter, kSkillMissile, kSkillBoost, kSkillOverload, kSkillSwarm, kSkillMagField, kSkillMedkit, kSkillJetpack,
+    kSkillMelee};
 
 inline bool isWarriorSkill(int id) {
     for (int skill : kWarriorSkillPool) {
@@ -103,7 +109,9 @@ inline SkillText skillText(int id) {
     case kSkillJetpack:
         return {"喷气背包", "开关喷气背包，离地飞行，可越过岩石和灌木。每秒消耗 22，优先扣 STA，再扣 MP，耗尽后落地；飞行中 STA 不回复。"};
     case kSkillSwarm:
-        return {"蜂群", "身边召唤 6 架小型无人机，成群撞向离自己最近的怪物并爆炸，半径 26 内基础伤害 11 并击退。无人机会被怪物子弹打爆，12 秒后自毁。消耗 22 MP，冷却 7 秒。"};
+        return {"蜂群", "身边召唤 6 架小型无人机，成群撞向离自己最近的怪物并爆炸，半径 26 内基础伤害 11 并击退。无人机会被怪物子弹打爆，撞上迷宫墙壁也会爆炸，12 秒后自毁。消耗 22 MP，冷却 7 秒。"};
+    case kSkillMelee:
+        return {"肘击", "收起枪械用肘部撞击：选中后轻击（点按左键 / 点按攻击）变成肘击，特效与战士普攻一致，攻击身前 34 距离内扇形范围的敌人，基础伤害 11，并能劈掉敌方飞弹。每次消耗 8 STA，不消耗 MP，也不消耗弹药；长按左键仍是换弹。按下本技能键同样挥出一次，冷却 0.9 秒。"};
     case kSkillSeek:
         return {"寻路", "按 G 开关（安卓点右上角「寻路」）。雷达标出迷宫遗迹方向；进入迷宫会自动显示迷宫地图，开启后地图上才画出进出中央广场的唯一路线。不消耗 MP。由天赋「世界指引」获得。"};
     default:
@@ -120,7 +128,7 @@ inline SkillText healSkillText() {
 }
 
 inline SkillText lightAttackText() {
-    return {"轻击", "点按左键。近战基础伤害 11；法师发射飞弹伤害 12；机甲人射出子弹伤害 10（射速快，弹匣 30 发）。造成击退。近战可劈砍敌方飞弹。"};
+    return {"轻击", "点按左键。近战基础伤害 11；法师发射飞弹伤害 12；机甲人射出子弹伤害 10（射速快，弹匣 30 发，若带了「肘击」则改为肘击挥击，消耗 8 STA 而不耗弹药）。造成击退。近战可劈砍敌方飞弹。"};
 }
 
 inline SkillText heavyAttackText() {

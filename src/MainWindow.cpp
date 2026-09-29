@@ -511,6 +511,10 @@ MainWindow::MainWindow(QWidget* parent) : QWidget(parent) {
     bgmLayout->addWidget(bgmVolumeLabel_);
     settingsLayout->addWidget(bgmRow);
 
+    guideCheck_ = new QCheckBox("开局立即获得天赋「世界指引」", settingsCard);
+    guideCheck_->setToolTip("开启后新开局直接拥有「世界指引」：按 G（安卓点右上角「寻路」）标出迷宫遗迹方向并画出通路，不必先击杀 20 个入侵怪物。");
+    settingsLayout->addWidget(guideCheck_);
+
     auto* settingsBack = new QPushButton("返回", settingsCard);
     settingsLayout->addWidget(settingsBack);
     settingsOuter->addWidget(settingsCard, 0, Qt::AlignHCenter);
@@ -569,6 +573,10 @@ MainWindow::MainWindow(QWidget* parent) : QWidget(parent) {
     });
     connect(bgmSlider_, &QSlider::valueChanged, this, [this](int value) {
         bgmVolumeLabel_->setText(QString("%1%").arg(value));
+        saveSettingsUi();
+    });
+    connect(guideCheck_, &QCheckBox::toggled, this, [this](bool on) {
+        (void)on;
         saveSettingsUi();
     });
     connect(quit, &QPushButton::clicked, this, [] { QApplication::quit(); });
@@ -714,31 +722,25 @@ void MainWindow::refreshPrepareSkills() {
     warriorPickRow_->setVisible(!mage && !robot);
     magePickRow_->setVisible(mage);
     robotPickRow_->setVisible(robot);
+    // 迷宫遗迹与「寻路」在所有平台都有：触屏用右上角按钮代替 G 键
+    const QString guideNote = Platform::touchUi()
+        ? QStringLiteral("击杀 20 个入侵怪物可获得天赋「世界指引」，用右上角「寻路」按钮开关（设置里可改为开局直接拥有）。")
+        : QStringLiteral("击杀 20 个入侵怪物可获得天赋「世界指引」，按 G 使用寻路（设置里可改为开局直接拥有）。");
     if (mage) {
         skillHint_->setText("Q 防御　E 恢复　法师技能栏：R / F / C / V（自选，不可重复）");
         for (int i = 0; i < 4; ++i) {
             html += line(kSlotKeys[i], skillText(mageSkillBoxes_[i]->currentData().toInt()));
         }
-#ifdef Q_OS_WIN
-        html += "<p style='margin:8px 0 0 0; color:#a89888;'>可选技能共六个，带走其中四个。击杀 20 个入侵怪物可获得天赋「世界指引」，按 G 使用寻路。</p>";
-#else
-        html += "<p style='margin:8px 0 0 0; color:#a89888;'>可选技能共六个，带走其中四个。</p>";
-#endif
+        html += "<p style='margin:8px 0 0 0; color:#a89888;'>可选技能共六个，带走其中四个。" + guideNote + "</p>";
     } else {
         const auto& boxes = robot ? robotSkillBoxes_ : warriorSkillBoxes_;
         skillHint_->setText(QString("Q 防御　E 恢复　%1技能栏：R / F / C（自选，不可重复）").arg(info.role));
         for (int i = 0; i < 3; ++i) {
             html += line(kSlotKeys[i], skillText(boxes[i]->currentData().toInt()));
         }
-#ifdef Q_OS_WIN
         html += robot
-            ? "<p style='margin:8px 0 0 0; color:#a89888;'>散射 / 爆破弹 / 推进 / 过载 / 蜂群 / 磁力场 / 战术医疗包 / 喷气背包，八选三分配到三个键位。击杀 20 个入侵怪物可获得天赋「世界指引」，按 G 使用寻路。</p>"
-            : "<p style='margin:8px 0 0 0; color:#a89888;'>回旋斩 / 剑气 / 突刺 / 狂化，四选三分配到三个键位。击杀 20 个入侵怪物可获得天赋「世界指引」，按 G 使用寻路。</p>";
-#else
-        html += robot
-            ? "<p style='margin:8px 0 0 0; color:#a89888;'>散射 / 爆破弹 / 推进 / 过载 / 蜂群 / 磁力场 / 战术医疗包 / 喷气背包，八选三分配到三个键位。</p>"
-            : "<p style='margin:8px 0 0 0; color:#a89888;'>回旋斩 / 剑气 / 突刺 / 狂化，四选三分配到三个键位。</p>";
-#endif
+            ? "<p style='margin:8px 0 0 0; color:#a89888;'>散射 / 爆破弹 / 推进 / 过载 / 蜂群 / 磁力场 / 战术医疗包 / 喷气背包 / 肘击，九选三分配到三个键位。" + guideNote + "</p>"
+            : "<p style='margin:8px 0 0 0; color:#a89888;'>回旋斩 / 剑气 / 突刺 / 狂化，四选三分配到三个键位。" + guideNote + "</p>";
     }
     if (Platform::touchUi()) {
         html += "<p style='margin:8px 0 0 0; color:#a89888;'>" + glossary_->text().replace('\n', "<br>") + "</p>";
@@ -961,6 +963,7 @@ void MainWindow::loadSettingsUi() {
     QSignalBlocker b2(sfxSlider_);
     QSignalBlocker b3(bgmCheck_);
     QSignalBlocker b4(bgmSlider_);
+    QSignalBlocker b5(guideCheck_);
     sfxCheck_->setChecked(settings.sfxEnabled);
     sfxSlider_->setValue(settings.sfxVolume);
     sfxSlider_->setEnabled(settings.sfxEnabled);
@@ -969,6 +972,7 @@ void MainWindow::loadSettingsUi() {
     bgmSlider_->setValue(settings.bgmVolume);
     bgmSlider_->setEnabled(settings.bgmEnabled);
     bgmVolumeLabel_->setText(QString("%1%").arg(settings.bgmVolume));
+    guideCheck_->setChecked(settings.guideAtStart);
     Audio::instance().setSfxEnabled(settings.sfxEnabled);
     Audio::instance().setSfxVolume(settings.sfxVolume);
     Audio::instance().setBgmEnabled(settings.bgmEnabled);
@@ -981,6 +985,7 @@ void MainWindow::saveSettingsUi() {
     settings.sfxVolume = sfxSlider_->value();
     settings.bgmEnabled = bgmCheck_->isChecked();
     settings.bgmVolume = bgmSlider_->value();
+    settings.guideAtStart = guideCheck_->isChecked();
     Audio::instance().setSfxEnabled(settings.sfxEnabled);
     Audio::instance().setSfxVolume(settings.sfxVolume);
     Audio::instance().setBgmEnabled(settings.bgmEnabled);

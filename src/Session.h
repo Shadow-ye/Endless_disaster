@@ -228,7 +228,7 @@ struct Drop {
 class Session {
 public:
     void newGame(uint32_t seed, uint32_t runId, HeroClass hero = HeroClass::Warrior,
-        int skillD = 0, int skillF = 1, int skillC = 2, int skillV = -1);
+        int skillD = 0, int skillF = 1, int skillC = 2, int skillV = -1, bool guideAtStart = false);
     bool loadFrom(const QJsonObject& game);
     QJsonObject toJson() const;
 
@@ -277,6 +277,8 @@ private:
     void hurtMonster(Monster& monster, float damage, float poiseDamage, bool crit = false, float knockback = 0.f);
     void pushFloat(float x, float y, float amount, bool crit);
     void pushFx(AttackFxKind kind, float radius, float halfAngle = 0.7f, float life = 0.35f, uint32_t color = 0);
+    // 战士/剑客普攻与机甲人「肘击」共用同一道挥砍特效
+    void pushSlashFx();
     void queueVfx(VfxKind kind, float x, float y, float radius = 0.f, bool crit = false, MonsterKind monster = MonsterKind::Slime);
     void updateFloats(float dt);
     void updateAttackFx(float dt);
@@ -294,6 +296,8 @@ private:
     void applyEyeLevel();
     void tryMove(float& x, float& y, float vx, float vy, float dt, float radius, int pass, float* moved);
     int playerPass() const;
+    // 脚下这格不可走（岩石 / 灌木 / 水）时，给出朝玩家更近一格的可走邻格
+    bool nearestWalkableTile(int tileX, int tileY, int& outX, int& outY) const;
     void updatePlayer(float dt, const InputState& input, float mouseX, float mouseY);
     void updateMonsters(float dt);
     // 画面外：跨过岩石和灌木直追，被水或迷宫墙挡住时再绕行，并按离画面的距离加速
@@ -317,6 +321,10 @@ private:
     void castMagField(float& cooldown);
     void castMedkit(float& cooldown);
     void updateRobotBuffs(float dt);
+    // 机甲人带了「肘击」：普攻改为肘击挥击，技能键也能挥出一次
+    bool robotMelee() const;
+    void swingMelee();
+    void castMelee(float& cooldown);
     float skillCostMul() const { return player_.overloadT > 0.f ? 1.5f : 1.f; }
     void fireRobotShot(float angleOffset, float baseDamage);
     void castScatter();

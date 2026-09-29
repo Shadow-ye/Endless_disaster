@@ -44,6 +44,9 @@
 namespace {
 constexpr float kPi = 3.14159265f;
 constexpr size_t kMaxParticles = 360;
+// 右上角雷达盘的边长，以及靠它定位的迷宫地图边长
+constexpr int kRadarSide = 112;
+constexpr int kMazeMapSide = 132;
 
 QColor fxColor(const AttackFx& fx, const QColor& fallback) {
     return fx.color == 0 ? fallback : QColor::fromRgb(QRgb(0xFF000000u | fx.color));
@@ -145,6 +148,8 @@ float skillCooldownMax(int skill, float mul) {
         return 3.f * mul;
     case kSkillSwarm:
         return 7.f * mul;
+    case kSkillMelee:
+        return kMeleeCooldown * mul;
     case kSkillSwordQi:
         return 1.5f * mul;
     case kSkillThrust:
@@ -619,7 +624,9 @@ void GameWidget::startNew(HeroClass hero, int skillD, int skillF, int skillC, in
     running_ = true;
     const uint32_t seed = uint32_t(QRandomGenerator::global()->generate());
     const uint32_t runId = uint32_t(QRandomGenerator::global()->generate());
-    session_.newGame(seed == 0 ? 1u : seed, runId == 0 ? 1u : runId, hero, skillD, skillF, skillC, skillV);
+    const AppSettings settings = Storage::loadSettings();
+    session_.newGame(seed == 0 ? 1u : seed, runId == 0 ? 1u : runId, hero, skillD, skillF, skillC, skillV,
+        settings.guideAtStart);
     particles_.clear();
     endCommitted_ = false;
     clock_.restart();
@@ -1554,7 +1561,11 @@ void GameWidget::drawTouchControls(QPainter& painter) {
             break;
         case TouchControl::Attack:
             if (player.hero == HeroClass::Robot) {
-                sub = player.ammo > 0 ? QString("%1/%2").arg(player.ammo).arg(kRobotMagazine) : QStringLiteral("长按换弹");
+                if (player.skillD == kSkillMelee || player.skillF == kSkillMelee || player.skillC == kSkillMelee) {
+                    sub = QStringLiteral("肘击 STA");
+                } else {
+                    sub = player.ammo > 0 ? QString("%1/%2").arg(player.ammo).arg(kRobotMagazine) : QStringLiteral("长按换弹");
+                }
             }
             break;
         default:
@@ -1676,40 +1687,35 @@ void GameWidget::drawWorld(QPainter& painter) {
             }
         }
     }
-    for (int y = y0; y <= y1; ++y) {
-        for (int x = x0; x <= x1; ++x) {
-            const Tile tile = session_.map().at(x, y);
-            if (tile == Tile::MazeWall) {
-                const QRect block(x * kTile, y * kTile - 12, kTile, kTile + 12);
-                painter.setPen(Qt::NoPen);
-                painter.setBrush(QColor(8, 10, 16, 170));
-                painter.drawRect(QRect(x * kTile + 1, y * kTile + 10, kTile - 2, 5));
-                painter.setBrush(QColor(22, 26, 40));
-                painter.setPen(QPen(QColor(6, 8, 14), 1));
-                painter.drawRect(block);
-                painter.setPen(Qt::NoPen);
-                painter.setBrush(QColor(168, 188, 214));
-                painter.drawRect(QRect(x * kTile, y * kTile - 12, kTile, 4));
-                painter.setBrush(QColor(70, 82, 108));
-                painter.drawRect(QRect(x * kTile, y * kTile - 8, kTile, 2));
-                continue;
-            }
-            if (tile != Tile::Rock && tile != Tile::Bush) {
-                continue;
-            }
-            const QRect prop(x * kTile - 8, y * kTile - 14, 32, 32);
-            painter.setPen(Qt::NoPen);
-            painter.setBrush(tile == Tile::Rock ? QColor(20, 16, 16, 160) : QColor(12, 36, 12, 150));
-            painter.drawEllipse(QRectF(x * kTile + 1, y * kTile + 6, 14, 8));
-            if (spritesOk_) {
-                const QRect source = tile == Tile::Rock ? QRect(112, 48, 32, 32) : QRect(64, 48, 32, 32);
-                painter.drawImage(prop, sprites_.tiles, source);
-            } else {
-                painter.setBrush(tile == Tile::Rock ? QColor(40, 40, 44) : QColor(30, 110, 40));
-                painter.drawEllipse(prop);
-            }
+    // 墙体与树木不再统一先画一层，而是和角色一起按脚下深度排序：
+    // 屏幕更靠下（y 更大）的后画，压住更靠上的目标
+    auto paintMazeBlock = [&](int x, int y) {
+        const QRect block(x * kTile, y * kTile - 12, kTile, kTile + 12);
+        painter.setPen(Qt::NoPen);
+        painter.setBrush(QColor(8, 10, 16, 170));
+        painter.drawRect(QRect(x * kTile + 1, y * kTile + 10, kTile - 2, 5));
+        painter.setBrush(QColor(22, 26, 40));
+        painter.setPen(QPen(QColor(6, 8, 14), 1));
+        painter.drawRect(block);
+        painter.setPen(Qt::NoPen);
+        painter.setBrush(QColor(168, 188, 214));
+        painter.drawRect(QRect(x * kTile, y * kTile - 12, kTile, 4));
+        painter.setBrush(QColor(70, 82, 108));
+        painter.drawRect(QRect(x * kTile, y * kTile - 8, kTile, 2));
+    };
+    auto paintProp = [&](int x, int y, Tile tile) {
+        const QRect prop(x * kTile - 8, y * kTile - 14, 32, 32);
+        painter.setPen(Qt::NoPen);
+        painter.setBrush(tile == Tile::Rock ? QColor(20, 16, 16, 160) : QColor(12, 36, 12, 150));
+        painter.drawEllipse(QRectF(x * kTile + 1, y * kTile + 6, 14, 8));
+        if (spritesOk_) {
+            const QRect source = tile == Tile::Rock ? QRect(112, 48, 32, 32) : QRect(64, 48, 32, 32);
+            painter.drawImage(prop, sprites_.tiles, source);
+        } else {
+            painter.setBrush(tile == Tile::Rock ? QColor(40, 40, 44) : QColor(30, 110, 40));
+            painter.drawEllipse(prop);
         }
-    }
+    };
 
     if (const MazeRuin& ruin = session_.ruin(); ruin.active) {
         int outX = 0;
@@ -1756,20 +1762,51 @@ void GameWidget::drawWorld(QPainter& painter) {
         painter.drawEllipse(QRectF(target->x - 11.f, target->y - 5.f, 22.f, 10.f));
     }
 
+    // 深度取脚下位置：墙体/树木用所在格子的顶边，角色用脚底 y。
+    // y 越大越靠近镜头、越后画，于是下方的物体遮住上方的物体；
+    // 同深度时角色后画，避免站在墙边被相邻墙体切掉
     struct DrawItem {
+        enum class Kind { Block, Prop, Player, Monster };
         float y;
-        bool player;
-        const Monster* monster;
+        Kind kind;
+        const Monster* monster = nullptr;
+        int tx = 0;
+        int ty = 0;
+        Tile tile = Tile::Grass;
     };
+    auto solidRank = [](DrawItem::Kind kind) { return kind == DrawItem::Kind::Player || kind == DrawItem::Kind::Monster ? 1 : 0; };
     std::vector<DrawItem> items;
-    items.push_back({player.y, true, nullptr});
-    for (const Monster& monster : session_.monsters()) {
-        items.push_back({monster.y, false, &monster});
+    for (int y = y0; y <= y1; ++y) {
+        for (int x = x0; x <= x1; ++x) {
+            const Tile tile = session_.map().at(x, y);
+            if (tile == Tile::MazeWall) {
+                items.push_back({float(y * kTile), DrawItem::Kind::Block, nullptr, x, y, tile});
+            } else if (tile == Tile::Rock || tile == Tile::Bush) {
+                items.push_back({float(y * kTile), DrawItem::Kind::Prop, nullptr, x, y, tile});
+            }
+        }
     }
-    std::sort(items.begin(), items.end(), [](const DrawItem& a, const DrawItem& b) { return a.y < b.y; });
+    items.push_back({player.y, DrawItem::Kind::Player, nullptr, 0, 0, Tile::Grass});
+    for (const Monster& monster : session_.monsters()) {
+        items.push_back({monster.y, DrawItem::Kind::Monster, &monster, 0, 0, Tile::Grass});
+    }
+    std::stable_sort(items.begin(), items.end(), [&](const DrawItem& a, const DrawItem& b) {
+        if (a.y != b.y) {
+            return a.y < b.y;
+        }
+        return solidRank(a.kind) < solidRank(b.kind);
+    });
 
     for (const DrawItem& item : items) {
-        if (item.player) {
+        if (item.kind == DrawItem::Kind::Block) {
+            paintMazeBlock(item.tx, item.ty);
+            continue;
+        }
+        if (item.kind == DrawItem::Kind::Prop) {
+            paintProp(item.tx, item.ty, item.tile);
+            continue;
+        }
+        if (item.kind == DrawItem::Kind::Player) {
             drawShadow(painter, player.x, player.y);
             if (player.invuln > 0.f && int(player.animT * 24.f) % 2 == 0 && player.state != ActorState::Dead) {
                 continue;
@@ -2558,7 +2595,7 @@ void GameWidget::drawWorld(QPainter& painter) {
 
 void GameWidget::drawRadar(QPainter& painter, const QRect& view) {
     const Player& player = session_.player();
-    constexpr int kRadar = 112;
+    constexpr int kRadar = kRadarSide;
     constexpr float kRange = 320.f;
     const int radarX = view.x() + view.width() - kRadar - 12;
     int radarY = view.y() + 34;
@@ -2701,6 +2738,25 @@ void GameWidget::drawRadar(QPainter& painter, const QRect& view) {
     painter.setRenderHint(QPainter::Antialiasing, false);
 }
 
+QRect GameWidget::mazeMapRect(const QRect& view) const {
+    const int radarX = view.x() + view.width() - kRadarSide - 12;
+    int radarY = view.y() + 34;
+    if (touchUi_) {
+        radarY = std::max(radarY, int(touchUnit() * 0.13) + 8);
+    }
+    int mapX = radarX + (kRadarSide - kMazeMapSide) / 2;
+    int mapY = radarY + kRadarSide + 16;
+    // 触屏时右下角是攻击与技能键，地图压在雷达下方会被按键盖住，一律挪到雷达左侧
+    if (touchUi_ || mapY + kMazeMapSide > view.bottom() - 8) {
+        mapX = radarX - kMazeMapSide - 8;
+        mapY = radarY;
+    }
+    if (mapX < view.x() + 4) {
+        mapX = view.x() + 4;
+    }
+    return QRect(mapX, mapY, kMazeMapSide, kMazeMapSide);
+}
+
 void GameWidget::drawMazeMap(QPainter& painter, const QRect& view) {
     const Player& player = session_.player();
     const MazeRuin& ruin = session_.ruin();
@@ -2711,20 +2767,7 @@ void GameWidget::drawMazeMap(QPainter& painter, const QRect& view) {
     if (!ruin.contains(tileOf(player.x), tileOf(player.y))) {
         return;
     }
-    constexpr int kRadar = 112;
-    const int radarX = view.x() + view.width() - kRadar - 12;
-    int radarY = view.y() + 34;
-    if (touchUi_) {
-        radarY = std::max(radarY, int(touchUnit() * 0.13) + 8);
-    }
-    constexpr int kSide = 132;
-    int mapX = radarX + (kRadar - kSide) / 2;
-    int mapY = radarY + kRadar + 16;
-    if (mapY + kSide > view.bottom() - 8) {
-        mapX = radarX - kSide - 8;
-        mapY = radarY;
-    }
-    const QRect plate(mapX, mapY, kSide, kSide);
+    const QRect plate = mazeMapRect(view);
     painter.setRenderHint(QPainter::Antialiasing, false);
     painter.setPen(Qt::NoPen);
     painter.setBrush(QColor(12, 10, 9, 220));
@@ -2732,7 +2775,7 @@ void GameWidget::drawMazeMap(QPainter& painter, const QRect& view) {
     painter.setPen(QPen(QColor(120, 72, 58), 1));
     painter.setBrush(Qt::NoBrush);
     painter.drawRect(plate.adjusted(0, 0, -1, -1));
-    const float cell = float(kSide - 8) / float(MazeRuin::kSize);
+    const float cell = float(plate.width() - 8) / float(MazeRuin::kSize);
     const float ox = plate.x() + 4.f;
     const float oy = plate.y() + 4.f;
     for (int y = 0; y < MazeRuin::kSize; ++y) {
@@ -2770,13 +2813,16 @@ void GameWidget::drawMazeMap(QPainter& painter, const QRect& view) {
     painter.drawText(QRect(plate.x(), plate.y() - 14, plate.width(), 12), Qt::AlignCenter,
         player.seekOn ? QStringLiteral("迷宫路线") : QStringLiteral("迷宫地图"));
     if (!player.seekOn) {
-        // 没开寻路时压一条提示，免得玩家以为是地图坏了
+        // 没开寻路时补一条提示，免得玩家以为是地图坏了；放在地图外面，别压住地图本身
+        constexpr int kTipH = 13;
+        const int below = plate.bottom() + 2;
+        const int tipY = below + kTipH <= view.bottom() ? below : plate.top() - kTipH - 2;
         painter.setPen(Qt::NoPen);
         painter.setBrush(QColor(12, 10, 9, 210));
-        painter.drawRect(QRect(plate.x(), plate.bottom() - 13, plate.width(), 13));
+        painter.drawRect(QRect(plate.x(), tipY, plate.width(), kTipH));
         painter.setPen(QColor(198, 188, 174));
         painter.setFont(QFont(Platform::uiFontFamily(), 7));
-        painter.drawText(QRect(plate.x(), plate.bottom() - 13, plate.width(), 13), Qt::AlignCenter,
+        painter.drawText(QRect(plate.x(), tipY, plate.width(), kTipH), Qt::AlignCenter,
             QStringLiteral("开启寻路显示路线"));
     }
 }
@@ -2801,7 +2847,11 @@ void GameWidget::drawBossBar(QPainter& painter, const QRect& view) {
     }
 
     const int left = view.x() + 232;
-    const int right = view.right() - (touchUi_ ? 148 : 96);
+    int right = view.right() - (touchUi_ ? 148 : 96);
+    if (touchUi_) {
+        // 触屏时迷宫地图摆在雷达左侧，血条别压上去
+        right = std::min(right, mazeMapRect(view).left() - 8);
+    }
     const int barW = std::min(420, std::max(200, right - left));
     const int barX = left + std::max(0, (right - left - barW) / 2);
     const int barY = view.y() + 30;

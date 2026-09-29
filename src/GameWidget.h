@@ -70,6 +70,8 @@ private:
     void drawWorld(QPainter& painter);
     void drawBossBar(QPainter& painter, const QRect& view);
     void drawRadar(QPainter& painter, const QRect& view);
+    // 迷宫地图的落点：触屏放雷达左侧，避开右下角的攻击与技能键
+    QRect mazeMapRect(const QRect& view) const;
     void drawMazeMap(QPainter& painter, const QRect& view);
 
     qreal touchUnit() const;

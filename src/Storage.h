@@ -15,6 +15,8 @@ struct AppSettings {
     int bgmVolume = 55;
     bool autoAim = true;
     bool autoAimDesktop = false;
+    // 开局直接拥有天赋「世界指引」，不用先击杀 20 个入侵怪物
+    bool guideAtStart = false;
 };
 
 class Storage {
