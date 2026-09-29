@@ -30,4 +30,5 @@ build-windows/
 *-github-secrets.txt
 
 .codegraph/
+.cursor/
 
