@@ -152,7 +152,9 @@ QString Audio::bgmPath(BgmId id) const {
     if (!dir.exists()) {
         return {};
     }
-    const QString prefix = id == BgmId::Recover ? QStringLiteral("2") : QStringLiteral("1");
+    const QString prefix = id == BgmId::Recover ? QStringLiteral("2")
+        : id == BgmId::Refuse                  ? QStringLiteral("3")
+                                               : QStringLiteral("1");
     const QStringList files = dir.entryList(QStringList{"*.m4a", "*.mp3", "*.wav", "*.ogg", "*.flac"},
         QDir::Files, QDir::Name);
     for (const QString& name : files) {
@@ -160,11 +162,12 @@ QString Audio::bgmPath(BgmId id) const {
             return dir.absoluteFilePath(name);
         }
     }
-    // 回退：按排序取第 1 / 第 2 个文件
-    if (files.size() >= 2) {
-        return dir.absoluteFilePath(files.at(id == BgmId::Recover ? 1 : 0));
+    // 回退：按排序取第 1 / 第 2 / 第 3 个文件
+    const int want = id == BgmId::Recover ? 1 : id == BgmId::Refuse ? 2 : 0;
+    if (want < files.size()) {
+        return dir.absoluteFilePath(files.at(want));
     }
-    if (!files.isEmpty() && id == BgmId::Explore) {
+    if (!files.isEmpty()) {
         return dir.absoluteFilePath(files.first());
     }
     return {};
@@ -187,7 +190,7 @@ void Audio::setBgmEnabled(bool enabled) {
         if (state().bgm) {
             state().bgm->stop();
         }
-        recoverPlaying_ = false;
+        oneshotPlaying_ = false;
     }
 }
 
@@ -257,6 +260,7 @@ void Audio::playBgm(BgmId id, bool loop) {
     }
     if (!bgmEnabled_ || bgmVolumePercent_ <= 0) {
         state().bgm->stop();
+        oneshotPlaying_ = false;
         return;
     }
     const QString file = bgmPath(id);
@@ -264,7 +268,7 @@ void Audio::playBgm(BgmId id, bool loop) {
         return;
     }
     currentBgm_ = id;
-    recoverPlaying_ = (id == BgmId::Recover);
+    oneshotPlaying_ = !loop;
     state().bgm->setSource(Platform::mediaUrl(file));
     state().bgm->setLoops(loop ? QMediaPlayer::Infinite : 1);
     rebuildBgmVolume();
@@ -279,25 +283,48 @@ void Audio::ensureBgmLoop() {
     if (!loaded_ || !bgmEnabled_ || bgmVolumePercent_ <= 0 || !state().bgm) {
         return;
     }
-    if (!recoverPlaying_ && currentBgm_ == BgmId::Explore
+    // 一次性曲目（2 号 / 3 号）：在放就让它放完（notifyBgmEnded 会接回 1 号循环），
+    // 之前被暂停过就唤醒，已经放完则清标志回落到 1 号循环
+    if (oneshotPlaying_) {
+        const QMediaPlayer::PlaybackState bgmState = state().bgm->playbackState();
+        if (bgmState == QMediaPlayer::PlayingState) {
+            return;
+        }
+        if (bgmState == QMediaPlayer::PausedState) {
+            state().bgm->play();
+            return;
+        }
+        oneshotPlaying_ = false;
+        currentBgm_ = BgmId::Explore;
+    }
+    if (currentBgm_ == BgmId::Explore
         && state().bgm->playbackState() == QMediaPlayer::PlayingState) {
         return;
     }
     startBgmLoop();
 }
 
+// 达到回血条件：播一次 2 号曲，播完自动接回 1 号循环
 void Audio::playRecoverBgm() {
     if (!loaded_ || !bgmEnabled_) {
         return;
     }
-    if (recoverPlaying_) {
+    if (oneshotPlaying_) {
         return;
     }
     playBgm(BgmId::Recover, false);
 }
 
+// 玩家拒绝结束本轮：切到 3 号曲播一次，播完自动接回 1 号循环
+void Audio::playRefuseBgm() {
+    if (!loaded_ || !bgmEnabled_) {
+        return;
+    }
+    playBgm(BgmId::Refuse, false);
+}
+
 void Audio::stopBgm() {
-    recoverPlaying_ = false;
+    oneshotPlaying_ = false;
     if (state().bgm) {
         state().bgm->stop();
     }
@@ -312,8 +339,8 @@ void Audio::setBgmPaused(bool paused) {
     } else if (state().bgm->playbackState() == QMediaPlayer::PausedState) {
         state().bgm->play();
     } else if (state().bgm->playbackState() != QMediaPlayer::PlayingState) {
-        if (recoverPlaying_) {
-            playBgm(BgmId::Recover, false);
+        if (oneshotPlaying_ && currentBgm_ != BgmId::Explore) {
+            playBgm(currentBgm_, false);
         } else {
             startBgmLoop();
         }
@@ -321,10 +348,13 @@ void Audio::setBgmPaused(bool paused) {
 }
 
 void Audio::notifyBgmEnded() {
-    if (!recoverPlaying_) {
+    // 只有一次性曲目（2 号 / 3 号）放完才接回 1 号循环；换曲导致的旧媒体状态不处理
+    if (!oneshotPlaying_ || !state().bgm
+        || state().bgm->playbackState() != QMediaPlayer::StoppedState) {
         return;
     }
-    recoverPlaying_ = false;
+    oneshotPlaying_ = false;
+    currentBgm_ = BgmId::Explore;
     startBgmLoop();
 }
 

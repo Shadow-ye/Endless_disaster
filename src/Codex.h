@@ -158,3 +158,30 @@ inline QString talentGuideDetail() {
 inline QString talentUnderdogDetail() {
     return "对等级高于自己的敌人，造成的伤害变为 1.3 倍。击杀 10 个等级超过自己的怪物后获得。";
 }
+
+// 物品编号：Item::kind 用它，可堆叠的同类物品在背包里合并成一个条目，按 count 计数
+inline constexpr int kItemNone = 0;
+inline constexpr int kItemReturnTalisman = 1;
+
+// 意识回归符咒：结算时每张折算的积分
+inline constexpr int kTalismanScore = 500;
+
+struct ItemText {
+    QString name;
+    QString detail;
+    bool stackable = true;
+};
+
+inline ItemText itemText(int id) {
+    switch (id) {
+    case kItemReturnTalisman:
+        return {"意识回归符咒",
+            QString("克苏鲁之眼【投影】掉落，可堆叠。死亡时被动触发：可以选择确认回归（原地复活，生命恢复到 25%）或拒绝回归（直接结算）。"
+                    "确认回归会带上本轮永久诅咒「存在被克苏鲁余光注意！」：此后偶尔刷出双倍血量的精英怪物。"
+                    "结算时每张折算 %1 积分。")
+                .arg(kTalismanScore),
+            true};
+    default:
+        return {"未知", "", false};
+    }
+}

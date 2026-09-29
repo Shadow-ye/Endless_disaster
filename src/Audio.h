@@ -17,9 +17,11 @@ enum class SfxId {
     Count
 };
 
+// 1 号：默认循环；2 号：回血触发，播一次；3 号：拒绝结束本轮，播一次
 enum class BgmId {
     Explore = 1,
-    Recover = 2
+    Recover = 2,
+    Refuse = 3
 };
 
 class Audio {
@@ -47,6 +49,8 @@ public:
     void startBgmLoop();
     void ensureBgmLoop();
     void playRecoverBgm();
+    // 玩家拒绝结束本轮：切到 3 号曲播一次，播完自动接回 1 号循环
+    void playRefuseBgm();
     void stopBgm();
     void setBgmPaused(bool paused);
     void notifyBgmEnded();
@@ -65,7 +69,8 @@ private:
     bool bgmEnabled_ = true;
     int bgmVolumePercent_ = 55;
     BgmId currentBgm_ = BgmId::Explore;
-    bool recoverPlaying_ = false;
+    // 正在播放一次性曲目（2 号 / 3 号），放完由 notifyBgmEnded 接回 1 号循环
+    bool oneshotPlaying_ = false;
     QString assetDir_;
     QString bgmDir_;
 };

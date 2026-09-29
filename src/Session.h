@@ -15,6 +15,8 @@ enum class ActorState { Idle, Run, Attack, Dodge, Hurt, Dead };
 enum class MonsterKind { Slime, Skeleton, Mushroom, Flyer, Caster, Killbot, Eye };
 enum class HeroClass { Warrior, Sword, Mage, Robot };
 enum class EndReason { None, Death, Settle };
+// 意识回归符咒：None = 未触发，Offered = 已弹出选择，Declined = 玩家拒绝回归
+enum class ReviveState { None, Offered, Declined };
 
 inline constexpr int kRobotMagazine = 30;
 
@@ -32,6 +34,8 @@ struct Item {
     int slot = 0;
     int kind = 0;
     int power = 0;
+    // 可堆叠物品的叠加个数；同名物品在背包里只占一个条目
+    int count = 1;
     QString name;
 };
 
@@ -113,6 +117,8 @@ struct Player {
     bool talentMastery = false;
     bool talentGuide = false;
     bool talentUnderdog = false;
+    // 用意识回归符咒复活后带上的本轮诅咒：余光时不时盯上你，刷出精英怪
+    bool cursed = false;
     int worldKills = 0;
     int underdogKills = 0;
     ActorState state = ActorState::Idle;
@@ -143,6 +149,8 @@ struct Monster {
     float lungeT = 0.f;
     int lastHitBy = 0;
     bool scored = false;
+    // 诅咒召来的精英：血量翻倍，死亡积分翻倍
+    bool elite = false;
     ActorState state = ActorState::Idle;
 };
 
@@ -265,9 +273,26 @@ public:
     bool consumeRecoverBgm();
     bool consumeVoidPrompt();
 
+    // 意识回归符咒：死亡时由 Session 触发，交给界面弹选择框
+    bool consumeRevivePrompt();
+    bool acceptRevive();
+    void declineRevive();
+
+    int itemCount(int kind) const;
+    int talismanCount() const { return itemCount(kItemReturnTalisman); }
+    // 诅咒「存在被克苏鲁余光注意！」：本轮永久，偶尔刷出双倍血量的精英怪
+    bool cursed() const { return player_.cursed; }
+    // 结算时符咒折算出来的积分，只在结算面板上用
+    int talismanBonus() const { return talismanBonus_; }
+
     int xpToNext() const;
 
 private:
+    void addItem(int kind, int count = 1);
+    bool consumeItem(int kind, int count = 1);
+    void convertTalismansToScore();
+    void finishRun(EndReason reason);
+    void revivePlayer();
     void gainXp(int amount);
     void note(const QString& text);
     void trackHpForBgm();
@@ -345,6 +370,7 @@ private:
     void recomputeGear();
     void spawn(float dt);
     void spawnMonster(MonsterKind kind, float x, float y);
+    void spawnElite();
     bool findSpawn(float& x, float& y);
     bool spawnRuin();
     void dismissRuin();
@@ -379,6 +405,7 @@ private:
     int score_ = 0;
     float spawnCd_ = 1.2f;
     float flyerCd_ = 50.f;
+    float eliteCd_ = 0.f;
     uint32_t runId_ = 0;
     bool paused_ = false;
     EndReason reason_ = EndReason::None;
@@ -395,5 +422,8 @@ private:
     bool voidPrompt_ = false;
     int eyeDefeats_ = 0;
     int wallStrikeId_ = -1;
+    ReviveState reviveState_ = ReviveState::None;
+    bool revivePrompt_ = false;
+    int talismanBonus_ = 0;
     uint32_t nextRand();
 };

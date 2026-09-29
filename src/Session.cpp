@@ -250,6 +250,8 @@ void Session::newGame(uint32_t seed, uint32_t runId, HeroClass hero, int skillD,
     }
     player_.stacksQi = 3;
     player_.stacksThrust = 3;
+    player_.cursed = false;
+    eliteCd_ = 0.f;
     baseMaxHp_ = 100.f;
     baseMaxMp_ = 80.f;
     baseArmor_ = 10.f;
@@ -321,6 +323,9 @@ void Session::newGame(uint32_t seed, uint32_t runId, HeroClass hero, int skillD,
     voidPrompt_ = false;
     eyeDefeats_ = 0;
     wallStrikeId_ = -1;
+    reviveState_ = ReviveState::None;
+    revivePrompt_ = false;
+    talismanBonus_ = 0;
     if (guideAtStart) {
         note("天赋：世界指引（开局赠送）");
     }
@@ -380,6 +385,8 @@ bool Session::loadFrom(const QJsonObject& game) {
     player_.speedBonus = float(p.value("speedBonus").toDouble(player_.speedBonus));
     player_.critBonus = p.value("critBonus").toInt(player_.critBonus);
     player_.seekOn = p.value("seekOn").toBool(false);
+    player_.cursed = p.value("cursed").toBool(false);
+    eliteCd_ = float(p.value("eliteCd").toDouble(0.0));
     if (p.contains("baseMaxHp")) {
         baseMaxHp_ = float(p.value("baseMaxHp").toDouble());
         baseMaxMp_ = float(p.value("baseMaxMp").toDouble());
@@ -390,6 +397,7 @@ bool Session::loadFrom(const QJsonObject& game) {
         item.slot = obj.value("slot").toInt();
         item.kind = obj.value("kind").toInt();
         item.power = obj.value("power").toInt();
+        item.count = std::max(1, obj.value("count").toInt(1));
         item.name = obj.value("name").toString();
         return item;
     };
@@ -427,6 +435,11 @@ bool Session::loadFrom(const QJsonObject& game) {
             continue;
         }
         setupMonster(monster, std::max(1, m.value("level").toInt(1)));
+        monster.elite = m.value("elite").toBool(false);
+        if (monster.elite) {
+            monster.maxHp *= 2.f;
+            monster.maxPoise *= 1.5f;
+        }
         monster.x = float(m.value("x").toDouble());
         monster.y = float(m.value("y").toDouble());
         monster.hp = float(m.value("hp").toDouble(monster.maxHp));
@@ -439,6 +452,9 @@ bool Session::loadFrom(const QJsonObject& game) {
     pathTileY_ = tileOf(player_.y);
     restoreRuin(game);
     eyeDefeats_ = std::max(0, game.value("eyeDefeats").toInt());
+    reviveState_ = ReviveState::None;
+    revivePrompt_ = false;
+    talismanBonus_ = 0;
     checkTalents();
     return true;
 }
@@ -492,12 +508,17 @@ QJsonObject Session::toJson() const {
     p.insert("speedBonus", player_.speedBonus);
     p.insert("critBonus", player_.critBonus);
     p.insert("seekOn", player_.seekOn);
+    if (player_.cursed) {
+        p.insert("cursed", true);
+    }
+    p.insert("eliteCd", eliteCd_);
     game.insert("player", p);
     auto writeItem = [](const Item& item) {
         QJsonObject obj;
         obj.insert("slot", item.slot);
         obj.insert("kind", item.kind);
         obj.insert("power", item.power);
+        obj.insert("count", item.count);
         obj.insert("name", item.name);
         return obj;
     };
@@ -533,6 +554,9 @@ QJsonObject Session::toJson() const {
         }
         obj.insert("kind", kind);
         obj.insert("level", m.level);
+        if (m.elite) {
+            obj.insert("elite", true);
+        }
         obj.insert("x", m.x);
         obj.insert("y", m.y);
         obj.insert("hp", m.hp);
@@ -570,11 +594,165 @@ QJsonObject Session::toJson() const {
 }
 
 void Session::settle() {
+    finishRun(EndReason::Settle);
+}
+
+// 本局结束的唯一出口：符咒折算成积分后再定原因，界面只认 reason_
+void Session::finishRun(EndReason reason) {
     if (reason_ != EndReason::None) {
         return;
     }
-    reason_ = EndReason::Settle;
+    convertTalismansToScore();
+    reason_ = reason;
     paused_ = false;
+}
+
+void Session::convertTalismansToScore() {
+    const int owned = talismanCount();
+    if (owned <= 0) {
+        return;
+    }
+    bag_.erase(std::remove_if(bag_.begin(), bag_.end(), [](const Item& item) { return item.kind == kItemReturnTalisman; }), bag_.end());
+    const int bonus = owned * kTalismanScore;
+    score_ += bonus;
+    talismanBonus_ += bonus;
+    note(QString("%1 x%2 折算 %3 积分").arg(itemText(kItemReturnTalisman).name).arg(owned).arg(bonus));
+}
+
+void Session::addItem(int kind, int count) {
+    if (kind == kItemNone || count <= 0) {
+        return;
+    }
+    for (Item& item : bag_) {
+        if (item.kind == kind) {
+            item.count += count;
+            item.name = itemText(kind).name;
+            return;
+        }
+    }
+    Item item;
+    item.kind = kind;
+    item.count = count;
+    item.name = itemText(kind).name;
+    bag_.push_back(item);
+}
+
+bool Session::consumeItem(int kind, int count) {
+    for (auto it = bag_.begin(); it != bag_.end(); ++it) {
+        if (it->kind != kind) {
+            continue;
+        }
+        if (it->count < count) {
+            return false;
+        }
+        it->count -= count;
+        if (it->count <= 0) {
+            bag_.erase(it);
+        }
+        return true;
+    }
+    return false;
+}
+
+int Session::itemCount(int kind) const {
+    int total = 0;
+    for (const Item& item : bag_) {
+        if (item.kind == kind) {
+            total += item.count;
+        }
+    }
+    return total;
+}
+
+bool Session::consumeRevivePrompt() {
+    if (!revivePrompt_) {
+        return false;
+    }
+    revivePrompt_ = false;
+    return true;
+}
+
+bool Session::acceptRevive() {
+    if (reviveState_ != ReviveState::Offered) {
+        return false;
+    }
+    if (!consumeItem(kItemReturnTalisman, 1)) {
+        return false;
+    }
+    reviveState_ = ReviveState::None;
+    revivePrompt_ = false;
+    paused_ = false;
+    revivePlayer();
+    return true;
+}
+
+void Session::declineRevive() {
+    if (reviveState_ != ReviveState::Offered) {
+        return;
+    }
+    reviveState_ = ReviveState::Declined;
+    revivePrompt_ = false;
+    paused_ = false;
+}
+
+void Session::revivePlayer() {
+    // 意识回归只把意识拉回来：生命恢复到 25%，盾与体力回满，蓝补到一半
+    player_.hp = std::max(1.f, player_.maxHp * 0.25f);
+    player_.shield = player_.maxShield;
+    player_.stamina = player_.maxStamina;
+    player_.mp = std::max(player_.mp, player_.maxMp * 0.5f);
+    player_.ammo = kRobotMagazine;
+    player_.state = ActorState::Idle;
+    player_.animT = 0.f;
+    player_.hurtT = 0.f;
+    player_.attackT = 0.f;
+    player_.dodgeT = 0.f;
+    player_.jumpT = 0.f;
+    player_.flying = false;
+    player_.invuln = 3.f;
+    damageSinceHeal_ = 0.f;
+    hpTrack_ = player_.hp;
+    bgmRecoverArmed_ = false;
+    // 清掉身边的敌方弹幕并把怪物推开，避免复活瞬间又被秒
+    bolts_.erase(std::remove_if(bolts_.begin(), bolts_.end(),
+                     [this](const Bolt& bolt) {
+                         return bolt.hostile && lengthOf(bolt.x - player_.x, bolt.y - player_.y) < 260.f;
+                     }),
+        bolts_.end());
+    for (Monster& monster : monsters_) {
+        if (monster.state == ActorState::Dead || monster.kind == MonsterKind::Eye) {
+            continue;
+        }
+        if (lengthOf(monster.x - player_.x, monster.y - player_.y) > 220.f) {
+            continue;
+        }
+        monster.stunT = std::max(monster.stunT, 1.2f);
+        monster.attackT = 0.f;
+        monster.attackApplied = false;
+        monster.contactCd = 0.8f;
+        float kx = monster.x - player_.x;
+        float ky = monster.y - player_.y;
+        float kd = lengthOf(kx, ky);
+        if (kd < 0.01f) {
+            kx = player_.facingX;
+            ky = player_.facingY;
+            kd = lengthOf(kx, ky);
+        }
+        if (kd > 0.01f) {
+            const int pass = monster.kind == MonsterKind::Flyer ? 2 : 0;
+            tryMove(monster.x, monster.y, kx / kd * 96.f, ky / kd * 96.f, 1.f, kMonsterRadius, pass, nullptr);
+        }
+    }
+    pushFx(AttackFxKind::Ring, 120.f, 0.f, 0.75f, 0xFFD24A);
+    pushFx(AttackFxKind::Pillar, 70.f, 0.f, 0.9f, 0xFFD24A);
+    queueVfx(VfxKind::LevelUp, player_.x, player_.y);
+    queueSfx(SfxId::Level);
+    // 复活留下的代价：本轮带上诅咒，之后偶尔刷出双倍血量的精英怪
+    if (!player_.cursed) {
+        player_.cursed = true;
+        eliteCd_ = 22.f + float(nextRand() % 22u);
+    }
+    note("意识回归　诅咒：存在被克苏鲁余光注意！");
 }
 
 void Session::gainXp(int amount) {
@@ -1959,7 +2137,16 @@ void Session::update(float dt, const InputState& input, float mouseX, float mous
     if (player_.state != ActorState::Dead) {
         spawn(dt);
     } else if (player_.animT > 0.85f) {
-        reason_ = EndReason::Death;
+        // 死亡瞬间被动触发意识回归符咒：先让玩家选回归还是结算
+        if (reviveState_ == ReviveState::None && talismanCount() > 0) {
+            reviveState_ = ReviveState::Offered;
+            revivePrompt_ = true;
+            paused_ = true;
+            queueSfx(SfxId::Level);
+            note("意识回归符咒生效");
+        } else {
+            finishRun(EndReason::Death);
+        }
     }
 }
 
@@ -2292,6 +2479,14 @@ bool Session::findSpawn(float& x, float& y) {
 }
 
 void Session::spawn(float dt) {
+    // 诅咒：余光偶尔盯上你，额外刷一只双倍血量的精英
+    if (player_.cursed) {
+        eliteCd_ -= dt;
+        if (eliteCd_ <= 0.f) {
+            eliteCd_ = 22.f + float(nextRand() % 22u);
+            spawnElite();
+        }
+    }
     flyerCd_ -= dt;
     if (flyerCd_ <= 0.f) {
         flyerCd_ = 70.f;
@@ -2339,6 +2534,51 @@ void Session::spawn(float dt) {
         kind = MonsterKind::Skeleton;
     }
     spawnMonster(kind, x, y);
+}
+
+void Session::spawnElite() {
+    float x = 0.f;
+    float y = 0.f;
+    if (!findSpawn(x, y)) {
+        return;
+    }
+    MonsterKind kind = MonsterKind::Skeleton;
+    switch (nextRand() % 4u) {
+    case 1:
+        kind = MonsterKind::Mushroom;
+        break;
+    case 2:
+        kind = MonsterKind::Caster;
+        break;
+    case 3:
+        kind = MonsterKind::Killbot;
+        break;
+    default:
+        break;
+    }
+    const std::size_t before = monsters_.size();
+    spawnMonster(kind, x, y);
+    if (monsters_.size() <= before) {
+        return;
+    }
+    Monster& elite = monsters_.back();
+    elite.elite = true;
+    elite.maxHp *= 2.f;
+    elite.hp = elite.maxHp;
+    elite.maxPoise *= 1.5f;
+    elite.poise = elite.maxPoise;
+    AttackFx fx;
+    fx.kind = AttackFxKind::Ring;
+    fx.x = elite.x;
+    fx.y = elite.y - 8.f;
+    fx.radius = 46.f;
+    fx.life = 0.6f;
+    fx.maxLife = 0.6f;
+    fx.color = 0x8A2BE2;
+    attackFx_.push_back(fx);
+    queueVfx(VfxKind::Rage, elite.x, elite.y, 20.f);
+    queueSfx(SfxId::Skill);
+    note("余光注意到了你：精英怪物出现");
 }
 
 void Session::updateBolts(float dt) {
@@ -2528,7 +2768,7 @@ void Session::updateMonsters(float dt) {
             queueVfx(VfxKind::Kill, monster.x, monster.y, 0.f, false, monster.kind);
             if (!monster.scored) {
                 const bool overLevel = monster.level > player_.level;
-                const int gained = scoreFor(monster.kind, monster.level);
+                const int gained = scoreFor(monster.kind, monster.level) * (monster.elite ? 2 : 1);
                 score_ += gained;
                 gainXp(gained);
                 monster.scored = true;
@@ -3019,7 +3259,8 @@ void Session::onEyeDefeated() {
     ruin_.phase = MazeRuin::Phase::Leave;
     ruin_.pulseR = -1.f;
     triggerShake();
-    note("克苏鲁之眼被击败");
+    addItem(kItemReturnTalisman, 1);
+    note(QString("克苏鲁之眼被击败　获得 %1").arg(itemText(kItemReturnTalisman).name));
     eyeDefeats_ += 1;
     if (eyeDefeats_ == 2 || (nextRand() % 5u) == 0u) {
         voidPrompt_ = true;

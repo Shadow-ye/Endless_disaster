@@ -450,6 +450,7 @@ GameWidget::GameWidget(QWidget* parent) : QWidget(parent) {
     confirmLayout->addLayout(confirmRow);
     connect(confirmNo, &QPushButton::clicked, this, [this] {
         confirmPanel_->hide();
+        Audio::instance().playRefuseBgm();
         if (session_.paused() && !session_.ended()) {
             pausePanel_->show();
             pausePanel_->raise();
@@ -488,11 +489,43 @@ GameWidget::GameWidget(QWidget* parent) : QWidget(parent) {
         voidPanel_->hide();
         session_.setPaused(false);
         Audio::instance().setBgmPaused(false);
+        Audio::instance().playRefuseBgm();
         setFocus();
     });
     voidPanel_->setObjectName("panel");
     voidPanel_->setStyleSheet("QWidget#panel { background: #14110f; border: 1px solid #5c3a32; } QLabel { background: transparent; color: #d7c7b4; border: none; }");
     voidPanel_->hide();
+
+    revivePanel_ = new QWidget(this);
+    auto* reviveLayout = new QVBoxLayout(revivePanel_);
+    reviveLayout->setContentsMargins(18, 18, 18, 18);
+    reviveText_ = new QLabel(revivePanel_);
+    reviveText_->setWordWrap(true);
+    reviveText_->setAlignment(Qt::AlignCenter);
+    reviveText_->setMinimumWidth(400);
+    reviveLayout->addWidget(reviveText_);
+    auto* reviveRow = new QHBoxLayout();
+    auto* reviveYes = new QPushButton(QStringLiteral("确认回归"), revivePanel_);
+    auto* reviveNo = new QPushButton(QStringLiteral("拒绝回归"), revivePanel_);
+    reviveRow->addWidget(reviveYes);
+    reviveRow->addWidget(reviveNo);
+    reviveLayout->addLayout(reviveRow);
+    connect(reviveYes, &QPushButton::clicked, this, [this] {
+        revivePanel_->hide();
+        session_.acceptRevive();
+        Audio::instance().setBgmPaused(false);
+        setFocus();
+    });
+    connect(reviveNo, &QPushButton::clicked, this, [this] {
+        revivePanel_->hide();
+        session_.declineRevive();
+        Audio::instance().setBgmPaused(false);
+        Audio::instance().playRefuseBgm();
+        setFocus();
+    });
+    revivePanel_->setObjectName("panel");
+    revivePanel_->setStyleSheet("QWidget#panel { background: #14110f; border: 1px solid #5c3a32; } QLabel { background: transparent; color: #d7c7b4; border: none; }");
+    revivePanel_->hide();
 
     auto* esc = new QShortcut(QKeySequence(Qt::Key_Escape), this);
     esc->setContext(Qt::WidgetWithChildrenShortcut);
@@ -532,6 +565,7 @@ void GameWidget::leaveToMenu() {
     resultPanel_->hide();
     confirmPanel_->hide();
     voidPanel_->hide();
+    revivePanel_->hide();
     releaseAllTouches();
     emit returnedToMenu();
 }
@@ -616,6 +650,18 @@ void GameWidget::refreshGuide() {
     html += progress("熟练", float(player.skillCasts), 12.f, player.talentMastery, talentMasteryDetail());
     html += progress("世界指引", float(player.worldKills), 20.f, player.talentGuide, talentGuideDetail());
     html += progress("以小博大", float(player.underdogKills), 10.f, player.talentUnderdog, talentUnderdogDetail());
+    if (const int charms = session_.talismanCount()) {
+        html += QString("<p style='color:#e4d4c4; margin:12px 0 4px 0;'><b>物品</b></p>");
+        html += QString("<p style='margin:8px 0 10px 0;'><b>%1 x%2</b><br><span style='color:#a89888;'>%3</span></p>")
+            .arg(itemText(kItemReturnTalisman).name)
+            .arg(charms)
+            .arg(itemText(kItemReturnTalisman).detail);
+    }
+    if (session_.cursed()) {
+        html += QString("<p style='color:#e4d4c4; margin:12px 0 4px 0;'><b>诅咒</b></p>");
+        html += QString("<p style='margin:8px 0 10px 0;'><span style='color:#c45c48;'><b>存在被克苏鲁余光注意！</b></span>"
+                        "<br><span style='color:#a89888;'>本轮永久：偶尔刷出双倍血量的精英怪物，击杀精英的积分翻倍。</span></p>");
+    }
     guideText_->setText(html);
     guideText_->adjustSize();
 }
@@ -635,6 +681,7 @@ void GameWidget::startNew(HeroClass hero, int skillD, int skillF, int skillC, in
     resultPanel_->hide();
     confirmPanel_->hide();
     voidPanel_->hide();
+    revivePanel_->hide();
     Audio::instance().startBgmLoop();
     setFocus();
 }
@@ -651,6 +698,7 @@ void GameWidget::startContinue(const QJsonObject& game) {
     resultPanel_->hide();
     confirmPanel_->hide();
     voidPanel_->hide();
+    revivePanel_->hide();
     Audio::instance().startBgmLoop();
     setFocus();
 }
@@ -659,10 +707,15 @@ void GameWidget::setPaused(bool paused) {
     if (session_.ended()) {
         return;
     }
+    // 结算确认还开着时取消暂停（Esc 等），同样是拒绝结束本轮
+    const bool declined = !paused && confirmPanel_ && confirmPanel_->isVisible();
     session_.setPaused(paused);
     confirmPanel_->hide();
     pausePanel_->setVisible(paused);
     Audio::instance().setBgmPaused(paused);
+    if (declined) {
+        Audio::instance().playRefuseBgm();
+    }
     if (paused) {
         const AppSettings settings = Storage::loadSettings();
         QSignalBlocker b1(pauseSfxCheck_);
@@ -684,7 +737,7 @@ void GameWidget::setPaused(bool paused) {
 }
 
 void GameWidget::togglePause() {
-    if (session_.ended() || (voidPanel_ && voidPanel_->isVisible())) {
+    if (session_.ended() || (voidPanel_ && voidPanel_->isVisible()) || (revivePanel_ && revivePanel_->isVisible())) {
         return;
     }
     const bool pausing = !session_.paused();
@@ -730,15 +783,35 @@ void GameWidget::showVoidPrompt() {
     layoutOverlays();
 }
 
+void GameWidget::showRevivePrompt() {
+    if (!running_ || session_.ended() || (revivePanel_ && revivePanel_->isVisible())) {
+        return;
+    }
+    session_.setPaused(true);
+    Audio::instance().setBgmPaused(true);
+    pausePanel_->hide();
+    confirmPanel_->hide();
+    voidPanel_->hide();
+    const int owned = session_.talismanCount();
+    reviveText_->setText(QStringLiteral("意识回归符咒生效\n持有 %1 张\n确认回归：消耗一张，原地复活，生命恢复到 25%\n拒绝回归：直接结算，剩余符咒折算积分")
+            .arg(owned));
+    revivePanel_->show();
+    revivePanel_->raise();
+    layoutOverlays();
+}
+
 void GameWidget::commitEnd() {
     if (!session_.ended() || endCommitted_) {
         return;
     }
     endCommitted_ = true;
     session_.setPaused(false);
+    // 结算前若正暂停（从暂停菜单主动结算），把 BGM 唤醒，结果面板不再静音
+    Audio::instance().setBgmPaused(false);
     pausePanel_->hide();
     confirmPanel_->hide();
     voidPanel_->hide();
+    revivePanel_->hide();
     releaseAllTouches();
     Records records = Storage::loadRecords();
     if (session_.time() > records.bestTime) {
@@ -750,7 +823,11 @@ void GameWidget::commitEnd() {
     Storage::saveRecords(records);
     Storage::deleteIfRun(session_.runId());
     const QString reason = session_.reason() == EndReason::Death ? "你倒下了" : "本局已结算";
-    resultText_->setText(reason + "\n用时 " + formatTime(session_.time()) + "\n积分 " + QString::number(session_.score()));
+    QString result = reason + "\n用时 " + formatTime(session_.time()) + "\n积分 " + QString::number(session_.score());
+    if (const int bonus = session_.talismanBonus()) {
+        result += QString("\n意识回归符咒折算 +%1 积分").arg(bonus);
+    }
+    resultText_->setText(result);
     resultPanel_->show();
     resultPanel_->raise();
     layoutOverlays();
@@ -777,6 +854,8 @@ void GameWidget::layoutOverlays() {
     confirmPanel_->move((width() - confirmPanel_->width()) / 2, (height() - confirmPanel_->height()) / 2);
     voidPanel_->adjustSize();
     voidPanel_->move((width() - voidPanel_->width()) / 2, (height() - voidPanel_->height()) / 2);
+    revivePanel_->adjustSize();
+    revivePanel_->move((width() - revivePanel_->width()) / 2, (height() - revivePanel_->height()) / 2);
 }
 
 void GameWidget::tick() {
@@ -808,6 +887,8 @@ void GameWidget::tick() {
     if (session_.ended()) {
         session_.consumeVoidPrompt();
         commitEnd();
+    } else if (session_.consumeRevivePrompt()) {
+        showRevivePrompt();
     } else if (session_.consumeVoidPrompt()) {
         showVoidPrompt();
     }
@@ -1773,6 +1854,21 @@ void GameWidget::drawWorld(QPainter& painter) {
         int tx = 0;
         int ty = 0;
         Tile tile = Tile::Grass;
+        // 角色已经高过岩石 / 灌木，这类可翻越的地表物不再挡住它
+        bool overProp = false;
+    };
+    // 岩石 / 灌木踩得上去、也飞得过去，遮不遮人按角色高低判断：
+    // 角色离地抬升够高，或脚下正踩着这类地表物（落在障碍上）时都算比它高。
+    // 迷宫墙翻不过去，下面排序时遇到墙就停，无论角色多高都照样遮挡。
+    constexpr float kPropOccludeHeight = 10.f;
+    auto onProp = [&](float x, float y) {
+        const Tile tile = session_.map().at(tileOf(x), tileOf(y));
+        return tile == Tile::Rock || tile == Tile::Bush;
+    };
+    const float playerLift = (player.jumpT > 0.f ? std::sin(player.jumpT / 0.34f * 3.14159f) * 14.f : 0.f)
+        + (player.flying ? 12.f : 0.f);
+    auto monsterLift = [](const Monster& monster) {
+        return monster.kind == MonsterKind::Flyer ? 12.f : monster.kind == MonsterKind::Eye ? 8.f : 0.f;
     };
     auto solidRank = [](DrawItem::Kind kind) { return kind == DrawItem::Kind::Player || kind == DrawItem::Kind::Monster ? 1 : 0; };
     std::vector<DrawItem> items;
@@ -1786,9 +1882,11 @@ void GameWidget::drawWorld(QPainter& painter) {
             }
         }
     }
-    items.push_back({player.y, DrawItem::Kind::Player, nullptr, 0, 0, Tile::Grass});
+    items.push_back({player.y, DrawItem::Kind::Player, nullptr, 0, 0, Tile::Grass,
+        playerLift >= kPropOccludeHeight || onProp(player.x, player.y)});
     for (const Monster& monster : session_.monsters()) {
-        items.push_back({monster.y, DrawItem::Kind::Monster, &monster, 0, 0, Tile::Grass});
+        items.push_back({monster.y, DrawItem::Kind::Monster, &monster, 0, 0, Tile::Grass,
+            monsterLift(monster) >= kPropOccludeHeight || onProp(monster.x, monster.y)});
     }
     std::stable_sort(items.begin(), items.end(), [&](const DrawItem& a, const DrawItem& b) {
         if (a.y != b.y) {
@@ -1796,6 +1894,20 @@ void GameWidget::drawWorld(QPainter& painter) {
         }
         return solidRank(a.kind) < solidRank(b.kind);
     });
+    // 比岩石 / 灌木高的角色：从深度顺序里往后挪，压住它后面那一串地表物，
+    // 撞上迷宫墙就停下（墙不可翻越，一律遮挡）。从后往前处理，挪完的角色不会再被处理一次。
+    for (std::size_t i = items.size(); i-- > 0;) {
+        if (!items[i].overProp) {
+            continue;
+        }
+        std::size_t j = i;
+        while (j + 1 < items.size() && items[j + 1].kind != DrawItem::Kind::Block) {
+            ++j;
+        }
+        if (j > i) {
+            std::rotate(items.begin() + i, items.begin() + i + 1, items.begin() + j + 1);
+        }
+    }
 
     for (const DrawItem& item : items) {
         if (item.kind == DrawItem::Kind::Block) {
@@ -1836,8 +1948,7 @@ void GameWidget::drawWorld(QPainter& painter) {
             } else if (player.state == ActorState::Run || player.state == ActorState::Dodge) {
                 anim = set.run;
             }
-            const float lift = (player.jumpT > 0.f ? std::sin(player.jumpT / 0.34f * 3.14159f) * 14.f : 0.f)
-                + (player.flying ? 12.f : 0.f);
+            const float lift = playerLift;
             const float guardCx = player.x;
             const float guardCy = player.y - kGuardCenterAboveFoot - lift;
             if (player.burialStage > 0) {
@@ -2187,9 +2298,19 @@ void GameWidget::drawWorld(QPainter& painter) {
             } else {
                 anim = &sprites_.skeletonIdle;
             }
+            if (monster.elite && monster.state != ActorState::Dead) {
+                // 精英：脚下一圈紫色余光，便于在杂兵里认出来
+                painter.setPen(QPen(QColor(158, 66, 210, 180), 1.5));
+                painter.setBrush(Qt::NoBrush);
+                painter.drawEllipse(QRectF(monster.x - 15.f, monster.y - 7.f, 30.f, 12.f));
+                painter.setPen(Qt::NoPen);
+            }
             if (!custom && anim->ok()) {
                 const bool loop = monster.state != ActorState::Attack && monster.state != ActorState::Hurt && monster.state != ActorState::Dead;
                 QColor tint = monster.kind == MonsterKind::Caster ? QColor(88, 42, 112) : QColor();
+                if (monster.elite) {
+                    tint = QColor(132, 62, 196);
+                }
                 if (monster.hurtT > 0.1f) {
                     tint = QColor(255, 220, 80);  // 暴击/重创闪白黄
                 }
@@ -2215,7 +2336,9 @@ void GameWidget::drawWorld(QPainter& painter) {
             painter.fillRect(QRectF(barX, barY + barH + 1, barW * std::clamp(monster.poise / std::max(1.f, monster.maxPoise), 0.f, 1.f), 2), QColor(210, 170, 70));
             painter.setFont(QFont(Platform::uiFontFamily(), 8, QFont::Bold));
             const int hpShown = monster.hp <= 0.f ? 0 : int(std::ceil(monster.hp));
-            const QString label = QString("Lv%1  %2").arg(monster.level).arg(hpShown);
+            const QString label = monster.elite
+                ? QString("精英 Lv%1  %2").arg(monster.level).arg(hpShown)
+                : QString("Lv%1  %2").arg(monster.level).arg(hpShown);
             painter.setPen(QColor(0, 0, 0, 200));
             painter.drawText(QRectF(barX - 10, barY - 13, barW + 20, 12), Qt::AlignCenter, label);
             painter.setPen(QColor(255, 240, 220));
@@ -3022,12 +3145,38 @@ void GameWidget::paintEvent(QPaintEvent* event) {
     talentLine(4, "指引", float(player.worldKills), 20.f);
     talentLine(5, "以小博大", float(player.underdogKills), 10.f);
     painter.setPen(QColor(228, 212, 188));
+    // 意识回归符咒按获取个数挂在 SCORE 旁边
+    const int charms = session_.talismanCount();
+    const QString scoreText = charms > 0
+        ? QString("符咒 x%1   SCORE %2").arg(charms).arg(session_.score())
+        : QString("SCORE %1").arg(session_.score());
     painter.drawText(QRect(originX, originY + 10, viewW, 22), Qt::AlignHCenter | Qt::AlignTop, formatTime(session_.time()));
     if (touchUi_) {
         // 右上角留给「索敌 / 说明 / 暂停」按钮
-        painter.drawText(QRect(originX, originY + 30, viewW, 22), Qt::AlignHCenter | Qt::AlignTop, QString("SCORE %1").arg(session_.score()));
+        painter.drawText(QRect(originX, originY + 30, viewW, 22), Qt::AlignHCenter | Qt::AlignTop, scoreText);
     } else {
-        painter.drawText(QRect(originX, originY + 10, viewW - 16, 22), Qt::AlignRight | Qt::AlignTop, QString("SCORE %1").arg(session_.score()));
+        painter.drawText(QRect(originX, originY + 10, viewW - 16, 22), Qt::AlignRight | Qt::AlignTop, scoreText);
+    }
+    if (session_.cursed()) {
+        // 屏幕底部居中提示条，避开顶部所有 HUD 与底部技能 Chip 行
+        const QString curseText = QStringLiteral("诅咒：存在被克苏鲁余光注意！");
+        painter.setFont(QFont(Platform::uiFontFamily(), 11, QFont::Bold));
+        const QFontMetrics fm(painter.font());
+        const int padX = 10, padY = 5;
+        const int textW = fm.horizontalAdvance(curseText);
+        const int bw = textW + padX * 2;
+        const int bh = fm.height() + padY * 2;
+        const int bx = originX + (viewW - bw) / 2;
+        // 浮在底部技能 Chip 行与「Tab 提示」上方，避免与底部技能栏重叠
+        const int by = originY + viewH - 64 - bh - 6;
+        const int pulse = int(190 + 55 * (0.5 + 0.5 * std::sin(session_.time() * 4.f)));
+        painter.setPen(Qt::NoPen);
+        painter.setBrush(QColor(40, 10, 46, 205));
+        painter.drawRoundedRect(QRect(bx, by, bw, bh), 7, 7);
+        painter.setBrush(Qt::NoBrush);
+        painter.setPen(QColor(220, 120, 232, pulse));
+        painter.drawText(QRect(bx + padX, by, textW, bh), Qt::AlignLeft | Qt::AlignVCenter, curseText);
+        painter.setPen(QColor(228, 212, 188));
     }
     drawBossBar(painter, view);
     drawRadar(painter, view);

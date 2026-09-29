@@ -62,6 +62,7 @@ private:
     void saveGame();
     void askSettle();
     void showVoidPrompt();
+    void showRevivePrompt();
     void commitEnd();
     void layoutOverlays();
     void syncKey(int key, bool down);
@@ -155,4 +156,6 @@ private:
     QLabel* resultText_ = nullptr;
     QWidget* confirmPanel_ = nullptr;
     QWidget* voidPanel_ = nullptr;
+    QWidget* revivePanel_ = nullptr;
+    QLabel* reviveText_ = nullptr;
 };
