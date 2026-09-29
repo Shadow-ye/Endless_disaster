@@ -1104,6 +1104,7 @@ const SKILLS = {
   field: ['磁力场', '展开磁力场 6 秒：受到的伤害只剩 5%，每 0.4 秒对贴身（半径 30）的怪物造成基础伤害 8 并轻微推开。消耗 20 MP，冷却 10 秒。'],
   medkit: ['战术医疗包', '3 秒内持续回复 24% 最大生命。消耗 16 MP，冷却 16 秒。'],
   jetpack: ['喷气背包', '开关喷气背包，离地飞行，可越过岩石和灌木。每秒消耗 22，优先扣 STA，再扣 MP，耗尽后落地；飞行中 STA 不回复。'],
+  melee: ['肘击', '按下技能键用肘部撞击一次：身前 34 距离扇形内基础伤害 11，能劈掉敌方飞弹，击败克苏鲁之眼后还能劈开迷宫墙。消耗 8 STA，冷却 0.9 秒。不占用普攻，点按左键仍是点射。'],
 };
 
 const HEROES = [
@@ -1127,9 +1128,9 @@ const HEROES = [
   },
   {
     key: 'robot', name: '机甲人', role: 'MECH · 远程', accent: '#5eead4', portrait: null,
-    desc: '8 方向像素角色。普攻为快速点射，弹匣 30 发；没有重击，长按左键即换弹补满。技能覆盖火力、机动与生存。',
-    stats: { HP: 105, ARM: 12, MP: 90, CRT: 12 }, pool: '技能八选三 · 装配到 R / F / C',
-    skills: ['scatter', 'missile', 'boost', 'overload', 'swarm', 'field', 'medkit', 'jetpack'],
+    desc: '8 方向像素角色。普攻为快速点射，弹匣 30 发；没有重击，长按左键即换弹补满。技能覆盖火力、机动、近身与生存。',
+    stats: { HP: 105, ARM: 12, MP: 90, CRT: 12 }, pool: '技能九选三 · 装配到 R / F / C',
+    skills: ['scatter', 'missile', 'boost', 'overload', 'swarm', 'field', 'medkit', 'jetpack', 'melee'],
   },
 ];
 const STAT_MAX = { HP: 130, ARM: 15, MP: 140, CRT: 25 };
@@ -1308,11 +1309,12 @@ function createHeroShowcase() {
 
 const MONSTER_CARDS = [
   { key: 'slime', sheet: 'slime', name: '史莱姆', tag: '开局', desc: '成群蠕动的黏液，靠数量把你淹没。', loop: 'walk', acts: ['death'], scale: 4 },
-  { key: 'skeleton', sheet: 'skeleton', name: '骷髅', tag: '开局', desc: '持盾骷髅兵，举盾时伤害只吃四成。', loop: 'walk', acts: ['attack', 'defense', 'hurt', 'death'], scale: 3 },
+  { key: 'skeleton', sheet: 'skeleton', name: '骷髅', tag: '15 秒后', desc: '持盾骷髅兵，举盾时伤害只吃四成。', loop: 'walk', acts: ['attack', 'defense', 'hurt', 'death'], scale: 3 },
   { key: 'mushroom', sheet: 'mushroom', name: '蘑菇', tag: '25 秒后', desc: '体型更大，蓄力后猛地扑向你。', loop: 'idle', acts: ['jump', 'attack', 'death'], scale: 4 },
   { key: 'flyer', sheet: 'flyer', name: '飞行怪', tag: '空中', desc: '在低空盘旋，被击退时能越过障碍。', loop: 'fly', acts: ['attack', 'hurt', 'death'], scale: 3 },
-  { key: 'caster', sheet: 'mushroom', name: '施法怪', tag: '带护盾', desc: '紫色的蘑菇术士，保持距离放出法弹。', loop: 'idle', acts: ['jump', 'death'], scale: 4, tint: 'rgb(88,42,112)' },
+  { key: 'caster', sheet: 'mushroom', name: '施法怪', tag: '20 秒后 · 带护盾', desc: '紫色的蘑菇术士，保持距离放出法弹。', loop: 'idle', acts: ['jump', 'death'], scale: 4, tint: 'rgb(88,42,112)' },
   { key: 'killbot', sheet: 'killbot', name: '机器人小兵', tag: '30 秒后', desc: '8 方向行动，绕着你转圈并点射。', loop: 'walk', acts: ['attack', 'death'], scale: 4, dirs: true },
+  { key: 'elite', sheet: 'skeleton', name: '精英怪物', tag: '被诅咒后', desc: '诅咒「存在被克苏鲁余光注意！」召来的精英，种类随机：血量翻倍、韧性更高，击杀积分也是双倍。', loop: 'walk', acts: ['attack', 'hurt', 'death'], scale: 3, tint: 'rgb(132,62,196)' },
 ];
 
 function createBestiary() {
