@@ -1,5 +1,5 @@
 cmake_minimum_required(VERSION 3.21)
-project(EndlessDisaster VERSION 0.5.4 LANGUAGES CXX)
+project(EndlessDisaster VERSION 0.5.5 LANGUAGES CXX)
 
 set(CMAKE_CXX_STANDARD 17)
 set(CMAKE_CXX_STANDARD_REQUIRED ON)
@@ -38,6 +38,22 @@ endif()
 target_include_directories(EndlessDisaster PRIVATE src)
 target_compile_definitions(EndlessDisaster PRIVATE ED_VERSION="${PROJECT_VERSION}")
 target_link_libraries(EndlessDisaster PRIVATE Qt6::Widgets Qt6::Multimedia)
+
+if(WIN32)
+    # 可执行文件图标：windres 把 .rc 编进 exe，资源管理器 / 任务栏与文件属性都用它。
+    # .rc 由模板生成，括号里填 ico 的绝对路径，省得 windres 相对路径找错地方。
+    enable_language(RC)
+    set(ED_WIN_ICON ${CMAKE_SOURCE_DIR}/assets/ui/EndlessDisaster.ico)
+    if(EXISTS ${ED_WIN_ICON})
+        set(ED_WIN_ICON_RC ${CMAKE_BINARY_DIR}/EndlessDisaster.rc)
+        configure_file(packaging/windows/EndlessDisaster.rc.in ${ED_WIN_ICON_RC} @ONLY)
+        target_sources(EndlessDisaster PRIVATE ${ED_WIN_ICON_RC})
+        # 换了 ico 也要重编 .rc：CMake 默认只跟踪 .rc 自己
+        set_property(SOURCE ${ED_WIN_ICON_RC} PROPERTY OBJECT_DEPENDS ${ED_WIN_ICON})
+    else()
+        message(WARNING "Windows 图标不存在，跳过：${ED_WIN_ICON}")
+    endif()
+endif()
 
 if(MSVC)
     target_compile_options(EndlessDisaster PRIVATE /utf-8)
