@@ -136,6 +136,26 @@ std::vector<SfxId> Session::drainSfx() {
     return out;
 }
 
+void Session::queueVfx(VfxKind kind, float x, float y, float radius, bool crit, MonsterKind monster) {
+    if (vfxQueue_.size() >= 96) {
+        return;
+    }
+    VfxEvent event;
+    event.kind = kind;
+    event.x = x;
+    event.y = y;
+    event.radius = radius;
+    event.crit = crit;
+    event.monster = monster;
+    vfxQueue_.push_back(event);
+}
+
+std::vector<VfxEvent> Session::drainVfx() {
+    std::vector<VfxEvent> out;
+    out.swap(vfxQueue_);
+    return out;
+}
+
 bool Session::consumeRecoverBgm() {
     if (!recoverBgmPending_) {
         return false;
@@ -267,6 +287,7 @@ void Session::newGame(uint32_t seed, uint32_t runId, HeroClass hero, int skillD,
     drops_.clear();
     floats_.clear();
     attackFx_.clear();
+    vfxQueue_.clear();
     bag_.clear();
     nextId_ = 1;
     pathTileX_ = 999999;
@@ -553,6 +574,11 @@ void Session::settle() {
 
 void Session::gainXp(int amount) {
     player_.xp += float(amount);
+    if (player_.xp >= float(xpToNext())) {
+        pushFx(AttackFxKind::Pillar, 90.f, 0.f, 0.9f, 0xFFD24A);
+        pushFx(AttackFxKind::Ring, 40.f, 0.f, 0.6f, 0xFFD24A);
+        queueVfx(VfxKind::LevelUp, player_.x, player_.y);
+    }
     while (player_.xp >= float(xpToNext())) {
         player_.xp -= float(xpToNext());
         player_.level += 1;
@@ -705,9 +731,10 @@ void Session::hurtPlayer(float damage, Monster* source) {
     }
 }
 
-void Session::pushFx(AttackFxKind kind, float radius, float halfAngle, float life) {
+void Session::pushFx(AttackFxKind kind, float radius, float halfAngle, float life, uint32_t color) {
     AttackFx fx;
     fx.kind = kind;
+    fx.color = color;
     fx.x = player_.x;
     fx.y = player_.y - 8.f;
     fx.fx = player_.facingX;
@@ -762,6 +789,7 @@ void Session::hurtMonster(Monster& monster, float damage, float poiseDamage, boo
     monster.lastHitBy = player_.attackId;
     pushFloat(monster.x, monster.y, damage, crit);
     queueSfx(crit ? SfxId::Crit : SfxId::Hit);
+    queueVfx(VfxKind::Hit, monster.x, monster.y, 0.f, crit, monster.kind);
     if (knockback > 0.f && monster.kind != MonsterKind::Eye) {
         float kx = monster.x - player_.x;
         float ky = monster.y - player_.y;
@@ -844,7 +872,7 @@ void Session::castHeavySwordQi() {
     player_.heavy = true;
     player_.animT = 0.f;
     player_.attackId += 1;
-    pushFx(AttackFxKind::Crescent, kRange, 0.85f, 0.28f);
+    pushFx(AttackFxKind::Crescent, kRange, kMeleeConeHalf, 0.28f);
     queueSfx(SfxId::Skill);
     for (Monster& monster : monsters_) {
         if (monster.state == ActorState::Dead) {
@@ -855,13 +883,13 @@ void Session::castHeavySwordQi() {
         const float dist = lengthOf(dx, dy);
         if (dist < kRange && dist > 0.01f) {
             const float dot = (dx / dist) * player_.facingX + (dy / dist) * player_.facingY;
-            if (dot > 0.35f) {
+            if (dot > kMeleeConeDot) {
                 bool crit = false;
                 hurtMonster(monster, rollDamage(24.f, &crit), 18.f, crit, 28.f);
             }
         }
     }
-    breakMazeWallsCone(kRange, 0.35f);
+    breakMazeWallsCone(kRange, kMeleeConeDot);
     checkTalents();
 }
 
@@ -1218,14 +1246,15 @@ void Session::castMissile() {
 
 void Session::explodeBolt(const Bolt& bolt) {
     AttackFx fx;
-    fx.kind = AttackFxKind::Pulse;
+    fx.kind = AttackFxKind::Burst;
     fx.x = bolt.x;
     fx.y = bolt.y - 8.f;
     fx.radius = bolt.blast;
-    fx.life = 0.3f;
-    fx.maxLife = 0.3f;
+    fx.life = 0.36f;
+    fx.maxLife = 0.36f;
     attackFx_.push_back(fx);
     queueSfx(SfxId::Explode);
+    queueVfx(VfxKind::Explode, bolt.x, bolt.y, bolt.blast);
     breakMazeWallsRadius(bolt.x, bolt.y, bolt.blast);
     for (Monster& monster : monsters_) {
         if (monster.state != ActorState::Dead && lengthOf(monster.x - bolt.x, monster.y - bolt.y) <= bolt.blast) {
@@ -1255,7 +1284,7 @@ void Session::castSwarm() {
         drone.damage = rollDamage(11.f, &drone.crit);
         drones_.push_back(drone);
     }
-    pushFx(AttackFxKind::Ring, 22.f, 0.7f, 0.25f);
+    pushFx(AttackFxKind::Ring, 22.f, 0.7f, 0.25f, 0x60E0D0);
     queueSfx(SfxId::Skill);
 }
 
@@ -1392,18 +1421,20 @@ void Session::updateDrones(float dt) {
 
 void Session::explodeDrone(const Drone& drone, bool harmful) {
     AttackFx fx;
-    fx.kind = AttackFxKind::Pulse;
+    fx.kind = harmful ? AttackFxKind::Burst : AttackFxKind::Pulse;
     fx.x = drone.x;
     fx.y = drone.y - 12.f;
     fx.radius = harmful ? kDroneBlast : 10.f;
-    fx.life = harmful ? 0.3f : 0.2f;
+    fx.life = harmful ? 0.32f : 0.2f;
     fx.maxLife = fx.life;
+    fx.color = harmful ? 0 : 0x6EE6FF;
     attackFx_.push_back(fx);
     if (!harmful) {
         queueSfx(SfxId::Hit);
         return;
     }
     queueSfx(SfxId::Explode);
+    queueVfx(VfxKind::Explode, drone.x, drone.y, kDroneBlast);
     breakMazeWallsRadius(drone.x, drone.y, kDroneBlast);
     for (Monster& monster : monsters_) {
         if (monster.state == ActorState::Dead) {
@@ -1437,7 +1468,7 @@ void Session::castBoost() {
     player_.invuln = 0.26f;
     player_.attackId += 1;
     player_.animT = 0.f;
-    pushFx(AttackFxKind::Ring, 36.f, 0.f, 0.26f);
+    pushFx(AttackFxKind::Ring, 36.f, 0.f, 0.26f, 0x80D8FF);
     queueSfx(SfxId::Dodge);
     for (Monster& monster : monsters_) {
         if (monster.state != ActorState::Dead && lengthOf(monster.x - player_.x, monster.y - player_.y) < 36.f) {
@@ -1453,7 +1484,7 @@ void Session::castSpin() {
     player_.heavy = true;
     player_.animT = 0.f;
     player_.attackId += 1;
-    pushFx(AttackFxKind::Ring, 42.f, 0.f, 0.32f);
+    pushFx(AttackFxKind::Spin, 42.f, 0.f, 0.4f, 0xFFE0C2);
     queueSfx(SfxId::Skill);
     for (Monster& monster : monsters_) {
         if (lengthOf(monster.x - player_.x, monster.y - player_.y) < 42.f) {
@@ -1488,7 +1519,7 @@ void Session::castNova() {
     player_.heavy = true;
     player_.animT = 0.f;
     player_.attackId += 1;
-    pushFx(AttackFxKind::Pulse, 64.f, 0.f, 0.4f);
+    pushFx(AttackFxKind::Pulse, 64.f, 0.f, 0.4f, 0xB070FF);
     queueSfx(SfxId::Skill);
     for (Monster& monster : monsters_) {
         if (lengthOf(monster.x - player_.x, monster.y - player_.y) < 64.f) {
@@ -1524,7 +1555,8 @@ void Session::castSwordQi() {
     player_.animT = 0.f;
     player_.attackId += 1;
     constexpr float kQiRange = 112.f;
-    pushFx(AttackFxKind::Crescent, kQiRange, 0.95f, 0.32f);
+    // 判定是释放瞬间的一整片扇形，特效画成一道快速推满射程的大月牙，并提前散掉
+    pushFx(AttackFxKind::Qi, kQiRange, kMeleeConeHalf, 0.26f, 0xBFE0FF);
     queueSfx(SfxId::Skill);
     for (Monster& monster : monsters_) {
         const float dx = monster.x - player_.x;
@@ -1532,14 +1564,14 @@ void Session::castSwordQi() {
         const float dist = lengthOf(dx, dy);
         if (dist < kQiRange && dist > 0.01f) {
             const float dot = (dx / dist) * player_.facingX + (dy / dist) * player_.facingY;
-            if (dot > 0.35f) {
+            if (dot > kMeleeConeDot) {
                 bool crit = false;
                 const float dmg = rollDamage(18.f, &crit);
                 hurtMonster(monster, dmg, 12.f, crit, 16.f);
             }
         }
     }
-    breakMazeWallsCone(kQiRange, 0.35f);
+    breakMazeWallsCone(kQiRange, kMeleeConeDot);
     checkTalents();
 }
 
@@ -1560,7 +1592,7 @@ void Session::castThrustStack() {
     player_.invuln = 0.22f;
     player_.attackId += 1;
     player_.animT = 0.f;
-    pushFx(AttackFxKind::Dash, 72.f, 0.35f, 0.26f);
+    pushFx(AttackFxKind::Lunge, 72.f, 0.35f, 0.3f, 0x8FB8FF);
     queueSfx(SfxId::Skill);
     for (Monster& monster : monsters_) {
         const float dx = monster.x - player_.x;
@@ -1586,29 +1618,66 @@ void Session::castBurial(float& cooldown) {
     player_.mp -= 40.f;
     cooldown = 9.f * cdMul();
     player_.skillCasts += 1;
-    player_.burialT = 1.15f;
+    player_.burialStage = 1;
+    player_.burialT = kBurialStage1Life;
+    player_.burialNext = kBurialStage1Hit;
     player_.burialR = 96.f;
     player_.state = ActorState::Attack;
     player_.attackT = 0.55f / atkSpeedMul();
     player_.heavy = true;
     player_.animT = 0.f;
     player_.attackId += 1;
-    pushFx(AttackFxKind::Pulse, player_.burialR, 0.f, 0.55f);
     queueSfx(SfxId::Skill);
     Audio::instance().playBurialVoice();
+    note("万葬");
+}
+
+// 一段出伤：法阵铺开后的第一段；二段出伤：第一段特效结束、六芒星落下时的结算
+void Session::burialBlast(int stage) {
+    const bool first = stage == 1;
+    const float base = first ? 16.f : 22.f;
+    const float poise = first ? 10.f : 16.f;
+    const float knock = first ? 6.f : 14.f;
+    player_.attackId += 1;
+    pushFx(AttackFxKind::Pulse, player_.burialR, 0.f, first ? 0.35f : 0.45f, first ? 0xC040FF : 0xFF7BE8);
+    queueSfx(first ? SfxId::Skill : SfxId::Explode);
     for (Monster& monster : monsters_) {
         if (monster.state == ActorState::Dead) {
             continue;
         }
         if (lengthOf(monster.x - player_.x, monster.y - player_.y) <= player_.burialR) {
             bool crit = false;
-            const float dmg = rollDamage(38.f, &crit);
-            hurtMonster(monster, dmg, 22.f, crit, 10.f);
+            const float dmg = rollDamage(base, &crit);
+            hurtMonster(monster, dmg, poise, crit, knock);
         }
     }
     breakMazeWallsRadius(player_.x, player_.y, player_.burialR);
-    note("万葬");
     checkTalents();
+}
+
+void Session::updateBurial(float dt) {
+    if (player_.burialStage <= 0) {
+        return;
+    }
+    player_.burialT = std::max(0.f, player_.burialT - dt);
+    if (player_.burialNext > 0.f) {
+        player_.burialNext -= dt;
+        if (player_.burialNext <= 0.f) {
+            burialBlast(player_.burialStage);
+        }
+    }
+    if (player_.burialT > 0.f) {
+        return;
+    }
+    if (player_.burialStage == 1) {
+        player_.burialStage = 2;
+        player_.burialT = kBurialStage2Life;
+        player_.burialNext = kBurialStage2Hit;
+        return;
+    }
+    player_.burialStage = 0;
+    player_.burialT = 0.f;
+    player_.burialNext = 0.f;
 }
 
 void Session::castMirrorShield(float& cooldown) {
@@ -1638,7 +1707,8 @@ void Session::castMageHeal(float& cooldown) {
     player_.skillCasts += 1;
     const float amount = player_.maxHp * 0.15f;
     player_.hp = std::min(player_.maxHp, player_.hp + amount);
-    pushFx(AttackFxKind::Pulse, 28.f, 0.f, 0.35f);
+    pushFx(AttackFxKind::Pulse, 28.f, 0.f, 0.35f, 0x60FF90);
+    queueVfx(VfxKind::Heal, player_.x, player_.y);
     queueSfx(SfxId::Heal);
     note(QString("治疗术 +%1").arg(int(amount)));
     checkTalents();
@@ -1652,7 +1722,8 @@ void Session::castBerserk(float& cooldown, const QString& name) {
     cooldown = 8.f * cdMul();
     player_.skillCasts += 1;
     player_.berserkT = 3.f;
-    pushFx(AttackFxKind::Pulse, 36.f, 0.f, 0.4f);
+    pushFx(AttackFxKind::Pulse, 36.f, 0.f, 0.4f, 0xFF4A3A);
+    queueVfx(VfxKind::Rage, player_.x, player_.y);
     queueSfx(SfxId::Skill);
     note(name);
     checkTalents();
@@ -1666,7 +1737,7 @@ void Session::castOverload(float& cooldown) {
     cooldown = 20.f * cdMul();
     player_.skillCasts += 1;
     player_.overloadT = 10.f;
-    pushFx(AttackFxKind::Pulse, 36.f, 0.f, 0.4f);
+    pushFx(AttackFxKind::Pulse, 36.f, 0.f, 0.4f, 0xFFA040);
     queueSfx(SfxId::Skill);
     note("过载");
     checkTalents();
@@ -1682,7 +1753,7 @@ void Session::castMagField(float& cooldown) {
     player_.skillCasts += 1;
     player_.fieldT = 6.f;
     player_.fieldTick = 0.f;
-    pushFx(AttackFxKind::Ring, 28.f, 0.7f, 0.3f);
+    pushFx(AttackFxKind::Ring, 28.f, 0.7f, 0.3f, 0x60B0FF);
     queueSfx(SfxId::Skill);
     note("磁力场");
     checkTalents();
@@ -1697,6 +1768,8 @@ void Session::castMedkit(float& cooldown) {
     cooldown = 16.f * cdMul();
     player_.skillCasts += 1;
     player_.medkitT = 3.f;
+    pushFx(AttackFxKind::Pulse, 28.f, 0.f, 0.35f, 0x60FF90);
+    queueVfx(VfxKind::Heal, player_.x, player_.y);
     queueSfx(SfxId::Heal);
     note("战术医疗包");
     checkTalents();
@@ -1832,7 +1905,7 @@ void Session::updatePlayer(float dt, const InputState& input, float mouseX, floa
     player_.cdF = std::max(0.f, player_.cdF - dt);
     player_.cdC = std::max(0.f, player_.cdC - dt);
     player_.cdV = std::max(0.f, player_.cdV - dt);
-    player_.burialT = std::max(0.f, player_.burialT - dt);
+    updateBurial(dt);
     player_.berserkT = std::max(0.f, player_.berserkT - dt);
     if (player_.state != ActorState::Dead) {
         updateRobotBuffs(dt);
@@ -1963,6 +2036,8 @@ void Session::updatePlayer(float dt, const InputState& input, float mouseX, floa
         player_.hp = std::min(player_.maxHp, player_.hp + 22.f);
         player_.stamina = std::min(player_.maxStamina, player_.stamina + 20.f);
         note("恢复");
+        pushFx(AttackFxKind::Pulse, 24.f, 0.f, 0.3f, 0x60FF90);
+        queueVfx(VfxKind::Heal, player_.x, player_.y);
         queueSfx(SfxId::Heal);
     }
     // 突进类技能进入 Dodge 后本帧不再处理移动，否则会被改回 Run
@@ -2052,6 +2127,7 @@ void Session::updatePlayer(float dt, const InputState& input, float mouseX, floa
                 fireRobotShot(0.f, 10.f);
                 queueSfx(SfxId::Swing);
             } else {
+                pushFx(AttackFxKind::Slash, 34.f, 1.0f, player_.attackT * 0.6f, player_.berserkT > 0.f ? 0xFF6A50 : 0);
                 queueSfx(SfxId::Swing);
             }
         }
@@ -2358,6 +2434,7 @@ void Session::updateMonsters(float dt) {
             monster.hp = 0.f;
             monster.state = ActorState::Dead;
             monster.animT = 0.f;
+            queueVfx(VfxKind::Kill, monster.x, monster.y, 0.f, false, monster.kind);
             if (!monster.scored) {
                 const bool overLevel = monster.level > player_.level;
                 const int gained = scoreFor(monster.kind, monster.level);

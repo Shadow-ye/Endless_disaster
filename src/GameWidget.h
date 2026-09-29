@@ -4,6 +4,7 @@
 #include "Sprites.h"
 
 #include <QVBoxLayout>
+#include <QColor>
 #include <QElapsedTimer>
 #include <QHash>
 #include <QJsonObject>
@@ -45,7 +46,7 @@ protected:
     void resizeEvent(QResizeEvent* event) override;
 
 private:
-    enum class TouchControl { None, Stick, Attack, Dodge, Jump, Guard, Heal, SkillR, SkillF, SkillC, SkillV, Guide, Pause, AutoAim };
+    enum class TouchControl { None, Stick, Attack, Dodge, Jump, Guard, Heal, SkillR, SkillF, SkillC, SkillV, Guide, Pause, AutoAim, Seek };
     struct TouchButton {
         TouchControl control = TouchControl::None;
         QPointF center;
@@ -88,11 +89,34 @@ private:
     const Monster* aimTarget() const;
     const QImage& touchSprite(qreal radius, const QColor& rim, const QColor& fill, const QString& label, int fontPx, const QColor& textColor);
     void drawTouchControls(QPainter& painter);
+    void spawnVfx(const VfxEvent& event);
+    void updateParticles(float dt);
+    void drawParticles(QPainter& painter);
+    float vfxRand();
     void drawShadow(QPainter& painter, float x, float y);
     void drawAnim(QPainter& painter, const SpriteAnim& anim, ActorState state, float animT, float x, float y, bool flip, bool moving);
     static int frameIndex(const SpriteAnim& anim, float time, bool loop, float fps);
 
+    // z 为离地高度；落地后弹跳减速
+    struct Particle {
+        float x = 0.f;
+        float y = 0.f;
+        float z = 0.f;
+        float vx = 0.f;
+        float vy = 0.f;
+        float vz = 0.f;
+        float gravity = 0.f;
+        float life = 0.f;
+        float maxLife = 1.f;
+        float size = 2.f;
+        QRgb color = 0;
+        bool glow = false;
+    };
+
     Session session_;
+    std::vector<Particle> particles_;
+    // 独立于 Session 的随机数，避免粒子扰动玩法随机序列
+    uint32_t vfxRng_ = 0x9E3779B9u;
     SpriteSet sprites_;
     bool spritesOk_ = false;
     QImage canvas_;

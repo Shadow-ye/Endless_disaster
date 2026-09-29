@@ -83,7 +83,7 @@ inline SkillText skillText(int id) {
     case kSkillFlight:
         return {"飞行", "开关飞行。优先消耗 STA，再消耗 MP。耗尽后落地。"};
     case kSkillBurial:
-        return {"万葬", "以自身为中心大范围法阵，重创范围内敌人。消耗 40 MP，冷却 9 秒。"};
+        return {"万葬", "以自身为中心大范围法阵，伤害分两段：法阵铺开 0.25 秒后第一段，第一段特效结束时六芒星落下第二段。消耗 40 MP，冷却 9 秒。"};
     case kSkillMirror:
         return {"逆反之盾", "吸收伤害并把每次伤害的 5% 反弹给攻击者。持续 10 秒，单次过高或累计达上限也会破碎。上限随等级提高。消耗 24 MP，冷却 15 秒。"};
     case kSkillMageHeal:
@@ -105,7 +105,7 @@ inline SkillText skillText(int id) {
     case kSkillSwarm:
         return {"蜂群", "身边召唤 6 架小型无人机，成群撞向离自己最近的怪物并爆炸，半径 26 内基础伤害 11 并击退。无人机会被怪物子弹打爆，12 秒后自毁。消耗 22 MP，冷却 7 秒。"};
     case kSkillSeek:
-        return {"寻路", "按 G 开关。雷达标出迷宫遗迹方向；身在迷宫中时，另一份地图实时画出进出中央广场的唯一路线。不消耗 MP。由天赋「世界指引」获得。"};
+        return {"寻路", "按 G 开关（安卓点右上角「寻路」）。雷达标出迷宫遗迹方向；进入迷宫会自动显示迷宫地图，开启后地图上才画出进出中央广场的唯一路线。不消耗 MP。由天赋「世界指引」获得。"};
     default:
         return {"未知", ""};
     }

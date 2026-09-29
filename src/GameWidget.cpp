@@ -17,6 +17,7 @@
 #include <QHBoxLayout>
 #include <QKeyEvent>
 #include <QLabel>
+#include <QLinearGradient>
 #include <QMouseEvent>
 #include <QFrame>
 #include <QPainter>
@@ -41,6 +42,47 @@
 #include <cmath>
 
 namespace {
+constexpr float kPi = 3.14159265f;
+constexpr size_t kMaxParticles = 360;
+
+QColor fxColor(const AttackFx& fx, const QColor& fallback) {
+    return fx.color == 0 ? fallback : QColor::fromRgb(QRgb(0xFF000000u | fx.color));
+}
+
+QColor withAlpha(QColor color, int alpha) {
+    color.setAlpha(std::clamp(alpha, 0, 255));
+    return color;
+}
+
+// QPainter 没有 shadowBlur：先叠两层加宽的半透明描边充当辉光，再画实线
+template <typename Draw>
+void strokeGlow(QPainter& painter, const QColor& color, float width, Draw draw) {
+    const int alpha = color.alpha();
+    painter.setBrush(Qt::NoBrush);
+    painter.setPen(QPen(withAlpha(color, alpha / 6), width * 3.4f, Qt::SolidLine, Qt::RoundCap));
+    draw();
+    painter.setPen(QPen(withAlpha(color, alpha * 2 / 5), width * 2.f, Qt::SolidLine, Qt::RoundCap));
+    draw();
+    painter.setPen(QPen(color, width, Qt::SolidLine, Qt::RoundCap));
+    draw();
+}
+
+// 屏幕角度（y 向下）转成 Qt 圆弧用的角度（逆时针为正）
+QPainterPath arcPath(float cx, float cy, float r, float from, float to) {
+    const QRectF box(cx - r, cy - r, r * 2.f, r * 2.f);
+    QPainterPath path;
+    path.arcMoveTo(box, -from * 180.f / kPi);
+    path.arcTo(box, -from * 180.f / kPi, -(to - from) * 180.f / kPi);
+    return path;
+}
+
+// 技能释放瞬间的朝向，取特效里记录的方向并归一化
+void fxDir(const AttackFx& fx, float& nx, float& ny) {
+    const float d = std::sqrt(fx.fx * fx.fx + fx.fy * fx.fy);
+    nx = d > 0.001f ? fx.fx / d : 1.f;
+    ny = d > 0.001f ? fx.fy / d : 0.f;
+}
+
 QString formatTime(float t) {
     if (t < 0.f) {
         t = 0.f;
@@ -578,6 +620,7 @@ void GameWidget::startNew(HeroClass hero, int skillD, int skillF, int skillC, in
     const uint32_t seed = uint32_t(QRandomGenerator::global()->generate());
     const uint32_t runId = uint32_t(QRandomGenerator::global()->generate());
     session_.newGame(seed == 0 ? 1u : seed, runId == 0 ? 1u : runId, hero, skillD, skillF, skillC, skillV);
+    particles_.clear();
     endCommitted_ = false;
     clock_.restart();
     releaseAllTouches();
@@ -592,6 +635,8 @@ void GameWidget::startNew(HeroClass hero, int skillD, int skillF, int skillC, in
 void GameWidget::startContinue(const QJsonObject& game) {
     running_ = true;
     session_.loadFrom(game);
+    session_.drainVfx();
+    particles_.clear();
     endCommitted_ = false;
     clock_.restart();
     releaseAllTouches();
@@ -743,11 +788,15 @@ void GameWidget::tick() {
             for (SfxId id : session_.drainSfx()) {
                 Audio::instance().play(id);
             }
+            for (const VfxEvent& event : session_.drainVfx()) {
+                spawnVfx(event);
+            }
             if (session_.consumeRecoverBgm()) {
                 Audio::instance().playRecoverBgm();
             }
             input_.clearEdges();
         }
+        updateParticles(frame);
     }
     if (session_.ended()) {
         session_.consumeVoidPrompt();
@@ -761,6 +810,129 @@ void GameWidget::tick() {
         toastTime_ = 1.5f;
     }
     update();
+}
+
+float GameWidget::vfxRand() {
+    vfxRng_ ^= vfxRng_ << 13;
+    vfxRng_ ^= vfxRng_ >> 17;
+    vfxRng_ ^= vfxRng_ << 5;
+    return float(vfxRng_ & 0xFFFFFFu) / float(0x1000000);
+}
+
+void GameWidget::spawnVfx(const VfxEvent& event) {
+    auto spray = [&](int count, float speedMin, float speedMax, float vzMin, float vzMax, float gravity,
+                    float lifeMin, float lifeMax, float sizeMin, float sizeMax, float z, float spread,
+                    const QColor* colors, int colorCount, bool glow) {
+        for (int i = 0; i < count && particles_.size() < kMaxParticles; ++i) {
+            Particle p;
+            const float a = vfxRand() * kPi * 2.f;
+            const float speed = speedMin + (speedMax - speedMin) * vfxRand();
+            const float off = spread * std::sqrt(vfxRand());
+            p.x = event.x + std::cos(a) * off;
+            p.y = event.y + std::sin(a) * off * 0.6f;
+            p.z = z;
+            p.vx = std::cos(a) * speed;
+            p.vy = std::sin(a) * speed * 0.6f;
+            p.vz = vzMin + (vzMax - vzMin) * vfxRand();
+            p.gravity = gravity;
+            p.maxLife = p.life = lifeMin + (lifeMax - lifeMin) * vfxRand();
+            p.size = sizeMin + (sizeMax - sizeMin) * vfxRand();
+            p.color = colors[int(vfxRand() * float(colorCount)) % colorCount].rgb();
+            p.glow = glow;
+            particles_.push_back(p);
+        }
+    };
+    const bool big = event.monster == MonsterKind::Eye;
+    const float bodyZ = big ? 30.f : (event.monster == MonsterKind::Flyer ? 22.f : 10.f);
+    switch (event.kind) {
+    case VfxKind::Hit: {
+        static const QColor normal[] = {QColor(255, 244, 214), QColor(255, 206, 120)};
+        static const QColor crit[] = {QColor(255, 226, 90), QColor(255, 255, 220), QColor(255, 150, 60)};
+        if (event.crit) {
+            spray(7, 60.f, 150.f, 30.f, 110.f, 320.f, 0.25f, 0.45f, 2.f, 3.f, bodyZ, 3.f, crit, 3, true);
+        } else {
+            spray(3, 50.f, 110.f, 20.f, 80.f, 320.f, 0.2f, 0.35f, 1.5f, 2.5f, bodyZ, 3.f, normal, 2, true);
+        }
+        break;
+    }
+    case VfxKind::Kill: {
+        QColor debris[2] = {QColor(110, 200, 90), QColor(60, 140, 50)};
+        switch (event.monster) {
+        case MonsterKind::Skeleton: debris[0] = QColor(228, 222, 204); debris[1] = QColor(150, 140, 120); break;
+        case MonsterKind::Mushroom: debris[0] = QColor(222, 92, 70); debris[1] = QColor(240, 204, 160); break;
+        case MonsterKind::Flyer: debris[0] = QColor(150, 110, 200); debris[1] = QColor(90, 60, 130); break;
+        case MonsterKind::Caster: debris[0] = QColor(176, 84, 214); debris[1] = QColor(96, 40, 124); break;
+        case MonsterKind::Killbot: debris[0] = QColor(150, 160, 172); debris[1] = QColor(255, 160, 60); break;
+        case MonsterKind::Eye: debris[0] = QColor(224, 40, 52); debris[1] = QColor(255, 204, 204); break;
+        default: break;
+        }
+        spray(big ? 28 : 10, 30.f, big ? 140.f : 90.f, 60.f, 150.f, 340.f, 0.5f, 0.9f, 2.f, 3.5f, bodyZ * 0.8f, big ? 10.f : 4.f, debris, 2, false);
+        static const QColor soul[] = {QColor(236, 230, 255), QColor(190, 180, 230)};
+        spray(big ? 10 : 3, 4.f, 14.f, 16.f, 34.f, -30.f, 0.6f, 1.0f, 1.5f, 2.5f, bodyZ, 5.f, soul, 2, true);
+        break;
+    }
+    case VfxKind::Explode: {
+        static const QColor fire[] = {QColor(255, 220, 110), QColor(255, 150, 50), QColor(255, 96, 40)};
+        static const QColor smoke[] = {QColor(70, 64, 60), QColor(96, 88, 80)};
+        const float r = std::max(10.f, event.radius);
+        spray(8 + int(r / 4.f), r * 1.6f, r * 3.6f, 40.f, 130.f, 280.f, 0.3f, 0.6f, 2.f, 3.f, 12.f, r * 0.2f, fire, 3, true);
+        spray(3, 6.f, 18.f, 14.f, 30.f, -12.f, 0.6f, 0.9f, 4.f, 6.f, 12.f, r * 0.3f, smoke, 2, false);
+        break;
+    }
+    case VfxKind::Heal: {
+        static const QColor green[] = {QColor(120, 255, 150), QColor(200, 255, 210)};
+        spray(10, 2.f, 10.f, 18.f, 40.f, -40.f, 0.6f, 1.0f, 1.5f, 2.5f, 4.f, 12.f, green, 2, true);
+        break;
+    }
+    case VfxKind::LevelUp: {
+        static const QColor gold[] = {QColor(255, 216, 90), QColor(255, 246, 200), QColor(255, 180, 60)};
+        spray(20, 4.f, 20.f, 40.f, 110.f, -50.f, 0.6f, 1.1f, 1.5f, 3.f, 2.f, 16.f, gold, 3, true);
+        break;
+    }
+    case VfxKind::Rage: {
+        // 狂化：贴地炸开一圈火星，再往上飘几缕余烬
+        static const QColor ember[] = {QColor(255, 92, 58), QColor(255, 148, 60), QColor(255, 214, 130)};
+        spray(14, 40.f, 130.f, 30.f, 90.f, 240.f, 0.3f, 0.55f, 2.f, 3.f, 6.f, 6.f, ember, 3, true);
+        spray(8, 3.f, 16.f, 26.f, 60.f, -30.f, 0.6f, 1.0f, 1.5f, 2.5f, 6.f, 14.f, ember, 3, true);
+        break;
+    }
+    }
+}
+
+void GameWidget::updateParticles(float dt) {
+    const float damp = std::max(0.f, 1.f - 2.4f * dt);
+    for (Particle& p : particles_) {
+        p.life -= dt;
+        p.x += p.vx * dt;
+        p.y += p.vy * dt;
+        p.z += p.vz * dt;
+        p.vz -= p.gravity * dt;
+        p.vx *= damp;
+        p.vy *= damp;
+        if (p.z < 0.f) {
+            p.z = 0.f;
+            p.vz = -p.vz * 0.3f;
+            p.vx *= 0.5f;
+            p.vy *= 0.5f;
+        }
+    }
+    particles_.erase(std::remove_if(particles_.begin(), particles_.end(), [](const Particle& p) { return p.life <= 0.f; }), particles_.end());
+}
+
+void GameWidget::drawParticles(QPainter& painter) {
+    for (const Particle& p : particles_) {
+        const float a = std::clamp(p.life / p.maxLife, 0.f, 1.f);
+        QColor c = QColor::fromRgb(p.color);
+        const float px = p.x;
+        const float py = p.y - p.z;
+        if (p.glow) {
+            const float g = p.size * 2.6f;
+            c.setAlpha(int(70.f * a));
+            painter.fillRect(QRectF(px - g * 0.5f, py - g * 0.5f, g, g), c);
+        }
+        c.setAlpha(int(255.f * a));
+        painter.fillRect(QRectF(px - p.size * 0.5f, py - p.size * 0.5f, p.size, p.size), c);
+    }
 }
 
 QRect GameWidget::viewRect() const {
@@ -1001,6 +1173,10 @@ QVector<GameWidget::TouchButton> GameWidget::touchButtons() const {
     buttons.push_back({TouchControl::Pause, QPointF(w - u * 0.075, u * 0.075), top, QStringLiteral("暂停")});
     buttons.push_back({TouchControl::Guide, QPointF(w - u * 0.185, u * 0.075), top, QStringLiteral("说明")});
     buttons.push_back({TouchControl::AutoAim, QPointF(w - u * 0.295, u * 0.075), top, QStringLiteral("索敌")});
+    if (player.talentGuide) {
+        // 天赋「世界指引」解锁后才有的开关，桌面版是 G 键
+        buttons.push_back({TouchControl::Seek, QPointF(w - u * 0.405, u * 0.075), top, QStringLiteral("寻路")});
+    }
     return buttons;
 }
 
@@ -1192,6 +1368,9 @@ void GameWidget::pressTouch(TouchControl control, bool down) {
     case TouchControl::SkillV:
         input_.vEdge = input_.vEdge || down;
         break;
+    case TouchControl::Seek:
+        input_.gEdge = input_.gEdge || down;
+        break;
     default:
         break;
     }
@@ -1370,6 +1549,9 @@ void GameWidget::drawTouchControls(QPainter& painter) {
         case TouchControl::SkillV:
             slot(player.skillV, player.cdV);
             break;
+        case TouchControl::Seek:
+            sub = player.seekOn ? QStringLiteral("开") : QStringLiteral("关");
+            break;
         case TouchControl::Attack:
             if (player.hero == HeroClass::Robot) {
                 sub = player.ammo > 0 ? QString("%1/%2").arg(player.ammo).arg(kRobotMagazine) : QStringLiteral("长按换弹");
@@ -1379,7 +1561,8 @@ void GameWidget::drawTouchControls(QPainter& painter) {
             break;
         }
 
-        const bool pressed = held.contains(button.control) || (button.control == TouchControl::AutoAim && autoAim_);
+        const bool pressed = held.contains(button.control) || (button.control == TouchControl::AutoAim && autoAim_)
+            || (button.control == TouchControl::Seek && player.seekOn);
         const QRectF circle(button.center.x() - button.radius, button.center.y() - button.radius,
             button.radius * 2.0, button.radius * 2.0);
         const bool cooling = remain > 0.05f && maxCd > 0.01f;
@@ -1620,35 +1803,84 @@ void GameWidget::drawWorld(QPainter& painter) {
                 + (player.flying ? 12.f : 0.f);
             const float guardCx = player.x;
             const float guardCy = player.y - kGuardCenterAboveFoot - lift;
-            if (player.burialT > 0.f) {
-                const float t = 1.f - player.burialT / 1.15f;
-                const float R = player.burialR * (0.55f + 0.45f * std::min(1.f, t * 1.4f));
+            if (player.burialStage > 0) {
+                const float cx = player.x;
+                const float cy = player.y;
                 const float spin = player.animT * 2.8f;
-                painter.setBrush(Qt::NoBrush);
-                for (int ring = 1; ring <= 3; ++ring) {
-                    const float rr = R * (0.35f + 0.22f * ring);
-                    painter.setPen(QPen(QColor(160, 40, 220, 90 + ring * 30), 1 + (ring == 3 ? 1 : 0)));
-                    painter.drawEllipse(QRectF(player.x - rr, player.y - rr, rr * 2.f, rr * 2.f));
+                if (player.burialStage == 1) {
+                    // 第一段：法阵铺开，0.25 秒后才出伤
+                    const float p = std::clamp(1.f - player.burialT / kBurialStage1Life, 0.f, 1.f);
+                    const float R = player.burialR * (0.55f + 0.45f * std::min(1.f, p * 1.4f));
+                    const float fade = std::min(1.f, player.burialT / 0.18f);
+                    if (p < 0.3f) {
+                        painter.setPen(Qt::NoPen);
+                        painter.setBrush(QColor(170, 60, 255, int(90.f * (1.f - p / 0.3f))));
+                        painter.drawEllipse(QRectF(cx - R, cy - R, R * 2.f, R * 2.f));
+                    }
+                    painter.setBrush(Qt::NoBrush);
+                    for (int ring = 1; ring <= 2; ++ring) {
+                        const float rr = R * (0.35f + 0.22f * ring);
+                        painter.setPen(QPen(QColor(160, 40, 220, int((90 + ring * 30) * fade)), 1));
+                        painter.drawEllipse(QRectF(cx - rr, cy - rr, rr * 2.f, rr * 2.f));
+                    }
+                    const float rOuter = R * 0.99f;
+                    strokeGlow(painter, QColor(200, 90, 255, int(210 * fade)), 1.5f, [&] {
+                        painter.drawEllipse(QRectF(cx - rOuter, cy - rOuter, rOuter * 2.f, rOuter * 2.f));
+                    });
+                    painter.setPen(Qt::NoPen);
+                    painter.setBrush(QColor(230, 190, 255, int(220 * fade)));
+                    for (int i = 0; i < 16; ++i) {
+                        const float a = -spin * 0.8f + i * kPi / 8.f;
+                        const float rx = cx + std::cos(a) * R * 0.89f;
+                        const float ry = cy + std::sin(a) * R * 0.89f;
+                        const float s = 2.6f;
+                        const float ca = std::cos(a + kPi * 0.25f) * s;
+                        const float sa = std::sin(a + kPi * 0.25f) * s;
+                        const QPointF rune[4] = {QPointF(rx + ca, ry + sa), QPointF(rx - sa, ry + ca), QPointF(rx - ca, ry - sa), QPointF(rx + sa, ry - ca)};
+                        painter.drawPolygon(rune, 4);
+                    }
+                    painter.setBrush(Qt::NoBrush);
+                    painter.setPen(QPen(QColor(120, 30, 180, int(70 * fade)), 1));
+                    painter.drawEllipse(QRectF(cx - player.burialR, cy - player.burialR, player.burialR * 2.f, player.burialR * 2.f));
+                } else {
+                    // 第二段：法阵收势后六芒星落下，出伤处炸开白光并散去
+                    const float p = std::clamp(1.f - player.burialT / kBurialStage2Life, 0.f, 1.f);
+                    constexpr float hitP = kBurialStage2Hit / kBurialStage2Life;
+                    const bool landed = player.burialNext <= 0.f;
+                    const float k = landed ? std::min(1.f, (p - hitP) / (1.f - hitP)) : std::min(1.f, p / hitP);
+                    const float fade = landed ? 1.f - k : 1.f;
+                    const float starR = player.burialR * (landed ? 0.8f + 0.35f * k : 0.98f - 0.18f * k);
+                    painter.setPen(Qt::NoPen);
+                    painter.setBrush(QColor(170, 60, 255, int(70 * fade)));
+                    painter.drawEllipse(QRectF(cx - player.burialR, cy - player.burialR, player.burialR * 2.f, player.burialR * 2.f));
+                    painter.setBrush(Qt::NoBrush);
+                    QPointF star[6];
+                    for (int i = 0; i < 6; ++i) {
+                        const float a = spin * 0.5f + i * kPi / 3.f;
+                        star[i] = QPointF(cx + std::cos(a) * starR, cy + std::sin(a) * starR);
+                    }
+                    strokeGlow(painter, QColor(255, 110, 230, int((landed ? 220.f : 130.f + 90.f * k) * fade)),
+                        landed ? 4.f - 2.4f * k : 1.6f + 1.4f * k, [&] {
+                            for (int i = 0; i < 6; ++i) {
+                                painter.drawLine(star[i], star[(i + 2) % 6]);
+                            }
+                        });
+                    if (landed) {
+                        const float flare = std::max(0.f, 1.f - (p - hitP) / 0.18f);
+                        if (flare > 0.f) {
+                            painter.setPen(Qt::NoPen);
+                            painter.setBrush(QColor(255, 236, 255, int(190.f * flare)));
+                            painter.drawEllipse(QRectF(cx - player.burialR * 0.5f, cy - player.burialR * 0.5f, player.burialR, player.burialR));
+                        }
+                        const float shock = player.burialR * (0.75f + 0.45f * k);
+                        strokeGlow(painter, QColor(255, 130, 235, int(200.f * (1.f - k))), 2.f, [&] {
+                            painter.drawEllipse(QRectF(cx - shock, cy - shock, shock * 2.f, shock * 2.f));
+                        });
+                    }
+                    painter.setBrush(Qt::NoBrush);
+                    painter.setPen(QPen(QColor(120, 30, 180, int(70 * fade)), 1));
+                    painter.drawEllipse(QRectF(cx - player.burialR, cy - player.burialR, player.burialR * 2.f, player.burialR * 2.f));
                 }
-                painter.setPen(QPen(QColor(255, 80, 200, 180), 2));
-                for (int i = 0; i < 8; ++i) {
-                    const float a0 = spin + i * 0.785398f;
-                    const float a1 = a0 + 0.35f;
-                    painter.drawLine(QPointF(player.x + std::cos(a0) * R * 0.25f, player.y + std::sin(a0) * R * 0.25f),
-                        QPointF(player.x + std::cos(a0) * R, player.y + std::sin(a0) * R));
-                    painter.drawLine(QPointF(player.x + std::cos(a1) * R * 0.7f, player.y + std::sin(a1) * R * 0.7f),
-                        QPointF(player.x + std::cos(a1 + 0.2f) * R * 0.85f, player.y + std::sin(a1 + 0.2f) * R * 0.85f));
-                }
-                for (int i = 0; i < 12; ++i) {
-                    const float a = -spin * 0.7f + i * 0.523599f;
-                    const float x0 = player.x + std::cos(a) * R;
-                    const float y0 = player.y + std::sin(a) * R;
-                    painter.setPen(QPen(QColor(220, 180, 255, 200), 2));
-                    painter.drawPoint(QPointF(x0, y0));
-                    painter.drawLine(QPointF(x0, y0), QPointF(x0 - std::cos(a) * 6.f, y0 - std::sin(a) * 6.f));
-                }
-                painter.setPen(QPen(QColor(120, 30, 180, 70), 1));
-                painter.drawEllipse(QRectF(player.x - player.burialR, player.y - player.burialR, player.burialR * 2.f, player.burialR * 2.f));
             }
             if (anim->ok()) {
                 const bool loop = player.state != ActorState::Attack && player.state != ActorState::Hurt && player.state != ActorState::Dead;
@@ -1968,12 +2200,159 @@ void GameWidget::drawWorld(QPainter& painter) {
         const float u = std::clamp(fx.life / std::max(0.01f, fx.maxLife), 0.f, 1.f);
         const float grow = 1.f - u;
         if (fx.kind == AttackFxKind::Ring || fx.kind == AttackFxKind::Pulse) {
-            const float r = fx.radius * (fx.kind == AttackFxKind::Pulse ? (0.35f + 0.65f * grow) : 1.f);
-            painter.setBrush(Qt::NoBrush);
-            painter.setPen(QPen(QColor(255, 210, 80, int(60 + 160 * u)), 2));
-            painter.drawEllipse(QRectF(fx.x - r, fx.y - r, r * 2.f, r * 2.f));
-            painter.setPen(QPen(QColor(255, 255, 200, int(40 + 100 * u)), 1));
+            const bool pulse = fx.kind == AttackFxKind::Pulse;
+            const QColor base = fxColor(fx, QColor(255, 210, 80));
+            const float r = fx.radius * (pulse ? (0.35f + 0.65f * grow) : (0.85f + 0.15f * grow));
+            // 判定范围仍是俯视圆；脚下再铺一圈压扁的冲击波作地面透视
+            const float gr = fx.radius * (0.3f + 0.8f * grow);
+            const QRectF ground(fx.x - gr, fx.y + 8.f - gr * 0.45f, gr * 2.f, gr * 0.9f);
+            painter.setPen(Qt::NoPen);
+            painter.setBrush(withAlpha(base, int(70 * u)));
+            painter.drawEllipse(ground);
+            strokeGlow(painter, withAlpha(base, int(200 * u)), 1.5f, [&] { painter.drawEllipse(ground); });
+            if (pulse) {
+                painter.setPen(Qt::NoPen);
+                painter.setBrush(withAlpha(base, int(36 * u)));
+                painter.drawEllipse(QRectF(fx.x - r, fx.y - r, r * 2.f, r * 2.f));
+            }
+            strokeGlow(painter, withAlpha(base, int(60 + 160 * u)), 2.f, [&] {
+                painter.drawEllipse(QRectF(fx.x - r, fx.y - r, r * 2.f, r * 2.f));
+            });
+            painter.setPen(QPen(QColor(255, 255, 220, int(40 + 100 * u)), 1));
             painter.drawEllipse(QRectF(fx.x - r * 0.7f, fx.y - r * 0.7f, r * 1.4f, r * 1.4f));
+        } else if (fx.kind == AttackFxKind::Spin) {
+            // 回旋斩：一段旋转的刀环，脚下再压扁画一遍当地面透视
+            const float cx = player.x;
+            const float cy = player.y - 10.f;
+            const float r = fx.radius * (0.6f + 0.4f * grow);
+            const float head = grow * kPi * 3.f;
+            const QColor base = fxColor(fx, QColor(255, 224, 194));
+            painter.setPen(Qt::NoPen);
+            painter.setBrush(withAlpha(base, int(34 * u)));
+            painter.drawEllipse(QRectF(cx - fx.radius * 0.9f, cy - fx.radius * 0.9f, fx.radius * 1.8f, fx.radius * 1.8f));
+            painter.save();
+            painter.translate(cx, cy);
+            painter.scale(1.f, 0.6f);
+            const QPainterPath ground = arcPath(0.f, 0.f, r, head - kPi * 1.4f, head);
+            strokeGlow(painter, withAlpha(base, int(150 * u)), 3.f, [&] { painter.drawPath(ground); });
+            painter.restore();
+            const QPainterPath blade = arcPath(cx, cy, r, head - kPi * 1.4f, head);
+            strokeGlow(painter, withAlpha(base, int(230 * u)), 5.f * u + 1.f, [&] { painter.drawPath(blade); });
+            painter.setPen(QPen(withAlpha(QColor(255, 255, 255), int(160 * u)), 1.2f, Qt::SolidLine, Qt::RoundCap));
+            painter.drawPath(arcPath(cx, cy, r * 0.72f, head - kPi * 1.1f, head));
+        } else if (fx.kind == AttackFxKind::Qi) {
+            // 剑气：判定是释放瞬间的一整片扇形，所以按同一张角画一道推满射程的大月牙，并提前散去
+            float nx = 1.f;
+            float ny = 0.f;
+            fxDir(fx, nx, ny);
+            const float ang = std::atan2(ny, nx);
+            const float half = fx.halfAngle;
+            // 波前很快推到满射程，之后只剩余光
+            const float front = fx.radius * std::min(1.f, grow / 0.35f);
+            const float thick = std::clamp(front * 0.3f, 12.f, 34.f);
+            const float inner = std::max(6.f, front - thick);
+            const float fade = std::clamp((1.f - grow) / 0.4f, 0.f, 1.f);
+            const QColor base = fxColor(fx, QColor(191, 224, 255));
+            constexpr int kSegs = 20;
+            QPainterPath band;
+            for (int i = 0; i <= kSegs; ++i) {
+                const float a = ang - half + (half * 2.f) * float(i) / float(kSegs);
+                const QPointF p(fx.x + std::cos(a) * front, fx.y + std::sin(a) * front);
+                if (i == 0) {
+                    band.moveTo(p);
+                } else {
+                    band.lineTo(p);
+                }
+            }
+            for (int i = kSegs; i >= 0; --i) {
+                const float a = ang - half + (half * 2.f) * float(i) / float(kSegs);
+                band.lineTo(fx.x + std::cos(a) * inner, fx.y + std::sin(a) * inner);
+            }
+            band.closeSubpath();
+            painter.setPen(Qt::NoPen);
+            painter.setBrush(withAlpha(base, int(72.f * fade)));
+            painter.drawPath(band);
+            strokeGlow(painter, withAlpha(base, int(230.f * fade)), 3.6f, [&] {
+                painter.drawPath(arcPath(fx.x, fx.y, front, ang - half, ang + half));
+            });
+            painter.setPen(QPen(withAlpha(QColor(255, 255, 255), int(210.f * fade)), 1.4f, Qt::SolidLine, Qt::RoundCap));
+            painter.drawPath(arcPath(fx.x, fx.y, inner, ang - half * 0.92f, ang + half * 0.92f));
+        } else if (fx.kind == AttackFxKind::Lunge) {
+            // 突刺：人在位移，所以残影跟着角色往身后拖
+            float nx = 1.f;
+            float ny = 0.f;
+            fxDir(fx, nx, ny);
+            const float len = fx.radius * (0.5f + 0.5f * grow);
+            const float ox = player.x;
+            const float oy = player.y - 8.f;
+            const QColor base = fxColor(fx, QColor(143, 184, 255));
+            painter.setPen(Qt::NoPen);
+            for (int i = 3; i >= 1; --i) {
+                const float t = float(i) / 3.f;
+                const float gx = ox - nx * len * t;
+                const float gy = oy - ny * len * t;
+                const float half = 9.f * (1.f - t * 0.55f);
+                const QPointF ghost[4] = {
+                    QPointF(gx + nx * 10.f, gy + ny * 10.f),
+                    QPointF(gx - ny * half, gy + nx * half),
+                    QPointF(gx - nx * 22.f, gy - ny * 22.f),
+                    QPointF(gx + ny * half, gy - nx * half)};
+                painter.setBrush(withAlpha(base, int(90.f * u * (1.f - t * 0.5f))));
+                painter.drawPolygon(ghost, 4);
+            }
+            const QPointF tail(ox - nx * len, oy - ny * len);
+            const QPointF tip(ox + nx * 8.f, oy + ny * 8.f);
+            strokeGlow(painter, withAlpha(base, int(220 * u)), 2.5f, [&] { painter.drawLine(tail, tip); });
+            painter.setPen(QPen(withAlpha(QColor(255, 255, 255), int(230 * u)), 1.2f, Qt::SolidLine, Qt::RoundCap));
+            painter.drawLine(QLineF(tail + (tip - tail) * 0.45f, tip));
+            const QPointF head0[3] = {
+                tip + QPointF(nx * 8.f, ny * 8.f),
+                tip + QPointF(-ny * 5.f, nx * 5.f),
+                tip + QPointF(ny * 5.f, -nx * 5.f)};
+            painter.setPen(Qt::NoPen);
+            painter.setBrush(withAlpha(QColor(255, 255, 255), int(240 * u)));
+            painter.drawPolygon(head0, 3);
+        } else if (fx.kind == AttackFxKind::Slash) {
+            const float cx = player.x;
+            const float cy = player.y - 8.f;
+            const float ang = std::atan2(fx.fy, fx.fx);
+            const float half = fx.halfAngle;
+            const float reveal = std::min(1.f, grow / 0.55f);
+            const float r = fx.radius * (0.75f + 0.25f * grow);
+            const QPainterPath arc = arcPath(cx, cy, r, ang - half, ang - half + half * 2.f * reveal);
+            const QColor base = fxColor(fx, QColor(255, 246, 222));
+            strokeGlow(painter, withAlpha(base, int(240 * u)), 3.5f * u + 1.f, [&] { painter.drawPath(arc); });
+        } else if (fx.kind == AttackFxKind::Burst) {
+            const float p = grow;
+            const float r = std::max(2.f, fx.radius * std::sqrt(p));
+            QRadialGradient fire(fx.x, fx.y, r);
+            fire.setColorAt(0.0, QColor(255, 244, 190, int(230 * u)));
+            fire.setColorAt(0.45, QColor(255, 150, 40, int(200 * u)));
+            fire.setColorAt(1.0, QColor(200, 50, 20, 0));
+            painter.setPen(Qt::NoPen);
+            painter.setBrush(fire);
+            painter.drawEllipse(QRectF(fx.x - r, fx.y - r, r * 2.f, r * 2.f));
+            const float core = fx.radius * 0.5f * std::sqrt(p) * (1.f - p);
+            painter.setBrush(QColor(255, 255, 255, int(230 * u)));
+            painter.drawEllipse(QRectF(fx.x - core, fx.y - core, core * 2.f, core * 2.f));
+            const float shock = fx.radius * (0.6f + 0.5f * p);
+            strokeGlow(painter, QColor(255, 190, 90, int(160 * u)), 1.5f, [&] {
+                painter.drawEllipse(QRectF(fx.x - shock, fx.y - shock, shock * 2.f, shock * 2.f));
+            });
+        } else if (fx.kind == AttackFxKind::Pillar) {
+            const float footY = player.y;
+            const float h = fx.radius * (0.6f + 0.4f * std::min(1.f, grow * 3.f));
+            const float w = 14.f * (1.f - grow * 0.5f);
+            const QColor base = fxColor(fx, QColor(255, 210, 80));
+            QLinearGradient beam(0.f, footY - h, 0.f, footY);
+            beam.setColorAt(0.0, withAlpha(base, 0));
+            beam.setColorAt(0.6, withAlpha(base, int(150 * u)));
+            beam.setColorAt(1.0, QColor(255, 255, 230, int(220 * u)));
+            painter.setPen(Qt::NoPen);
+            painter.setBrush(beam);
+            painter.drawRect(QRectF(player.x - w * 0.5f, footY - h, w, h));
+            painter.setBrush(QColor(255, 255, 240, int(200 * u)));
+            painter.drawRect(QRectF(player.x - w * 0.15f, footY - h * 0.9f, w * 0.3f, h * 0.9f));
         } else if (fx.kind == AttackFxKind::Cone) {
             const float d = std::sqrt(fx.fx * fx.fx + fx.fy * fx.fy);
             const float nx = d > 0.001f ? fx.fx / d : 1.f;
@@ -2019,9 +2398,7 @@ void GameWidget::drawWorld(QPainter& painter) {
             painter.setPen(QPen(QColor(255, 220, 120, int(90 + 140 * u)), 2));
             painter.setBrush(QColor(255, 180, 60, int(40 + 90 * u)));
             painter.drawPath(path);
-            painter.setBrush(Qt::NoBrush);
-            painter.setPen(QPen(QColor(255, 255, 210, int(50 + 120 * u)), 1.5));
-            painter.drawPath(path);
+            strokeGlow(painter, QColor(255, 255, 210, int(50 + 120 * u)), 1.5f, [&] { painter.drawPath(path); });
         } else if (fx.kind == AttackFxKind::Dash) {
             const float d = std::sqrt(fx.fx * fx.fx + fx.fy * fx.fy);
             const float nx = d > 0.001f ? fx.fx / d : 1.f;
@@ -2167,6 +2544,7 @@ void GameWidget::drawWorld(QPainter& painter) {
             painter.drawRect(QRectF(drone.x - 1.f, dy, 2.f, 1.f));
         }
     }
+    drawParticles(painter);
     for (const FloatText& text : session_.floatTexts()) {
         const int shown = text.amount <= 0.f ? 0 : int(std::ceil(text.amount));
         const QString label = text.crit ? QString("暴击 %1").arg(shown) : QString::number(shown);
@@ -2326,7 +2704,8 @@ void GameWidget::drawRadar(QPainter& painter, const QRect& view) {
 void GameWidget::drawMazeMap(QPainter& painter, const QRect& view) {
     const Player& player = session_.player();
     const MazeRuin& ruin = session_.ruin();
-    if (!player.seekOn || !ruin.active) {
+    // 走进迷宫就显示地图；只有那条进出中央广场的路线要靠寻路技能
+    if (!ruin.active) {
         return;
     }
     if (!ruin.contains(tileOf(player.x), tileOf(player.y))) {
@@ -2367,7 +2746,7 @@ void GameWidget::drawMazeMap(QPainter& painter, const QRect& view) {
                 painter.fillRect(tile, QColor(255, 220, 80));
             } else if (MazeRuin::isPlazaRock(x, y)) {
                 painter.fillRect(tile, QColor(52, 50, 58));
-            } else if (ruin.onRoute(x, y)) {
+            } else if (player.seekOn && ruin.onRoute(x, y)) {
                 painter.fillRect(tile, QColor(220, 36, 32));
             } else if (plaza) {
                 painter.fillRect(tile, QColor(176, 64, 56));
@@ -2388,7 +2767,18 @@ void GameWidget::drawMazeMap(QPainter& painter, const QRect& view) {
     painter.drawEllipse(QRectF(px - 2.5f, py - 2.5f, 5.f, 5.f));
     painter.setPen(QColor(228, 212, 188));
     painter.setFont(QFont(Platform::uiFontFamily(), 8));
-    painter.drawText(QRect(plate.x(), plate.y() - 14, plate.width(), 12), Qt::AlignCenter, QStringLiteral("迷宫路线"));
+    painter.drawText(QRect(plate.x(), plate.y() - 14, plate.width(), 12), Qt::AlignCenter,
+        player.seekOn ? QStringLiteral("迷宫路线") : QStringLiteral("迷宫地图"));
+    if (!player.seekOn) {
+        // 没开寻路时压一条提示，免得玩家以为是地图坏了
+        painter.setPen(Qt::NoPen);
+        painter.setBrush(QColor(12, 10, 9, 210));
+        painter.drawRect(QRect(plate.x(), plate.bottom() - 13, plate.width(), 13));
+        painter.setPen(QColor(198, 188, 174));
+        painter.setFont(QFont(Platform::uiFontFamily(), 7));
+        painter.drawText(QRect(plate.x(), plate.bottom() - 13, plate.width(), 13), Qt::AlignCenter,
+            QStringLiteral("开启寻路显示路线"));
+    }
 }
 
 void GameWidget::drawBossBar(QPainter& painter, const QRect& view) {

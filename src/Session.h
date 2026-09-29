@@ -18,6 +18,16 @@ enum class EndReason { None, Death, Settle };
 
 inline constexpr int kRobotMagazine = 30;
 
+// 近战扇形：判定用 dot > kMeleeConeDot，特效按同一张角画，保证画面和作用范围一致
+inline constexpr float kMeleeConeDot = 0.35f;
+inline constexpr float kMeleeConeHalf = 1.213f;  // std::acos(0.35f)
+
+// 万葬两段的节奏：第一段法阵铺开后延后出伤，法阵结束换六芒星再出第二段
+inline constexpr float kBurialStage1Life = 0.75f;
+inline constexpr float kBurialStage1Hit = 0.25f;
+inline constexpr float kBurialStage2Life = 0.65f;
+inline constexpr float kBurialStage2Hit = 0.2f;
+
 struct Item {
     int slot = 0;
     int kind = 0;
@@ -80,8 +90,11 @@ struct Player {
     float cdThrustStack = 0.f;
     bool flying = false;
     bool seekOn = false;
+    // 万葬：1 = 第一段法阵，2 = 第二段六芒星；burialNext 是本段出伤的剩余时间
     float burialT = 0.f;
     float burialR = 96.f;
+    int burialStage = 0;
+    float burialNext = 0.f;
     float mirrorT = 0.f;
     float mirrorAbsorbed = 0.f;
     float mirrorCap = 40.f;
@@ -142,7 +155,7 @@ struct FloatText {
     bool crit = false;
 };
 
-enum class AttackFxKind { Ring, Cone, Crescent, Dash, Pulse, Mirror, Blink, Laser };
+enum class AttackFxKind { Ring, Cone, Crescent, Dash, Pulse, Mirror, Blink, Laser, Spin, Slash, Burst, Pillar, Qi, Lunge };
 
 struct AttackFx {
     AttackFxKind kind = AttackFxKind::Ring;
@@ -154,6 +167,20 @@ struct AttackFx {
     float maxLife = 0.3f;
     float radius = 40.f;
     float halfAngle = 0.7f;
+    // 0xRRGGBB；0 表示用该类型的默认色
+    uint32_t color = 0;
+};
+
+// 只给绘制层生成粒子用，不参与任何判定
+enum class VfxKind { Hit, Kill, Explode, Heal, LevelUp, Rage };
+
+struct VfxEvent {
+    VfxKind kind = VfxKind::Hit;
+    float x = 0.f;
+    float y = 0.f;
+    float radius = 0.f;
+    bool crit = false;
+    MonsterKind monster = MonsterKind::Slime;
 };
 
 struct Bolt {
@@ -234,6 +261,7 @@ public:
 
     void queueSfx(SfxId id);
     std::vector<SfxId> drainSfx();
+    std::vector<VfxEvent> drainVfx();
     bool consumeRecoverBgm();
     bool consumeVoidPrompt();
 
@@ -248,7 +276,8 @@ private:
     void hurtPlayer(float damage, Monster* source = nullptr);
     void hurtMonster(Monster& monster, float damage, float poiseDamage, bool crit = false, float knockback = 0.f);
     void pushFloat(float x, float y, float amount, bool crit);
-    void pushFx(AttackFxKind kind, float radius, float halfAngle = 0.7f, float life = 0.35f);
+    void pushFx(AttackFxKind kind, float radius, float halfAngle = 0.7f, float life = 0.35f, uint32_t color = 0);
+    void queueVfx(VfxKind kind, float x, float y, float radius = 0.f, bool crit = false, MonsterKind monster = MonsterKind::Slime);
     void updateFloats(float dt);
     void updateAttackFx(float dt);
     float scaledMonsterDamage(const Monster& monster, float base) const;
@@ -279,6 +308,8 @@ private:
     void castSwordQi();
     void castThrustStack();
     void castBurial(float& cooldown);
+    void burialBlast(int stage);
+    void updateBurial(float dt);
     void castMirrorShield(float& cooldown);
     void castMageHeal(float& cooldown);
     void castBerserk(float& cooldown, const QString& name);
@@ -346,6 +377,7 @@ private:
     uint32_t rng_ = 1;
     QString notice_;
     std::vector<SfxId> sfxQueue_;
+    std::vector<VfxEvent> vfxQueue_;
     float damageSinceHeal_ = 0.f;
     bool bgmRecoverArmed_ = false;
     bool recoverBgmPending_ = false;
