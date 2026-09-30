@@ -13,6 +13,8 @@ public:
     static constexpr int kPlaza0 = 9;
     static constexpr int kPlaza1 = 23;
     static constexpr int kCenter = 16;
+    // 迷宫外围被临时清成空地的宽度（见 TileMap::at）。迷宫消失时这块地形会恢复原貌。
+    static constexpr int kClearMargin = 4;
 
     enum class Phase { None, Live, Leave, Wait };
 
@@ -41,6 +43,8 @@ public:
     bool audit() const;
 
     bool contains(int tileX, int tileY) const;
+    // 是否落在迷宫的影响区内（矩形本体 + 外围清空带），离开这里地形才会恢复原貌
+    bool inClearZone(int tileX, int tileY) const;
     bool isWallAt(int tileX, int tileY) const;
     bool inPlaza(int tileX, int tileY) const;
     bool onRoute(int localX, int localY) const;

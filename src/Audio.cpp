@@ -53,6 +53,8 @@ struct AudioState {
     QAudioOutput* bgmOut = nullptr;
     QMediaPlayer* burialVoice = nullptr;
     QAudioOutput* burialOut = nullptr;
+    QMediaPlayer* atomicVoice = nullptr;
+    QAudioOutput* atomicOut = nullptr;
 };
 
 AudioState& state() {
@@ -141,6 +143,14 @@ void Audio::load(const QString& assetDir) {
         if (!burial.isEmpty()) {
             state().burialVoice->setSource(Platform::mediaUrl(burial));
         }
+        state().atomicOut = new QAudioOutput(QCoreApplication::instance());
+        state().atomicVoice = new QMediaPlayer(QCoreApplication::instance());
+        state().atomicVoice->setAudioOutput(state().atomicOut);
+        state().atomicVoice->setLoops(1);
+        const QString atomic = findClip(assetDir, QStringLiteral("I am atomic"));
+        if (!atomic.isEmpty()) {
+            state().atomicVoice->setSource(Platform::mediaUrl(atomic));
+        }
         loaded_ = true;
     }
     rebuildSfxVolumes();
@@ -211,6 +221,9 @@ void Audio::rebuildSfxVolumes() {
     if (state().burialOut) {
         state().burialOut->setVolume(vol);
     }
+    if (state().atomicOut) {
+        state().atomicOut->setVolume(vol);
+    }
 }
 
 void Audio::rebuildBgmVolume() {
@@ -248,6 +261,19 @@ void Audio::playBurialVoice() {
     }
     if (state().burialOut) {
         state().burialOut->setVolume(float(sfxVolumePercent_) / 100.f);
+    }
+    voice->stop();
+    voice->setPosition(0);
+    voice->play();
+}
+
+void Audio::playAtomicVoice() {
+    QMediaPlayer* voice = state().atomicVoice;
+    if (!loaded_ || !sfxEnabled_ || sfxVolumePercent_ <= 0 || !voice || voice->source().isEmpty()) {
+        return;
+    }
+    if (state().atomicOut) {
+        state().atomicOut->setVolume(float(sfxVolumePercent_) / 100.f);
     }
     voice->stop();
     voice->setPosition(0);

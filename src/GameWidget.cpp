@@ -43,9 +43,11 @@
 
 namespace {
 constexpr float kPi = 3.14159265f;
-constexpr size_t kMaxParticles = 360;
+constexpr size_t kMaxParticles = 560;
 // 右上角雷达盘的边长，以及靠它定位的迷宫地图边长
 constexpr int kRadarSide = 112;
+// I am atomic 的白闪：比 Session 里的闪白那一拍长得多，让爆炸在强光没消时就涌出来
+constexpr float kAtomicFlashFade = 0.64f;
 constexpr int kMazeMapSide = 132;
 
 QColor fxColor(const AttackFx& fx, const QColor& fallback) {
@@ -863,6 +865,7 @@ void GameWidget::tick() {
     clock_.restart();
     const float frame = std::min(0.05f, float(elapsedNs) / 1e9f);
     toastTime_ = std::max(0.f, toastTime_ - frame);
+    flashT_ = std::max(0.f, flashT_ - frame);
     if (running_ && !session_.paused() && !session_.ended()) {
         updateAimTarget();
         const QPointF world = mouseWorld();
@@ -982,6 +985,34 @@ void GameWidget::spawnVfx(const VfxEvent& event) {
         static const QColor ember[] = {QColor(255, 92, 58), QColor(255, 148, 60), QColor(255, 214, 130)};
         spray(14, 40.f, 130.f, 30.f, 90.f, 240.f, 0.3f, 0.55f, 2.f, 3.f, 6.f, 6.f, ember, 3, true);
         spray(8, 3.f, 16.f, 26.f, 60.f, -30.f, 0.6f, 1.0f, 1.5f, 2.5f, 6.f, 14.f, ember, 3, true);
+        break;
+    }
+    case VfxKind::AtomicCharge: {
+        // 蓄力：紫黑雾贴着地面往身上聚，配合脚下那圈紫色能量环
+        static const QColor haze[] = {QColor(96, 44, 158), QColor(52, 20, 88), QColor(22, 12, 34)};
+        spray(18, 6.f, 26.f, 24.f, 66.f, -16.f, 0.35f, 0.6f, 1.5f, 3.f, 2.f, 14.f, haze, 3, true);
+        break;
+    }
+    case VfxKind::AtomicFlash: {
+        // 引爆前那一拍：整个画面被白光吞掉
+        flashT_ = kAtomicFlashFade;
+        flashMax_ = kAtomicFlashFade;
+        break;
+    }
+    case VfxKind::AtomicBlast: {
+        // 引爆：紫黑火球掀开、大团烟尘升起、地被掀起的扬尘和崩出去的碎石
+        static const QColor fire[] = {QColor(162, 68, 230), QColor(96, 32, 160), QColor(230, 192, 255)};
+        static const QColor smoke[] = {QColor(30, 22, 44), QColor(14, 9, 20)};
+        static const QColor dust[] = {QColor(150, 122, 84), QColor(104, 82, 56)};
+        static const QColor debris[] = {QColor(58, 46, 70), QColor(96, 72, 40)};
+        // 火球心：高速外掀，很快被重力拽回来
+        spray(56, 120.f, 340.f, 50.f, 190.f, 210.f, 0.45f, 0.95f, 2.f, 4.5f, 10.f, 26.f, fire, 3, true);
+        // 蘑菇云的大团烟：又慢又大，浮得最久
+        spray(48, 10.f, 46.f, 34.f, 110.f, -30.f, 0.9f, 1.7f, 4.f, 8.f, 8.f, 48.f, smoke, 2, false);
+        // 地表扬尘：贴着地面铺得更开的一层土色
+        spray(34, 40.f, 150.f, 8.f, 40.f, 90.f, 0.7f, 1.3f, 3.f, 6.f, 2.f, 64.f, dust, 2, false);
+        // 碎石：抛得高，落地还会弹一下
+        spray(40, 150.f, 300.f, 90.f, 210.f, 430.f, 0.6f, 1.2f, 1.5f, 3.f, 12.f, 18.f, debris, 2, false);
         break;
     }
     }
@@ -2601,6 +2632,45 @@ void GameWidget::drawWorld(QPainter& painter) {
             painter.setBrush(Qt::NoBrush);
             painter.setPen(QPen(QColor(220, 80, 255, int(80 + 140 * u)), 2));
             painter.drawEllipse(QRectF(fx.x - r, fx.y - r, r * 2.f, r * 2.f));
+        } else if (fx.kind == AttackFxKind::Mushroom) {
+            // 核级引爆：紫黑烟柱把一圈不断涨大的伞盖顶上去，尾段整体散掉
+            const QColor base = fxColor(fx, QColor(150, 60, 220));
+            const float rise = std::min(1.f, grow * 2.2f);
+            const float capR = fx.radius * (0.25f + 0.75f * rise);
+            const float capY = fx.y - 40.f - 96.f * rise;
+            const float stemW = fx.radius * 0.30f * (1.f - 0.35f * rise);
+            const float fade = std::min(1.f, u * 2.4f);
+            painter.setPen(Qt::NoPen);
+            painter.setBrush(withAlpha(QColor(18, 10, 28), int(190 * fade)));
+            painter.drawRect(QRectF(fx.x - stemW * 0.5f, capY, stemW, fx.y - capY + 8.f));
+            painter.setBrush(withAlpha(QColor(22, 12, 34), int(220 * fade)));
+            painter.drawEllipse(QRectF(fx.x - capR, capY - capR * 0.62f, capR * 2.f, capR * 1.24f));
+            painter.setBrush(withAlpha(QColor(52, 22, 84), int(150 * fade)));
+            painter.drawEllipse(QRectF(fx.x - capR * 0.72f, capY - capR * 0.44f, capR * 1.44f, capR * 0.88f));
+            strokeGlow(painter, withAlpha(base, int(200 * fade)), 2.5f * fade + 0.6f, [&] {
+                painter.drawEllipse(QRectF(fx.x - capR, capY - capR * 0.62f, capR * 2.f, capR * 1.24f));
+            });
+        } else if (fx.kind == AttackFxKind::Grid) {
+            // 蓄力：一道扫描环由内向外推开，紫网格跟着亮起来，扫过之后再暗回去
+            const float step = float(kTile) * 2.f;
+            const float scan = fx.radius * grow;
+            const int lines = int(fx.radius / step);
+            painter.setPen(Qt::NoPen);
+            for (int i = -lines; i <= lines; ++i) {
+                const float off = float(i) * step;
+                const float dist = std::abs(off);
+                if (dist > fx.radius) {
+                    continue;
+                }
+                const float lit = 1.f - std::min(1.f, std::abs(dist - scan) / (fx.radius * 0.4f + 1.f));
+                if (lit <= 0.03f) {
+                    continue;
+                }
+                const QColor line = withAlpha(fxColor(fx, QColor(166, 96, 248)),
+                    int(190.f * lit * std::min(1.f, u * 2.2f)));
+                painter.fillRect(QRectF(fx.x + off - 0.75f, fx.y - fx.radius, 1.5f, fx.radius * 2.f), line);
+                painter.fillRect(QRectF(fx.x - fx.radius, fx.y + off - 0.75f, fx.radius * 2.f, 1.5f), line);
+            }
         }
     }
     painter.setPen(Qt::NoPen);
@@ -3097,9 +3167,24 @@ void GameWidget::paintEvent(QPaintEvent* event) {
             world.setBrush(red);
             world.drawRect(canvas_.rect());
         }
+        // I am atomic 的紫色滤镜：蓄力时整块画面往紫里压，越靠边缘越浓
+        const float violet = session_.atomicViolet();
+        if (violet > 0.01f) {
+            QRadialGradient purple(kViewW * 0.5, kViewH * 0.5, kViewW * 0.75);
+            purple.setColorAt(0.0, QColor(124, 44, 206, int(96.f * violet)));
+            purple.setColorAt(0.55, QColor(98, 26, 184, int(132.f * violet)));
+            purple.setColorAt(1.0, QColor(56, 12, 118, int(215.f * violet)));
+            world.setPen(Qt::NoPen);
+            world.setBrush(purple);
+            world.drawRect(canvas_.rect());
+        }
     }
     painter.setRenderHint(QPainter::SmoothPixmapTransform, false);
     painter.drawImage(view, canvas_);
+    if (flashT_ > 0.f && flashMax_ > 0.f) {
+        const int alpha = int(255.f * std::min(1.f, flashT_ / flashMax_));
+        painter.fillRect(view, QColor(255, 255, 255, alpha));
+    }
 
     painter.setPen(QColor(90, 58, 50));
     painter.drawRect(view.adjusted(0, 0, -1, -1));
@@ -3295,7 +3380,7 @@ void GameWidget::paintEvent(QPaintEvent* event) {
         painter.setPen(QColor(228, 212, 188));
         const bool longName = painter.fontMetrics().horizontalAdvance(chip.name) > chipW - 26;
         if (longName) {
-            painter.setFont(QFont(Platform::uiFontFamily(), 8));
+            painter.setFont(QFont(Platform::uiFontFamily(), 7));
         }
         painter.drawText(QRect(chipX + 22, chipY + 2, chipW - 26, 14), Qt::AlignLeft | Qt::AlignVCenter, chip.name);
         if (longName) {
@@ -3316,6 +3401,32 @@ void GameWidget::paintEvent(QPaintEvent* event) {
     }
     if (toastTime_ > 0.f) {
         painter.drawText(QRect(originX, originY + 40, viewW, 24), Qt::AlignHCenter, toast_);
+    }
+    // 吟唱字幕挂在角色头顶，一个词一个词往外蹦；画在这里是为了压在白闪之上
+    const QString chant = session_.atomicChant();
+    if (!chant.isEmpty()) {
+        float shakeX = 0.f;
+        float shakeY = 0.f;
+        session_.cameraShake(shakeX, shakeY);
+        const float scale = float(viewW) / float(kViewW);
+        // 相机始终把角色摆在画面正中，唯一的偏移来自震屏
+        const float heroX = originX + (kViewW * 0.5f - shakeX) * scale;
+        const float heroY = originY + (kViewH * 0.5f - shakeY) * scale;
+        QFont font(Platform::uiFontFamily(), int(10.f * scale));
+        font.setBold(true);
+        painter.setFont(font);
+        const QRectF box(heroX - 150.f * scale, heroY - 64.f * scale, 300.f * scale, 24.f * scale);
+        painter.setPen(QColor(10, 4, 18, 230));
+        for (int dx = -2; dx <= 2; ++dx) {
+            for (int dy = -2; dy <= 2; ++dy) {
+                if (dx == 0 && dy == 0) {
+                    continue;
+                }
+                painter.drawText(box.translated(dx * scale, dy * scale), Qt::AlignCenter, chant);
+            }
+        }
+        painter.setPen(QColor(232, 204, 255));
+        painter.drawText(box, Qt::AlignCenter, chant);
     }
     if (!spritesOk_) {
         painter.drawText(QRect(originX, originY + viewH - 28, viewW, 20), Qt::AlignCenter, "未找到像素图，当前用色块代替");

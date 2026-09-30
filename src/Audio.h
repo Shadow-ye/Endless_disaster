@@ -46,6 +46,8 @@ public:
 
     void play(SfxId id);
     void playBurialVoice();
+    // 战士「I am atomic」的吟唱配音，整段 5 秒：前 4 秒蓄力，最后一秒是引爆
+    void playAtomicVoice();
     void startBgmLoop();
     void ensureBgmLoop();
     void playRecoverBgm();

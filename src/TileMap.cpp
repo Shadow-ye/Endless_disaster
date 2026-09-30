@@ -29,6 +29,39 @@ bool TileMap::inRuin(int x, int y) const {
     return lx >= 0 && ly >= 0 && lx < ruinW_ && ly < ruinH_;
 }
 
+void TileMap::scorchAt(int x, int y) {
+    const int64_t key = tileKey(x, y);
+    if (scorch_.insert(key).second) {
+        scorchKeys_.push_back(key);
+    }
+}
+
+void TileMap::scorchCircle(int cx, int cy, int tiles) {
+    if (tiles <= 0) {
+        return;
+    }
+    const int r2 = tiles * tiles;
+    for (int ty = cy - tiles; ty <= cy + tiles; ++ty) {
+        for (int tx = cx - tiles; tx <= cx + tiles; ++tx) {
+            const int dx = tx - cx;
+            const int dy = ty - cy;
+            if (dx * dx + dy * dy > r2) {
+                continue;
+            }
+            scorchAt(tx, ty);
+        }
+    }
+}
+
+bool TileMap::scorched(int x, int y) const {
+    return scorch_.find(tileKey(x, y)) != scorch_.end();
+}
+
+void TileMap::decodeKey(int64_t key, int& x, int& y) {
+    x = int32_t(key >> 32);
+    y = int32_t(uint32_t(key & 0xffffffffLL));
+}
+
 Tile TileMap::at(int x, int y) const {
     if (inRuin(x, y)) {
         const int lx = x - ruinX_;
@@ -42,11 +75,18 @@ Tile TileMap::at(int x, int y) const {
             }
             return Tile::Plaza;
         }
+        // 迷宫地板也能被烧成沙地；中央广场的刻纹和墙各自保留原样
+        if (scorched(x, y)) {
+            return Tile::Dirt;
+        }
         return Tile::MazeFloor;
+    }
+    if (scorched(x, y)) {
+        return Tile::Dirt;
     }
     // 迷宫外圈清成空地，避免岩石、灌木和水堵住或挡住唯一入口。
     if (ruinActive_) {
-        constexpr int kMargin = 4;
+        constexpr int kMargin = MazeRuin::kClearMargin;
         const int lx = x - ruinX_;
         const int ly = y - ruinY_;
         if (lx >= -kMargin && ly >= -kMargin && lx < ruinW_ + kMargin && ly < ruinH_ + kMargin) {

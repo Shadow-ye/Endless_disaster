@@ -30,6 +30,26 @@ inline constexpr float kBurialStage1Hit = 0.25f;
 inline constexpr float kBurialStage2Life = 0.65f;
 inline constexpr float kBurialStage2Hit = 0.2f;
 
+// I am atomic 三段节奏：蓄力 → 闪白 → 引爆；引爆一开始就抹除画面内的怪
+// 蓄力 4 秒是对着配音来的：整段 5 秒，前 4 秒吟唱，最后一秒是引爆
+inline constexpr float kAtomicChargeLife = 4.f;
+inline constexpr float kAtomicFlashLife = 0.12f;
+inline constexpr float kAtomicBlastLife = 1.2f;
+inline constexpr float kAtomicBlastHit = 0.02f;
+// 「画面内」按视野矩形判定：以玩家为中心，取一屏的半宽半高
+inline constexpr float kAtomicHalfW = 240.f;
+inline constexpr float kAtomicHalfH = 135.f;
+// 引爆把地表烧成沙地的半径（格），以及顺带炸塌迷宫墙的作用半径
+inline constexpr int kAtomicScorchTiles = 7;
+inline constexpr float kAtomicWallBreak = 112.f;
+// 蓄力时那圈紫色网格的扫描半径
+inline constexpr float kAtomicGridRange = 190.f;
+// 吟唱字幕的时间轴：I 亮 1 秒、空 1 秒、am 亮 1 秒、再空 1 秒（正好铺满 4 秒蓄力），
+// 引爆瞬间甩出 atomic，停 2 秒
+inline constexpr float kAtomicChantWord = 1.f;
+inline constexpr float kAtomicChantGap = 1.f;
+inline constexpr float kAtomicChantFinal = 2.f;
+
 struct Item {
     int slot = 0;
     int kind = 0;
@@ -101,6 +121,10 @@ struct Player {
     float burialR = 96.f;
     int burialStage = 0;
     float burialNext = 0.f;
+    // I am atomic：1 = 蓄力，2 = 闪白，3 = 引爆；atomicNext 是引爆出伤的剩余时间
+    float atomicT = 0.f;
+    int atomicStage = 0;
+    float atomicNext = 0.f;
     float mirrorT = 0.f;
     float mirrorAbsorbed = 0.f;
     float mirrorCap = 40.f;
@@ -165,7 +189,7 @@ struct FloatText {
     bool crit = false;
 };
 
-enum class AttackFxKind { Ring, Cone, Crescent, Dash, Pulse, Mirror, Blink, Laser, Spin, Slash, Burst, Pillar, Qi, Lunge };
+enum class AttackFxKind { Ring, Cone, Crescent, Dash, Pulse, Mirror, Blink, Laser, Spin, Slash, Burst, Pillar, Qi, Lunge, Mushroom, Grid };
 
 struct AttackFx {
     AttackFxKind kind = AttackFxKind::Ring;
@@ -182,7 +206,7 @@ struct AttackFx {
 };
 
 // 只给绘制层生成粒子用，不参与任何判定
-enum class VfxKind { Hit, Kill, Explode, Heal, LevelUp, Rage };
+enum class VfxKind { Hit, Kill, Explode, Heal, LevelUp, Rage, AtomicCharge, AtomicFlash, AtomicBlast };
 
 struct VfxEvent {
     VfxKind kind = VfxKind::Hit;
@@ -266,6 +290,10 @@ public:
     const TileMap& map() const { return map_; }
     const MazeRuin& ruin() const { return ruin_; }
     float plazaRed() const { return plazaRed_; }
+    // I am atomic 的画面紫色滤镜：蓄力时涨起来，余波里退掉
+    float atomicViolet() const { return atomicViolet_; }
+    // 角色头顶的吟唱字幕，一个词一个词往外蹦；空串表示这会儿不显示
+    QString atomicChant() const;
     void cameraShake(float& sx, float& sy) const;
     float cooldownMul() const { return cdMul(); }
 
@@ -341,6 +369,9 @@ private:
     void castBurial(float& cooldown);
     void burialBlast(int stage);
     void updateBurial(float dt);
+    void castAtomic(float& cooldown);
+    void atomicBlast();
+    void updateAtomic(float dt);
     void castMirrorShield(float& cooldown);
     void castMageHeal(float& cooldown);
     void castBerserk(float& cooldown, const QString& name);
@@ -421,6 +452,8 @@ private:
     float hpTrack_ = -1.f;
     float shakeT_ = 0.f;
     float plazaRed_ = 0.f;
+    float atomicViolet_ = 0.f;
+    float atomicChantT_ = 0.f;
     bool voidPrompt_ = false;
     int eyeDefeats_ = 0;
     int wallStrikeId_ = -1;

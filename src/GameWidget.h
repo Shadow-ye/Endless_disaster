@@ -128,6 +128,9 @@ private:
     QElapsedTimer clock_;
     float toastTime_ = 0.f;
     QString toast_;
+    // I am atomic 引爆前的全屏白闪：只叠在画面上，不参与任何判定
+    float flashT_ = 0.f;
+    float flashMax_ = 1.f;
     InputState input_;
     bool endCommitted_ = false;
     bool running_ = false;

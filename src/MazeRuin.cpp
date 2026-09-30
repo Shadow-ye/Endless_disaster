@@ -405,6 +405,15 @@ bool MazeRuin::contains(int tileX, int tileY) const {
     return lx >= 0 && ly >= 0 && lx < kSize && ly < kSize;
 }
 
+bool MazeRuin::inClearZone(int tileX, int tileY) const {
+    if (!active) {
+        return false;
+    }
+    const int lx = tileX - originX;
+    const int ly = tileY - originY;
+    return lx >= -kClearMargin && ly >= -kClearMargin && lx < kSize + kClearMargin && ly < kSize + kClearMargin;
+}
+
 bool MazeRuin::isWallAt(int tileX, int tileY) const {
     if (!contains(tileX, tileY) || wall.size() != size_t(kSize * kSize)) {
         return false;

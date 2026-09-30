@@ -12,6 +12,7 @@ inline constexpr int kSkillSpin = 0;
 inline constexpr int kSkillSwordQi = 1;
 inline constexpr int kSkillThrust = 2;
 inline constexpr int kSkillBerserk = 3;
+inline constexpr int kSkillAtomic = 4;
 // 法师
 inline constexpr int kSkillMageBolt = 10;
 inline constexpr int kSkillNova = 11;
@@ -35,8 +36,13 @@ inline constexpr int kSkillSeek = 30;
 inline constexpr float kMeleeStaminaCost = 8.f;
 inline constexpr float kMeleeCooldown = 0.9f;
 
+// 战士「I am atomic」：一次倾泻当前全部 MP，冷却按这一发烧掉的 MP 占上限的比例减免
+inline constexpr float kAtomicMinMp = 30.f;      // 释放门槛，低于此值放不出来
+inline constexpr float kAtomicCdMax = 30.f;      // 刚好只够门槛时的冷却
+inline constexpr float kAtomicCdMin = 12.f;      // 满 MP 释放时的冷却
+
 inline constexpr int kWarriorSkillPool[] = {
-    kSkillSpin, kSkillSwordQi, kSkillThrust, kSkillBerserk};
+    kSkillSpin, kSkillSwordQi, kSkillThrust, kSkillBerserk, kSkillAtomic};
 
 inline constexpr int kMageSkillPool[] = {
     kSkillMageBolt, kSkillNova, kSkillFlight, kSkillBurial, kSkillMirror, kSkillMageHeal};
@@ -82,6 +88,13 @@ inline SkillText skillText(int id) {
         return {"突刺", "朝面向突进并伤害前方。可叠层，最高 3 层；释放无间隔。每层冷却 1.0 秒。消耗 8 MP。"};
     case kSkillBerserk:
         return {"狂化", "攻击力翻倍，攻速增加 100%，持续 3 秒。消耗 18 MP，冷却 8 秒。"};
+    case kSkillAtomic:
+        return {"I am atomic",
+            "核级引爆：倾泻当前全部 MP，直接抹除画面内所有怪物，包括克苏鲁之眼。至少需要 "
+                + QString::number(int(kAtomicMinMp))
+                + " MP 才能释放；烧掉的 MP 越多冷却越短，满 MP 时 "
+                + QString::number(int(kAtomicCdMin)) + " 秒，只够门槛时 "
+                + QString::number(int(kAtomicCdMax)) + " 秒。"};
     case kSkillMageBolt:
         return {"飞弹", "朝鼠标方向射出法弹。基础伤害 20。消耗 14 MP，冷却 1.6 秒。"};
     case kSkillNova:

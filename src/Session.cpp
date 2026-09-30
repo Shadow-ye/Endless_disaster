@@ -340,6 +340,10 @@ bool Session::loadFrom(const QJsonObject& game) {
     newGame(seed == 0 ? 1u : seed, runId == 0 ? 1u : runId, hero,
         savedPlayer.value("skillD").toInt(0), savedPlayer.value("skillF").toInt(1),
         savedPlayer.value("skillC").toInt(2), savedPlayer.value("skillV").toInt(-1));
+    const QJsonArray scorch = game.value("scorch").toArray();
+    for (int i = 0; i + 1 < scorch.size(); i += 2) {
+        map_.scorchAt(scorch.at(i).toInt(), scorch.at(i + 1).toInt());
+    }
     monsters_.clear();
     time_ = float(game.value("time").toDouble());
     score_ = game.value("score").toInt();
@@ -463,6 +467,18 @@ QJsonObject Session::toJson() const {
     QJsonObject game;
     game.insert("runId", double(runId_));
     game.insert("seed", double(map_.seed()));
+    // 地图本体是程序化生成的，只需要额外存这套「被核爆烧焦」的覆盖层
+    QJsonArray scorch;
+    for (int64_t key : map_.scorchedKeys()) {
+        int sx = 0;
+        int sy = 0;
+        TileMap::decodeKey(key, sx, sy);
+        scorch.append(double(sx));
+        scorch.append(double(sy));
+    }
+    if (!scorch.isEmpty()) {
+        game.insert("scorch", scorch);
+    }
     game.insert("time", time_);
     game.insert("score", score_);
     game.insert("eyeDefeats", eyeDefeats_);
@@ -1234,11 +1250,16 @@ void Session::applyEyeLevel() {
 }
 
 int Session::playerPass() const {
-    if (player_.jumpT > 0.f || player_.flying) {
-        return 1;
+    // 跳跃/飞行本身就跨过岩石和灌木，否则从普通档起步
+    const int base = (player_.jumpT > 0.f || player_.flying) ? 1 : 0;
+    // 若脚下这格过不去（落点被岩石/灌木占据，或被恢复的地形——如水——困住），
+    // 逐档放行直到能迈出来，否则会永久卡死；迷宫墙任何档位都挡得住
+    for (int pass = base; pass < 2; ++pass) {
+        if (!map_.blockedAt(player_.x, player_.y, kPlayerRadius, pass)) {
+            return pass;
+        }
     }
-    // 飞行或跳跃结束时落在岩石/灌木上，放行到走出来为止，否则会卡死
-    return map_.blockedAt(player_.x, player_.y, kPlayerRadius, 0) ? 1 : 0;
+    return 2;
 }
 
 bool Session::nearestWalkableTile(int tileX, int tileY, int& outX, int& outY) const {
@@ -1325,6 +1346,10 @@ void Session::castSlot(int skill, float& cooldown) {
     }
     if (skill == kSkillBerserk) {
         castBerserk(cooldown, "狂化");
+        return;
+    }
+    if (skill == kSkillAtomic) {
+        castAtomic(cooldown);
         return;
     }
     if (skill == kSkillOverload) {
@@ -1931,6 +1956,130 @@ void Session::updateBurial(float dt) {
     player_.burialNext = 0.f;
 }
 
+// I am atomic：一次烧掉当前全部 MP，换来一发抹除画面内一切的核级引爆
+void Session::castAtomic(float& cooldown) {
+    if (cooldown > 0.f || player_.mp < kAtomicMinMp) {
+        return;
+    }
+    const float spent = player_.mp;
+    const float ratio = player_.maxMp > 0.f ? std::min(1.f, spent / player_.maxMp) : 0.f;
+    player_.mp = 0.f;
+    // 烧掉的蓝越多，冷却减得越多：满 MP 收到 kAtomicCdMin，刚够门槛时仍是 kAtomicCdMax
+    cooldown = (kAtomicCdMax - (kAtomicCdMax - kAtomicCdMin) * ratio) * cdMul();
+    player_.skillCasts += 1;
+    player_.atomicStage = 1;
+    player_.atomicT = kAtomicChargeLife;
+    player_.atomicNext = 0.f;
+    player_.state = ActorState::Attack;
+    player_.attackT = kAtomicChargeLife / atkSpeedMul();
+    player_.heavy = true;
+    player_.animT = 0.f;
+    player_.attackId += 1;
+    pushFx(AttackFxKind::Ring, 46.f, 0.f, kAtomicChargeLife, 0x7A2BE0);
+    pushFx(AttackFxKind::Grid, kAtomicGridRange, 0.f, kAtomicChargeLife, 0xA25CF6);
+    queueVfx(VfxKind::AtomicCharge, player_.x, player_.y);
+    queueSfx(SfxId::Skill);
+    Audio::instance().playAtomicVoice();
+    checkTalents();
+}
+
+// 引爆瞬间：直接把画面内怪物的血清零，交给既有的死亡结算（计分、掉落、boss 的 onEyeDefeated）
+void Session::atomicBlast() {
+    player_.attackId += 1;
+    player_.state = ActorState::Attack;
+    player_.attackT = 0.6f / atkSpeedMul();
+    player_.animT = 0.f;
+    pushFx(AttackFxKind::Mushroom, 150.f, 0.f, kAtomicBlastLife, 0x8A2BE2);
+    pushFx(AttackFxKind::Pulse, 200.f, 0.f, 0.5f, 0x5A1E8C);
+    queueVfx(VfxKind::AtomicBlast, player_.x, player_.y);
+    queueSfx(SfxId::Explode);
+    triggerShake();
+    atomicChantT_ = kAtomicChantFinal;
+    // 地表被烧成沙地，范围内的迷宫墙一并炸塌
+    map_.scorchCircle(tileOf(player_.x), tileOf(player_.y), kAtomicScorchTiles);
+    breakMazeWallsRadius(player_.x, player_.y, kAtomicWallBreak);
+    for (Monster& monster : monsters_) {
+        if (monster.state == ActorState::Dead) {
+            continue;
+        }
+        if (std::abs(monster.x - player_.x) > kAtomicHalfW || std::abs(monster.y - player_.y) > kAtomicHalfH) {
+            continue;
+        }
+        // 无视护盾、减伤与 boss 入场保护：这一发是抹除，不是伤害
+        monster.shield = 0.f;
+        monster.hp = 0.f;
+        monster.hurtT = 0.12f;
+    }
+    checkTalents();
+}
+
+void Session::updateAtomic(float dt) {
+    // 紫色滤镜：蓄力时从零涨到满，引爆后跟着余波一起退掉
+    float target = 0.f;
+    if (player_.atomicStage == 1) {
+        target = 1.f - player_.atomicT / kAtomicChargeLife;
+    } else if (player_.atomicStage == 2) {
+        target = 1.f;
+    } else if (player_.atomicStage == 3) {
+        target = std::min(1.f, player_.atomicT / (kAtomicBlastLife * 0.6f));
+    }
+    atomicViolet_ += (target - atomicViolet_) * std::min(1.f, dt * 9.f);
+    if (atomicViolet_ < 0.01f) {
+        atomicViolet_ = 0.f;
+    }
+    atomicChantT_ = std::max(0.f, atomicChantT_ - dt);
+    if (player_.atomicStage <= 0) {
+        return;
+    }
+    player_.atomicT = std::max(0.f, player_.atomicT - dt);
+    if (player_.atomicNext > 0.f) {
+        player_.atomicNext -= dt;
+        if (player_.atomicNext <= 0.f) {
+            atomicBlast();
+        }
+    }
+    if (player_.atomicT > 0.f) {
+        return;
+    }
+    if (player_.atomicStage == 1) {
+        // 蓄力结束：先甩出吞掉整屏的白闪，再进引爆
+        player_.atomicStage = 2;
+        player_.atomicT = kAtomicFlashLife;
+        player_.atomicNext = 0.f;
+        queueVfx(VfxKind::AtomicFlash, player_.x, player_.y);
+        return;
+    }
+    if (player_.atomicStage == 2) {
+        player_.atomicStage = 3;
+        player_.atomicT = kAtomicBlastLife;
+        player_.atomicNext = kAtomicBlastHit;
+        return;
+    }
+    player_.atomicStage = 0;
+    player_.atomicT = 0.f;
+    player_.atomicNext = 0.f;
+}
+
+QString Session::atomicChant() const {
+    if (player_.atomicStage == 1) {
+        const float t = kAtomicChargeLife - player_.atomicT;
+        if (t < kAtomicChantWord) {
+            return QStringLiteral("I");
+        }
+        if (t < kAtomicChantWord + kAtomicChantGap) {
+            return {};
+        }
+        if (t < kAtomicChantWord * 2.f + kAtomicChantGap) {
+            return QStringLiteral("am");
+        }
+        return {};
+    }
+    if (atomicChantT_ > 0.f) {
+        return QStringLiteral("atomic");
+    }
+    return {};
+}
+
 void Session::castMirrorShield(float& cooldown) {
     if (player_.hero != HeroClass::Mage || cooldown > 0.f || player_.mp < 24.f) {
         return;
@@ -2166,6 +2315,7 @@ void Session::updatePlayer(float dt, const InputState& input, float mouseX, floa
     player_.cdC = std::max(0.f, player_.cdC - dt);
     player_.cdV = std::max(0.f, player_.cdV - dt);
     updateBurial(dt);
+    updateAtomic(dt);
     player_.berserkT = std::max(0.f, player_.berserkT - dt);
     if (player_.state != ActorState::Dead) {
         updateRobotBuffs(dt);
@@ -3324,7 +3474,8 @@ void Session::updateRuin(float dt) {
         }
         return;
     }
-    if (ruin_.phase == MazeRuin::Phase::Leave && !ruin_.contains(tileOf(player_.x), tileOf(player_.y))) {
+    // 要等玩家走出外围清空带再沉没：否则恢复的地形（水/岩石）会把玩家夹在原地
+    if (ruin_.phase == MazeRuin::Phase::Leave && !ruin_.inClearZone(tileOf(player_.x), tileOf(player_.y))) {
         dismissRuin();
         ruin_.phase = MazeRuin::Phase::Wait;
         ruin_.bossDead = false;
