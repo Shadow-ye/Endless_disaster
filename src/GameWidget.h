@@ -70,6 +70,10 @@ private:
     QPointF mouseWorld() const;
     void drawWorld(QPainter& painter);
     void drawBossBar(QPainter& painter, const QRect& view);
+    // boss 血条的底板几何：drawBossBar 与 drawSanBar 共用，保证理智条与血条严格对齐
+    QRect bossBarPlate(const QRect& view) const;
+    // 理智（SAN）条：boss 激活后显示，距耗尽时间 / 虚弱提示
+    void drawSanBar(QPainter& painter, const QRect& view);
     void drawRadar(QPainter& painter, const QRect& view);
     // 迷宫地图的落点：触屏放雷达左侧，避开右下角的攻击与技能键
     QRect mazeMapRect(const QRect& view) const;

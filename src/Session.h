@@ -71,6 +71,10 @@ struct Player {
     float shield = 25.f;
     float maxShield = 25.f;
     float armor = 10.f;
+    // 理智（SAN）：激活 boss 后开始流逝，10 分钟耗尽即死（不可复活）；击败 boss 恢复正常
+    float san = 100.f;
+    float maxSan = 100.f;
+    bool sanWeak = false;
     float facingX = 1.f;
     float facingY = 0.f;
     bool flip = false;
@@ -125,6 +129,8 @@ struct Player {
     float atomicT = 0.f;
     int atomicStage = 0;
     float atomicNext = 0.f;
+    // 这一发 I am atomic 实际定下的冷却时长，只给 UI 画冷却环当分母用
+    float atomicCd = 0.f;
     float mirrorT = 0.f;
     float mirrorAbsorbed = 0.f;
     float mirrorCap = 40.f;
@@ -315,6 +321,14 @@ public:
     // 结算时符咒折算出来的积分，只在结算面板上用
     int talismanBonus() const { return talismanBonus_; }
 
+    // 理智（SAN）系统：boss 激活后流逝，归零即死（不可复活）
+    bool sanActive() const { return sanActive_; }
+    float san() const { return player_.san; }
+    float maxSan() const { return player_.maxSan; }
+    bool sanWeak() const { return player_.sanWeak; }
+    // 距理智耗尽还剩多少秒（maxSan/maxSan * 600）
+    float sanRemaining() const { return player_.maxSan <= 0.f ? 0.f : player_.san / player_.maxSan * 600.f; }
+
     int xpToNext() const;
 
 private:
@@ -409,6 +423,8 @@ private:
     void dismissRuin();
     void syncRuinMap();
     void updateRuin(float dt);
+    // 理智流逝：boss 激活后按 10 分钟线性清零，归零即死（不可复活）
+    void updateSan(float dt);
     void spawnEye(float hp = -1.f, float shield = -1.f, int level = -1);
     void updateEye(Monster& monster, float dt);
     void onEyeDefeated();
@@ -457,6 +473,10 @@ private:
     bool voidPrompt_ = false;
     int eyeDefeats_ = 0;
     int wallStrikeId_ = -1;
+    // 理智系统会话状态：sanActive_ 一旦 boss 激活便锁定为真，击败或死亡才解除
+    bool sanActive_ = false;
+    // sanKill_ 为真时本次死亡由理智崩溃造成，结算时禁止意识回归符咒复活
+    bool sanKill_ = false;
     ReviveState reviveState_ = ReviveState::None;
     bool revivePrompt_ = false;
     int talismanBonus_ = 0;

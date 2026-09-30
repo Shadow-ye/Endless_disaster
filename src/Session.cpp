@@ -283,6 +283,8 @@ void Session::newGame(uint32_t seed, uint32_t runId, HeroClass hero, int skillD,
     player_.hp = player_.maxHp;
     player_.mp = player_.maxMp;
     player_.stamina = player_.maxStamina;
+    player_.san = player_.maxSan;
+    player_.sanWeak = false;
     damageSinceHeal_ = 0.f;
     bgmRecoverArmed_ = false;
     recoverBgmPending_ = false;
@@ -323,6 +325,8 @@ void Session::newGame(uint32_t seed, uint32_t runId, HeroClass hero, int skillD,
     voidPrompt_ = false;
     eyeDefeats_ = 0;
     wallStrikeId_ = -1;
+    sanActive_ = false;
+    sanKill_ = false;
     reviveState_ = ReviveState::None;
     revivePrompt_ = false;
     talismanBonus_ = 0;
@@ -456,6 +460,10 @@ bool Session::loadFrom(const QJsonObject& game) {
     pathTileY_ = tileOf(player_.y);
     restoreRuin(game);
     eyeDefeats_ = std::max(0, game.value("eyeDefeats").toInt());
+    player_.san = float(game.value("san").toDouble(player_.maxSan));
+    player_.sanWeak = player_.san <= player_.maxSan * 0.1f && player_.san > 0.f;
+    sanActive_ = game.value("sanActive").toBool(false);
+    sanKill_ = false;
     reviveState_ = ReviveState::None;
     revivePrompt_ = false;
     talismanBonus_ = 0;
@@ -482,6 +490,8 @@ QJsonObject Session::toJson() const {
     game.insert("time", time_);
     game.insert("score", score_);
     game.insert("eyeDefeats", eyeDefeats_);
+    game.insert("san", player_.san);
+    game.insert("sanActive", sanActive_);
     game.insert("spawnCd", spawnCd_);
     game.insert("flyerCd", flyerCd_);
     QJsonObject p;
@@ -843,6 +853,10 @@ float Session::rollDamage(float base, bool* critOut) {
     }
     if (player_.overloadT > 0.f) {
         damage *= 1.4f;
+    }
+    // 理智虚弱：造成伤害下降
+    if (player_.sanWeak) {
+        damage *= 0.6f;
     }
     if (player_.hero == HeroClass::Mage) {
         damage *= 0.9f;
@@ -1966,6 +1980,7 @@ void Session::castAtomic(float& cooldown) {
     player_.mp = 0.f;
     // 烧掉的蓝越多，冷却减得越多：满 MP 收到 kAtomicCdMin，刚够门槛时仍是 kAtomicCdMax
     cooldown = (kAtomicCdMax - (kAtomicCdMax - kAtomicCdMin) * ratio) * cdMul();
+    player_.atomicCd = cooldown;
     player_.skillCasts += 1;
     player_.atomicStage = 1;
     player_.atomicT = kAtomicChargeLife;
@@ -2286,11 +2301,15 @@ void Session::update(float dt, const InputState& input, float mouseX, float mous
     updateFloats(dt);
     updateAttackFx(dt);
     updateRuin(dt);
+    updateSan(dt);
     if (player_.state != ActorState::Dead) {
         spawn(dt);
     } else if (player_.animT > 0.85f) {
-        // 死亡瞬间被动触发意识回归符咒：先让玩家选回归还是结算
-        if (reviveState_ == ReviveState::None && talismanCount() > 0) {
+        // 理智崩溃致死不可复活：直接结算，跳过意识回归符咒
+        if (sanKill_) {
+            finishRun(EndReason::Death);
+        } else if (reviveState_ == ReviveState::None && talismanCount() > 0) {
+            // 死亡瞬间被动触发意识回归符咒：先让玩家选回归还是结算
             reviveState_ = ReviveState::Offered;
             revivePrompt_ = true;
             paused_ = true;
@@ -2582,6 +2601,10 @@ void Session::updatePlayer(float dt, const InputState& input, float mouseX, floa
     speed += player_.speedBonus;
     if (player_.overloadT > 0.f) {
         speed *= 1.25f;
+    }
+    // 理智虚弱：移速下降
+    if (player_.sanWeak) {
+        speed *= 0.6f;
     }
     if (player_.state == ActorState::Attack) {
         speed *= 0.45f;
@@ -3414,6 +3437,13 @@ void Session::onEyeDefeated() {
     triggerShake();
     addItem(kItemReturnTalisman, 1);
     note(QString("克苏鲁之眼被击败　获得 %1").arg(itemText(kItemReturnTalisman).name));
+    // 击败 boss：理智恢复正常，停止流逝
+    if (sanActive_) {
+        sanActive_ = false;
+        player_.san = player_.maxSan;
+        player_.sanWeak = false;
+        note("理智恢复");
+    }
     eyeDefeats_ += 1;
     if (eyeDefeats_ == 2 || (nextRand() % 5u) == 0u) {
         voidPrompt_ = true;
@@ -3422,6 +3452,29 @@ void Session::onEyeDefeated() {
 
 void Session::triggerShake() {
     shakeT_ = 0.9f;
+}
+
+// 理智（SAN）流逝：boss 激活后开始，按 10 分钟（600 秒）线性清零。
+// 归零即死且不可复活；剩 10% 进入虚弱状态。击败 boss 由 onEyeDefeated 解除。
+void Session::updateSan(float dt) {
+    if (!sanActive_ || player_.state == ActorState::Dead) {
+        return;
+    }
+    // 每帧消耗 maxSan / 600，10 分钟耗尽
+    player_.san = std::max(0.f, player_.san - player_.maxSan / 600.f * dt);
+    const bool weak = player_.san <= player_.maxSan * 0.1f && player_.san > 0.f;
+    player_.sanWeak = weak;
+    if (player_.san <= 0.f) {
+        // 理智彻底崩溃：立即死亡，且本次死亡不可被意识回归符咒复活
+        player_.sanWeak = false;
+        player_.state = ActorState::Dead;
+        player_.animT = 0.f;
+        player_.flying = false;
+        player_.mirrorT = 0.f;
+        sanKill_ = true;
+        queueSfx(SfxId::Death);
+        note("理智彻底崩溃");
+    }
 }
 
 void Session::cameraShake(float& sx, float& sy) const {
@@ -3471,6 +3524,13 @@ void Session::updateRuin(float dt) {
             ruin_.arrive = 1.7f;
             triggerShake();
             note("投影降临");
+            // boss 激活：理智开始流逝，10 分钟耗尽即死（不可复活）
+            if (!sanActive_) {
+                sanActive_ = true;
+                player_.san = player_.maxSan;
+                player_.sanWeak = false;
+                note("理智开始流逝");
+            }
         }
         return;
     }

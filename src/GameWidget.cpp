@@ -156,9 +156,21 @@ float skillCooldownMax(int skill, float mul) {
         return 1.5f * mul;
     case kSkillThrust:
         return 1.0f * mul;
+    case kSkillAtomic:
+        return kAtomicCdMax * mul;
     default:
         return 0.f;
     }
+}
+
+// I am atomic 的冷却不是定值：烧掉的 MP 越多越短（kAtomicCdMin ~ kAtomicCdMax）。
+// 冷却环要用「这一发实际定下的冷却」当分母才准，lastCd 就是释放时记下的那个值；
+// 没有记录（还没放过，或读档进来的）时退回最坏值 kAtomicCdMax。
+float skillCooldownMax(int skill, float mul, float lastCd) {
+    if (skill == kSkillAtomic && lastCd > 0.01f) {
+        return lastCd;
+    }
+    return skillCooldownMax(skill, mul);
 }
 
 QColor tileColor(Tile tile) {
@@ -1644,7 +1656,7 @@ void GameWidget::drawTouchControls(QPainter& painter) {
                 sub = player.flying ? QStringLiteral("开") : QStringLiteral("关");
             } else {
                 remain = cd;
-                maxCd = skillCooldownMax(skill, mul);
+                maxCd = skillCooldownMax(skill, mul, player.atomicCd);
             }
         };
         switch (button.control) {
@@ -2782,6 +2794,106 @@ void GameWidget::drawWorld(QPainter& painter) {
     }
 }
 
+void GameWidget::drawSanBar(QPainter& painter, const QRect& view) {
+    if (!session_.sanActive()) {
+        return;
+    }
+    const float ratio = session_.maxSan() <= 0.f ? 0.f : std::clamp(session_.san() / session_.maxSan(), 0.f, 1.f);
+    const bool weak = session_.sanWeak();
+    // 细长的一条：与 boss 血条（plate 内缩 8px 的轨道）左右都没差
+    const QRect boss = bossBarPlate(view);
+    const int bx = boss.x() + 8;
+    const int barW = boss.width() - 16;
+    const int barH = 6;
+    const int by = view.y() + 108;   // 紧贴 boss 血条下方
+    const float cy = float(by) + float(barH) * 0.5f;
+    // 填充色：高=青蓝，中=琥珀，低=红（低时呼吸）
+    QColor fill;
+    int pulse = 255;
+    if (ratio > 0.5f) {
+        fill = QColor(120, 210, 220);
+    } else if (ratio > 0.1f) {
+        fill = QColor(230, 186, 80);
+    } else {
+        pulse = int(140 + 100 * (0.5 + 0.5 * std::sin(session_.time() * 6.f)));
+        fill = QColor(230, 70, 60);
+    }
+    // 槽底 + 背板
+    painter.setPen(Qt::NoPen);
+    painter.setBrush(QColor(10, 8, 14, 210));
+    painter.drawRect(QRect(bx - 4, by - 15, barW + 8, barH + 28));
+    painter.setBrush(QColor(0, 0, 0, 130));
+    painter.drawRect(QRect(bx, by, barW, barH));
+    // 进度填充
+    const int fillW = int(barW * ratio);
+    painter.setBrush(fill);
+    painter.drawRect(QRect(bx, by, fillW, barH));
+    // 10% 处刻度线
+    painter.setPen(QColor(255, 255, 255, 140));
+    const int markX = bx + int(barW * 0.1f);
+    painter.drawLine(markX, by - 1, markX, by + barH + 1);
+
+    // 末端粒子消散：理智正在流失，边缘持续往外飘落
+    if (ratio > 0.002f && ratio < 0.998f) {
+        const float fx = float(bx + fillW);
+        constexpr int kCount = 16;
+        for (int i = 0; i < kCount; ++i) {
+            // 用下标做确定性散列，避免每帧随机数导致闪烁
+            const uint32_t h = (uint32_t(i + 1) * 2654435761u) ^ (uint32_t(i + 1) * 40503u);
+            const float seedA = float(h % 1000u) / 1000.f;
+            const uint32_t h2 = h * 2654435761u;
+            const float seedB = float(h2 % 1000u) / 1000.f;
+            const float speed = 0.35f + seedA * 0.55f;
+            const float travel = std::fmod(session_.time() * speed + seedB, 1.f);
+            const float reach = 6.f + seedA * 20.f;
+            const float px = fx + travel * reach;
+            // 略微上下散开，越飘越淡
+            const float rise = (seedB - 0.5f) * 2.f * (2.f + travel * 5.f);
+            const float py = cy - rise - travel * 3.f;
+            const int alpha = int(225.f * (1.f - travel * travel));
+            const float size = travel < 0.45f ? 2.f : 1.f;
+            painter.setPen(Qt::NoPen);
+            painter.setBrush(QColor(fill.red(), fill.green(), fill.blue(), alpha));
+            painter.drawEllipse(QRectF(px, py, size, size));
+        }
+        // 末端亮线，让流失边缘更清楚
+        painter.setPen(QPen(QColor(255, 255, 255, int(150 + 80 * (0.5 + 0.5 * std::sin(session_.time() * 8.f)))), 1));
+        painter.drawLine(int(fx), by - 1, int(fx), by + barH + 1);
+    }
+
+    // 标签（注明是玩家的 SAN）+ 警示 + 剩余时间（mm:ss）
+    painter.setFont(QFont(Platform::uiFontFamily(), 9, QFont::Bold));
+    painter.setPen(weak ? QColor(244, 130, 118) : QColor(176, 214, 226));
+    const QString label = QStringLiteral("玩家 SAN");
+    painter.drawText(QRect(bx, by - 14, barW, 12), Qt::AlignLeft | Qt::AlignVCenter, label);
+    const int remain = int(std::ceil(session_.sanRemaining()));
+    const int mm = remain / 60, ss = remain % 60;
+    painter.setPen(QColor(228, 212, 188));
+    painter.drawText(QRect(bx, by - 14, barW, 12), Qt::AlignRight | Qt::AlignVCenter,
+        QString("%1:%2").arg(mm, 2, 10, QChar('0')).arg(ss, 2, 10, QChar('0')));
+    // 警示：越低越狠，文字随时间呼吸
+    QString warn;
+    QColor warnColor;
+    if (weak) {
+        warn = QStringLiteral("！警告：虚弱！理智耗尽即死，不可复活，立刻击杀投影");
+        warnColor = QColor(242, 96, 84);
+    } else if (ratio <= 0.3f) {
+        warn = QStringLiteral("！警告：理智正在快速流失，尽快击败投影");
+        warnColor = QColor(238, 178, 74);
+    }
+    if (!warn.isEmpty()) {
+        const int warnPulse = int(160 + 90 * (0.5 + 0.5 * std::sin(session_.time() * 6.f)));
+        QColor c = warnColor;
+        c.setAlpha(warnPulse);
+        painter.setPen(c);
+        painter.drawText(QRect(bx, by + barH + 1, barW, 12), Qt::AlignLeft | Qt::AlignVCenter, warn);
+    }
+    // 低理智时整框呼吸描边
+    painter.setPen(QPen(QColor(230, 90, 78, pulse), 1));
+    painter.setBrush(Qt::NoBrush);
+    painter.drawRect(QRect(bx - 4, by - 15, barW + 8, barH + 28));
+}
+
 void GameWidget::drawRadar(QPainter& painter, const QRect& view) {
     const Player& player = session_.player();
     constexpr int kRadar = kRadarSide;
@@ -3016,6 +3128,18 @@ void GameWidget::drawMazeMap(QPainter& painter, const QRect& view) {
     }
 }
 
+QRect GameWidget::bossBarPlate(const QRect& view) const {
+    const int left = view.x() + 232;
+    int right = view.right() - (touchUi_ ? 148 : 96);
+    if (touchUi_) {
+        // 触屏时迷宫地图摆在雷达左侧，血条别压上去
+        right = std::min(right, mazeMapRect(view).left() - 8);
+    }
+    const int barW = std::min(420, std::max(200, right - left));
+    const int barX = left + std::max(0, (right - left - barW) / 2);
+    return QRect(barX, view.y() + 30, barW, 64);
+}
+
 void GameWidget::drawBossBar(QPainter& painter, const QRect& view) {
     const MazeRuin& ruin = session_.ruin();
     if (!ruin.active || ruin.phase != MazeRuin::Phase::Live || ruin.bossDead) {
@@ -3035,18 +3159,10 @@ void GameWidget::drawBossBar(QPainter& painter, const QRect& view) {
         return;
     }
 
-    const int left = view.x() + 232;
-    int right = view.right() - (touchUi_ ? 148 : 96);
-    if (touchUi_) {
-        // 触屏时迷宫地图摆在雷达左侧，血条别压上去
-        right = std::min(right, mazeMapRect(view).left() - 8);
-    }
-    const int barW = std::min(420, std::max(200, right - left));
-    const int barX = left + std::max(0, (right - left - barW) / 2);
-    const int barY = view.y() + 30;
-    const QRect plate(barX, barY, barW, 64);
-    painter.setPen(QPen(QColor(62, 18, 20), 1));
-    painter.setBrush(QColor(8, 4, 6, 225));
+    // 与 drawSanBar 共用同一套几何，保证左侧对齐
+    const QRect plate = bossBarPlate(view);
+    painter.setPen(QPen(QColor(120, 60, 56), 1));
+    painter.setBrush(QColor(34, 18, 20, 235));
     painter.drawRect(plate);
     painter.setPen(Qt::NoPen);
     painter.setBrush(QColor(0, 0, 0, 90));
@@ -3054,10 +3170,10 @@ void GameWidget::drawBossBar(QPainter& painter, const QRect& view) {
     painter.drawRect(QRect(plate.x(), plate.bottom() - 7, plate.width(), 8));
 
     painter.setFont(QFont(Platform::uiFontFamily(), 8, QFont::Bold));
-    painter.setPen(QColor(112, 42, 40));
+    painter.setPen(QColor(232, 130, 118));
     painter.drawText(QRect(plate.x() + 8, plate.y() + 3, 36, 14), Qt::AlignVCenter | Qt::AlignLeft, QStringLiteral("BOSS"));
     painter.setFont(QFont(Platform::uiFontFamily(), 11, QFont::Bold));
-    painter.setPen(QColor(168, 132, 118));
+    painter.setPen(QColor(236, 214, 200));
     const QString bossName = QStringLiteral("克苏鲁之眼");
     painter.drawText(QRect(plate.x() + 44, plate.y() + 2, plate.width() - 150, 16), Qt::AlignVCenter | Qt::AlignLeft, bossName);
     const int nameW = painter.fontMetrics().horizontalAdvance(bossName);
@@ -3104,11 +3220,11 @@ void GameWidget::drawBossBar(QPainter& painter, const QRect& view) {
     const int trackY = plate.y() + 36;
     const float hpRatio = eye->maxHp <= 0.f ? 0.f : std::clamp(eye->hp / eye->maxHp, 0.f, 1.f);
     painter.setPen(Qt::NoPen);
-    painter.setBrush(QColor(16, 6, 8));
+    painter.setBrush(QColor(52, 24, 26));
     painter.drawRect(QRect(trackX, trackY, trackW, 8));
-    painter.setBrush(QColor(78, 14, 18));
+    painter.setBrush(QColor(220, 52, 54));
     painter.drawRect(QRect(trackX, trackY, int(trackW * hpRatio), 8));
-    painter.setPen(QColor(210, 180, 170));
+    painter.setPen(QColor(250, 226, 218));
     painter.setFont(QFont(Platform::uiFontFamily(), 7, QFont::Bold));
     painter.drawText(QRect(trackX, trackY - 1, trackW, 10), Qt::AlignCenter,
         QString("%1 / %2").arg(hpShown).arg(int(std::lround(eye->maxHp))));
@@ -3260,6 +3376,7 @@ void GameWidget::paintEvent(QPaintEvent* event) {
         painter.setPen(QColor(228, 212, 188));
     }
     drawBossBar(painter, view);
+    drawSanBar(painter, view);
     drawRadar(painter, view);
     drawMazeMap(painter, view);
     struct Chip {
@@ -3271,7 +3388,7 @@ void GameWidget::paintEvent(QPaintEvent* event) {
     };
     QVector<Chip> chips;
     const float mul = session_.cooldownMul();
-    auto skillCdMax = [&](int skill) { return skillCooldownMax(skill, mul); };
+    auto skillCdMax = [&](int skill) { return skillCooldownMax(skill, mul, player.atomicCd); };
     auto pushSkillChip = [&](const QString& key, int skill, float slotCd) {
         Chip chip;
         chip.key = key;
