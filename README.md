@@ -65,6 +65,7 @@
 
 | 版本 | 主要内容 |
 |------|----------|
+| [v0.5.8](https://github.com/Shadow-ye/Endless_disaster/releases/tag/v0.5.8) | 修复安卓端战士 / 女剑客终极技能「I am atomic」的冷却显示：触屏技能按钮此前因冷却时长计算漏了该技能而始终显示可释放、不画冷却扇形也不显示剩余秒数；现补上该技能并重载一个带 lastCd 的版本，用每次释放实际定下的冷却时长当分母（满 MP 约 12 秒、只够门槛约 30 秒），桌面与安卓共用同一套 skillCooldownMax 逻辑一并修好 |
 | [v0.5.7](https://github.com/Shadow-ye/Endless_disaster/releases/tag/v0.5.7) | 战士 / 女剑客新增终极技能「I am atomic」：倾泻当前全部 MP，抹除以玩家为中心一屏范围的所有怪物（含克苏鲁之眼）；蓄力 4 秒并配 5 秒英文吟唱配音与逐词字幕，期间叠加全屏紫色滤镜、紫色网格扫描与脚下能量环；引爆有 0.12 秒全屏白闪（时长翻倍）、紫黑火球与蘑菇云、强震屏；范围内地形被烧成沙地（持久化到存档）并破坏迷宫墙；冷却 30 秒，按消耗 MP 比例减免（满 MP 约 12 秒） |
 | [v0.5.6](https://github.com/Shadow-ye/Endless_disaster/releases/tag/v0.5.6) | 机甲人普攻固定为点射：装「肘击」不再顶替普攻，点按左键 / 点按攻击永远是打枪耗弹，肘击只由技能键挥出；命中判定改用「本次是近战挥击」标志，枪弹不再因带了肘击而附带身前扇形伤害或劈弹能力；修复带肘击的机甲人击败克苏鲁之眼后仍劈不开迷宫墙；安卓攻击键始终显示弹匣（不再显示「肘击 STA」） |
 | [v0.5.5](https://github.com/Shadow-ye/Endless_disaster/releases/tag/v0.5.5) | Windows 可执行文件换成新的多尺寸图标（16 / 32 / 48 / 64 / 128 / 256 px）：资源管理器、任务栏与文件属性的「详细信息」都显示游戏图标，不再用系统的默认图标；图标由 `packaging/windows/EndlessDisaster.rc` 在编译时用 windres 编进 exe，换 ico 会自动重编 |
