@@ -35,6 +35,26 @@ jobs:
             cmake ninja-build g++ dpkg-dev file \
             qt6-base-dev qt6-multimedia-dev libgl1-mesa-dev
 
+      # ext4 单文件名上限 255 字节，中文名很容易撞上；超标时 dpkg 解包会崩成
+      # "paste subprocess was killed by signal (Broken pipe)，很难一眼看出原因，提前挡掉
+      - name: Check asset file name length
+        run: |
+          python3 - <<'EOF'
+          import os, sys
+          limit = 200
+          bad = []
+          for root in ("assets", "BGM"):
+              for dirpath, _, files in os.walk(root):
+                  for name in files:
+                      size = len(name.encode())
+                      if size > limit:
+                          bad.append((size, os.path.join(dirpath, name)))
+          for size, path in sorted(bad, reverse=True):
+              print(f"{size} bytes: {path}")
+          if bad:
+              sys.exit(f"文件名过长（UTF-8 超过 {limit} 字节）：Linux ext4 单文件名上限 255 字节，dpkg / linuxdeploy 会失败")
+          EOF
+
       - name: Build
         run: |
           set -o pipefail
@@ -58,7 +78,9 @@ jobs:
         run: |
           set -o pipefail
           {
-            sudo apt-get install -y ./build/endless-disaster_*.deb
+            # --no-install-recommends：不装 fonts-noto-cjk 及其链上的 pocketsphinx-en-us（几百 MB）
+            # 冒烟只跑 8 秒，用不到它们，装了白白多花好几分钟
+            sudo apt-get install -y --no-install-recommends ./build/endless-disaster_*.deb
             dpkg -l endless-disaster
             test -f /usr/share/endless-disaster/assets/hero_warrior/idle.png
             test -d /usr/share/endless-disaster/BGM
@@ -91,6 +113,25 @@ jobs:
             libxkbcommon-x11-0 libxcb-cursor0 libxcb-icccm4 libxcb-image0 \
             libxcb-keysyms1 libxcb-randr0 libxcb-render-util0 libxcb-shape0 \
             libxcb-xinerama0 libxcb-xkb1
+
+      # 同 deb：先挡掉超长文件名，免得 linuxdeploy 复制资源时才炸
+      - name: Check asset file name length
+        run: |
+          python3 - <<'EOF'
+          import os, sys
+          limit = 200
+          bad = []
+          for root in ("assets", "BGM"):
+              for dirpath, _, files in os.walk(root):
+                  for name in files:
+                      size = len(name.encode())
+                      if size > limit:
+                          bad.append((size, os.path.join(dirpath, name)))
+          for size, path in sorted(bad, reverse=True):
+              print(f"{size} bytes: {path}")
+          if bad:
+              sys.exit(f"文件名过长（UTF-8 超过 {limit} 字节）：Linux ext4 单文件名上限 255 字节，dpkg / linuxdeploy 会失败")
+          EOF
 
       - uses: jurplel/install-qt-action@v4
         with:
