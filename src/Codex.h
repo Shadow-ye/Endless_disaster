@@ -1,5 +1,7 @@
 #pragma once
 
+#include "Types.h"
+
 #include <QString>
 
 struct SkillText {
@@ -136,7 +138,11 @@ inline SkillText guardSkillText() {
     return {"防御", "持续 0.75 秒，受到的伤害变为 35%。消耗 12 MP，冷却 3.6 秒。"};
 }
 
-inline SkillText healSkillText() {
+// 史莱姆之躯把「恢复」改成按比例回复
+inline SkillText healSkillText(bool slimeBody = false) {
+    if (slimeBody) {
+        return {"恢复", "史莱姆之躯：回复 20% 最大生命与 20% 最大体力。消耗 20 MP，冷却 5.5 秒。"};
+    }
     return {"恢复", "回复 22 HP 与 20 STA。消耗 20 MP，冷却 5.5 秒。"};
 }
 
@@ -172,12 +178,70 @@ inline QString talentUnderdogDetail() {
     return "对等级高于自己的敌人，造成的伤害变为 1.3 倍。击杀 10 个等级超过自己的怪物后获得。";
 }
 
+inline QString talentGluttonyDetail() {
+    return "【暴食】史莱姆之躯下累计吞噬 100 只怪物后获得：经验获取翻倍。";
+}
+
+// 史莱姆之躯：图鉴里每个形态的名字、左Ctrl技能与属性加成
+struct MimicText {
+    QString name;
+    QString skillName;
+    QString skill;
+    QString bonus;
+};
+
+inline MimicText mimicText(MimicForm form) {
+    switch (form) {
+    case MimicForm::Hero:
+        return {"原本的躯体", "无", "把外形换回你原本的角色，不附带额外技能。", "无属性加成。"};
+    case MimicForm::Slime:
+        return {"史莱姆", "腐蚀喷吐",
+            "腐蚀喷吐（左 Ctrl，冷却 4 秒）：朝鼠标吐出腐蚀黏液弹，命中造成伤害并在地面留下腐蚀粘液。",
+            "最大生命 +25%。"};
+    case MimicForm::Skeleton:
+        return {"骷髅", "骨刺突进",
+            "骨刺突进（左 Ctrl，冷却 4 秒）：朝鼠标突进一段，并伤害身前扇形内的敌人。",
+            "护甲 +50%。"};
+    case MimicForm::Mushroom:
+        return {"蘑菇", "毒孢跳砸",
+            "毒孢跳砸（左 Ctrl，冷却 4 秒）：跃起后砸向鼠标方向，落点范围伤害。",
+            "破韧 +30%。"};
+    case MimicForm::Flyer:
+        return {"飞虫", "振翅",
+            "振翅（左 Ctrl，冷却 4 秒）：短时滞空飞行约 2.5 秒，可越过岩石与灌木，并免疫腐蚀粘液。",
+            "移速 +25%。"};
+    case MimicForm::Caster:
+        return {"术士", "奥术符弹",
+            "奥术符弹（左 Ctrl，冷却 4 秒）：射出穿透法弹。",
+            "技能冷却 -25%。"};
+    case MimicForm::Killbot:
+        return {"杀手机器人", "榴弹",
+            "榴弹（左 Ctrl，冷却 4 秒）：射出爆破弹，命中、撞墙或飞到尽头时范围爆炸。",
+            "攻击速度 +30%。"};
+    case MimicForm::Eye:
+        return {"克苏鲁之眼【投影】", "血环",
+            "血环（左 Ctrl，冷却 6 秒）：以自身为中心炸开一圈血环，大范围伤害。",
+            "暴击率 +15%。"};
+    case MimicForm::SlimeBoss:
+        return {"巨型腐化史莱姆", "腐化冲撞",
+            "腐化冲撞（左 Ctrl，冷却 6 秒）：朝鼠标高速冲撞，沿途撞飞敌人并留下腐蚀粘液。",
+            "伤害 +40%。"};
+    default:
+        return {"未知形态", "无", "", ""};
+    }
+}
+
 // 物品编号：Item::kind 用它，可堆叠的同类物品在背包里合并成一个条目，按 count 计数
 inline constexpr int kItemNone = 0;
 inline constexpr int kItemReturnTalisman = 1;
+inline constexpr int kItemSlimeCore = 2;
 
 // 意识回归符咒：结算时每张折算的积分
 inline constexpr int kTalismanScore = 500;
+// 史莱姆核心：结算时每个折算的积分（比符咒略低，但也能变现）
+inline constexpr int kSlimeCoreScore = 400;
+// 史莱姆之躯下吞噬多少只怪物进化出天赋【暴食】
+inline constexpr int kGluttonyDevours = 100;
 
 struct ItemText {
     QString name;
@@ -191,8 +255,20 @@ inline ItemText itemText(int id) {
         return {"意识回归符咒",
             QString("克苏鲁之眼【投影】掉落，可堆叠。死亡时被动触发：可以选择确认回归（原地复活，生命恢复到 25%）或拒绝回归（直接结算）。"
                     "确认回归会带上本轮永久诅咒「存在被克苏鲁余光注意！」：此后偶尔刷出双倍血量的精英怪物。"
+                    "若同时持有史莱姆核心，还能选择「使用史莱姆核心回归」，转化为史莱姆之躯（会额外消耗 1 个核心）。"
                     "结算时每张折算 %1 积分。")
                 .arg(kTalismanScore),
+            true};
+    case kItemSlimeCore:
+        return {"史莱姆核心",
+            QString("巨型腐化史莱姆掉落，可堆叠。只在使用意识回归符咒复活时可选择使用（一次使用整局生效，所以也只能用一次）："
+                    "消耗 1 张符咒与 1 个核心，原地复活并转化为「史莱姆之躯」——"
+                    "受到伤害 -10%，「恢复」改为按比例回复；获得额外技能「拟态」（按 T，时停打开怪物图鉴），"
+                    "可幻化为吞噬过的怪物，并暂时获得该形态的一个技能（左 Ctrl）与一项属性加成。"
+                    "史莱姆之躯下累计吞噬 %1 只怪物可进化出天赋【暴食】（经验翻倍）。"
+                    "结算时每个折算 %2 积分。")
+                .arg(kGluttonyDevours)
+                .arg(kSlimeCoreScore),
             true};
     default:
         return {"未知", "", false};

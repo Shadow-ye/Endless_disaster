@@ -52,6 +52,17 @@ if ($LASTEXITCODE -ge 8) { throw "复制到 dist 失败" }
 # robocopy 成功时也返回 1~7，不清零的话 CI 会把它当成失败
 $global:LASTEXITCODE = 0
 
+# 构建目录里的资源是历次「覆盖式」拷贝攒下来的：BGM / 贴图改名或删掉后，旧文件仍留在那里，
+# 会一起被打进包（本地包因此比 CI 干净构建大出一截，包里还会出现同曲两个名字）。
+# 这里按工作区的实际内容重铺一遍，保证包内资源与仓库一致。
+foreach ($dir in @("assets", "BGM", "character-img")) {
+    $src = Join-Path $repo $dir
+    if (-not (Test-Path $src)) { continue }
+    $dst = Join-Path $out $dir
+    if (Test-Path $dst) { Remove-Item $dst -Recurse -Force }
+    Copy-Item $src -Destination $dst -Recurse -Force
+}
+
 $zip = Join-Path $repo "dist\EndlessDisaster-windows-x64.zip"
 if (Test-Path $zip) { Remove-Item $zip -Force }
 Compress-Archive -Path $out -DestinationPath $zip

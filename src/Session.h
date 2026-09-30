@@ -4,6 +4,7 @@
 #include "Codex.h"
 #include "MazeRuin.h"
 #include "PathField.h"
+#include "ShallowPool.h"
 #include "TileMap.h"
 #include "Types.h"
 
@@ -12,8 +13,68 @@
 #include <vector>
 
 enum class ActorState { Idle, Run, Attack, Dodge, Hurt, Dead };
-enum class MonsterKind { Slime, Skeleton, Mushroom, Flyer, Caster, Killbot, Eye };
+enum class MonsterKind { Slime, Skeleton, Mushroom, Flyer, Caster, Killbot, Eye, SlimeBoss };
+
+// 拟态形态 ↔ 怪物类型（MimicForm::Hero 是玩家自己的尸体，没有对应的怪物）
+inline MonsterKind mimicMonsterKind(MimicForm form) {
+    switch (form) {
+    case MimicForm::Skeleton:
+        return MonsterKind::Skeleton;
+    case MimicForm::Mushroom:
+        return MonsterKind::Mushroom;
+    case MimicForm::Flyer:
+        return MonsterKind::Flyer;
+    case MimicForm::Caster:
+        return MonsterKind::Caster;
+    case MimicForm::Killbot:
+        return MonsterKind::Killbot;
+    case MimicForm::Eye:
+        return MonsterKind::Eye;
+    case MimicForm::SlimeBoss:
+        return MonsterKind::SlimeBoss;
+    default:
+        return MonsterKind::Slime;
+    }
+}
+
+inline MimicForm mimicFormOf(MonsterKind kind) {
+    switch (kind) {
+    case MonsterKind::Skeleton:
+        return MimicForm::Skeleton;
+    case MonsterKind::Mushroom:
+        return MimicForm::Mushroom;
+    case MonsterKind::Flyer:
+        return MimicForm::Flyer;
+    case MonsterKind::Caster:
+        return MimicForm::Caster;
+    case MonsterKind::Killbot:
+        return MimicForm::Killbot;
+    case MonsterKind::Eye:
+        return MimicForm::Eye;
+    case MonsterKind::SlimeBoss:
+        return MimicForm::SlimeBoss;
+    default:
+        return MimicForm::Slime;
+    }
+}
+
+// 史莱姆之躯拟态期间临时获得的属性加成；全部是乘算倍率，1 表示无加成
+struct MimicBonus {
+    float maxHp = 1.f;
+    float armor = 1.f;
+    float poise = 1.f;
+    float speed = 1.f;
+    float cooldown = 1.f;  // <1 表示冷却缩短
+    float atkSpeed = 1.f;
+    float damage = 1.f;
+    int crit = 0;  // 暴击率百分点
+};
 enum class HeroClass { Warrior, Sword, Mage, Robot };
+
+// 「继续前进」配音按角色性别选男声 / 女声：女剑客与女魔法师用女声，战士与机甲人用男声
+inline bool femaleHero(HeroClass hero) {
+    return hero == HeroClass::Sword || hero == HeroClass::Mage;
+}
 enum class EndReason { None, Death, Settle };
 // 意识回归符咒：None = 未触发，Offered = 已弹出选择，Declined = 玩家拒绝回归
 enum class ReviveState { None, Offered, Declined };
@@ -151,6 +212,22 @@ struct Player {
     bool talentUnderdog = false;
     // 用意识回归符咒复活后带上的本轮诅咒：余光时不时盯上你，刷出精英怪
     bool cursed = false;
+    // 史莱姆之躯：使用史莱姆核心复活后永久生效（一次使用整局生效）
+    bool slimeBody = false;
+    // 当前幻化的外形；史莱姆之躯默认是自己的史莱姆形象
+    MimicForm mimic = MimicForm::Slime;
+    // 已吞噬的形态（位掩码，见 mimicBit）；自己的尸体默认已吞噬，所以开局就带 Hero 位
+    uint32_t devouredMask = mimicBit(MimicForm::Hero);
+    // 史莱姆之躯下累计吞噬的怪物数，达到 kGluttonyDevours 进化出天赋【暴食】
+    int devourCount = 0;
+    bool talentGluttony = false;
+    // 拟态技能的冷却
+    float cdMimicSkill = 0.f;
+    // 飞虫形态的短时滞空剩余时间
+    float mimicFlyT = 0.f;
+    // 蘑菇形态跳砸 / 腐化史莱姆形态冲撞的进行中计时
+    float mimicSlamT = 0.f;
+    float mimicChargeT = 0.f;
     int worldKills = 0;
     int underdogKills = 0;
     ActorState state = ActorState::Idle;
@@ -212,7 +289,7 @@ struct AttackFx {
 };
 
 // 只给绘制层生成粒子用，不参与任何判定
-enum class VfxKind { Hit, Kill, Explode, Heal, LevelUp, Rage, AtomicCharge, AtomicFlash, AtomicBlast };
+enum class VfxKind { Hit, Kill, Explode, Heal, LevelUp, Rage, AtomicCharge, AtomicFlash, AtomicBlast, Corrosion, Rise };
 
 struct VfxEvent {
     VfxKind kind = VfxKind::Hit;
@@ -235,6 +312,8 @@ struct Bolt {
     bool crit = false;
     bool mage = false;
     bool robot = false;
+    // 腐蚀水弹：绿色弹体，飞行中拖出腐蚀尾迹（画法与普通敌弹区分开）
+    bool corrosion = false;
     // >0 时为爆破弹：命中、撞墙或寿命耗尽时按此半径范围伤害
     float blast = 0.f;
     // 仅绘制时上移；判定仍按脚底平面，避免枪口高度让弹道与目标错开
@@ -263,6 +342,17 @@ struct Drop {
     float x = 0.f;
     float y = 0.f;
     Item item;
+};
+
+// 腐蚀粘液：boss 经过处留下的地形，踩上去持续微量掉血（护盾 / 飞行 / 跳跃可免疫）。
+// 只在地面上停留 kLife 秒，到点自行消失。
+struct SlimeSpot {
+    static constexpr float kLife = 3.f;
+    float x = 0.f;
+    float y = 0.f;
+    float radius = 15.f;
+    // 已经存在了多久；绘制时用 age / kLife 做呼吸与渐隐
+    float age = 0.f;
 };
 
 class Session {
@@ -295,6 +385,10 @@ public:
     const std::vector<AttackFx>& attackFx() const { return attackFx_; }
     const TileMap& map() const { return map_; }
     const MazeRuin& ruin() const { return ruin_; }
+    const ShallowPool& pool() const { return pool_; }
+    const std::vector<SlimeSpot>& slimeSpots() const { return slime_; }
+    // 本次浅水 boss 战里踩雷累计削减掉的理智上限
+    float sanCapCut() const { return pool_.sanCut; }
     float plazaRed() const { return plazaRed_; }
     // I am atomic 的画面紫色滤镜：蓄力时涨起来，余波里退掉
     float atomicViolet() const { return atomicViolet_; }
@@ -313,11 +407,34 @@ public:
     bool consumeRevivePrompt();
     bool acceptRevive();
     void declineRevive();
+    // 转化为史莱姆之躯（默认史莱姆形象，自己的尸体默认已吞噬）
+    void transformIntoSlimeBody();
+    // 史莱姆之躯下击杀怪物即吞噬：记录形态、推进【暴食】进度
+    void devour(MonsterKind kind);
+    // 左 Ctrl / 触屏按钮：按当前拟态形态放一次技能
+    void castMimicSkill();
 
     int itemCount(int kind) const;
     int talismanCount() const { return itemCount(kItemReturnTalisman); }
+    int slimeCoreCount() const { return itemCount(kItemSlimeCore); }
     // 诅咒「存在被克苏鲁余光注意！」：本轮永久，偶尔刷出双倍血量的精英怪
     bool cursed() const { return player_.cursed; }
+
+    // 史莱姆之躯：使用史莱姆核心复活后永久生效
+    bool slimeBody() const { return player_.slimeBody; }
+    MimicForm mimicForm() const { return player_.mimic; }
+    bool devoured(MimicForm form) const { return (player_.devouredMask & mimicBit(form)) != 0u; }
+    int devourCount() const { return player_.devourCount; }
+    bool talentGluttony() const { return player_.talentGluttony; }
+    // 当前形态带来的临时属性加成（未转化 / 原本的躯体时全是 1）
+    MimicBonus mimicBonus() const;
+    float mimicSkillCooldown() const { return player_.cdMimicSkill; }
+    float mimicSkillCooldownMax() const;
+    // 图鉴里点选形态；未吞噬的形态不会生效
+    void setMimicForm(MimicForm form);
+    // 史莱姆核心只能搭着意识回归符咒一起用：两个都持有才算可用
+    bool canUseSlimeCore() const { return talismanCount() > 0 && slimeCoreCount() > 0; }
+    bool acceptReviveWithSlimeCore();
     // 结算时符咒折算出来的积分，只在结算面板上用
     int talismanBonus() const { return talismanBonus_; }
 
@@ -326,8 +443,14 @@ public:
     float san() const { return player_.san; }
     float maxSan() const { return player_.maxSan; }
     bool sanWeak() const { return player_.sanWeak; }
-    // 距理智耗尽还剩多少秒（maxSan/maxSan * 600）
-    float sanRemaining() const { return player_.maxSan <= 0.f ? 0.f : player_.san / player_.maxSan * 600.f; }
+    // 玩家理论理智上限（不含踩雷削减）：UI 用它显示上限被削掉了多少
+    float sanCapBase() const { return sanCapBase_ > 0.f ? sanCapBase_ : player_.maxSan; }
+    // 距理智耗尽还剩多少秒。流速固定是「基准上限 / 600」，
+    // 所以被踩雷削掉的上限会实打实地缩短这个倒计时。
+    float sanRemaining() const {
+        const float drain = sanCapBase() / 600.f;
+        return drain <= 0.f ? 0.f : player_.san / drain;
+    }
 
     int xpToNext() const;
 
@@ -428,18 +551,43 @@ private:
     void spawnEye(float hp = -1.f, float shield = -1.f, int level = -1);
     void updateEye(Monster& monster, float dt);
     void onEyeDefeated();
+    // 浅水 boss 房：圆形浅水区 + 旁边的排雷小游戏 + 巨型腐化史莱姆
+    void updatePool(float dt);
+    bool spawnPool();
+    void dismissPool();
+    void syncPoolMap();
+    void spawnSlimeBoss(float hp = -1.f, float shield = -1.f, int level = -1);
+    void updateSlimeBoss(Monster& monster, float dt);
+    void onSlimeBossDefeated();
+    void restorePool(const QJsonObject& game);
+    // 跳跃揭示棋盘格：安全格点亮数字，踩雷受伤并削减本场理智上限
+    void revealBoardTile(int tileX, int tileY);
+    void applySlimeBossLevel();
+    // 腐蚀粘液：boss 经过处留痕，对踩上去的玩家持续微量掉血
+    void updateCorrosion(float dt);
+    void addCorrosion(float x, float y);
+    void slimeBossClampToPool(Monster& monster) const;
+    void slimeBossContact(Monster& monster, float dist, float damage);
+    void slimeBossTrail(Monster& monster, float dt);
+    // 踩雷削减 / 击败恢复理智上限
+    void applySanCut();
+    void restoreSanCap();
+    // 浅水减速：史莱姆与飞行单位免疫
+    float shallowMoveMul(float x, float y, bool immune) const;
     void triggerShake();
     void restoreRuin(const QJsonObject& game);
     Monster* findMonster(int id);
 
     TileMap map_{1};
     MazeRuin ruin_;
+    ShallowPool pool_;
     PathField paths_;
     Player player_;
     std::vector<Monster> monsters_;
     std::vector<Bolt> bolts_;
     std::vector<Drone> drones_;
     std::vector<Drop> drops_;
+    std::vector<SlimeSpot> slime_;
     std::vector<FloatText> floats_;
     std::vector<AttackFx> attackFx_;
     std::vector<Item> bag_;
@@ -472,6 +620,10 @@ private:
     float atomicChantT_ = 0.f;
     bool voidPrompt_ = false;
     int eyeDefeats_ = 0;
+    // 玩家理论理智上限（不含踩雷削减）；effective 上限是 player_.maxSan
+    float sanCapBase_ = 100.f;
+    // 腐蚀粘液的持续伤害节流
+    float corrosionTick_ = 0.f;
     int wallStrikeId_ = -1;
     // 理智系统会话状态：sanActive_ 一旦 boss 激活便锁定为真，击败或死亡才解除
     bool sanActive_ = false;

@@ -13,8 +13,10 @@
 #include <QFile>
 #include <QFocusEvent>
 #include <QFontMetrics>
+#include <QGridLayout>
 #include <QGuiApplication>
 #include <QHBoxLayout>
+#include <QIcon>
 #include <QKeyEvent>
 #include <QLabel>
 #include <QLinearGradient>
@@ -191,6 +193,8 @@ QColor tileColor(Tile tile) {
         return QColor(70, 60, 54);
     case Tile::Plaza:
         return QColor(92, 42, 40);
+    case Tile::Shallow:
+        return QColor(96, 156, 150);
     }
     return QColor(86, 158, 62);
 }
@@ -208,6 +212,19 @@ void drawGround(QPainter& painter, const QImage& tiles, bool hasTiles, Tile tile
         }
         if (hasTiles && map.at(x - 1, y) != Tile::Water && map.at(x, y - 1) != Tile::Water) {
             painter.drawImage(QRect(dest.x() - 4, dest.y() - 8, 40, 36), tiles, QRect(0, 48, 48, 40));
+        }
+        return;
+    }
+    if (tile == Tile::Shallow) {
+        // 浅水：地面照常铺，上面压一层很淡的水色，看上去与平地几乎一致
+        painter.fillRect(dest, QColor(42, 50, 32));
+        if (hasTiles) {
+            painter.drawImage(dest, tiles, QRect(80, 16, 16, 16));
+        }
+        painter.fillRect(dest, QColor(74, 148, 178, 92));
+        painter.setPen(QColor(158, 214, 228, 70));
+        if (map.at(x, y - 1) != Tile::Shallow) {
+            painter.drawLine(QPointF(dest.left(), dest.top() + 0.5), QPointF(dest.right(), dest.top() + 0.5));
         }
         return;
     }
@@ -398,7 +415,7 @@ GameWidget::GameWidget(QWidget* parent) : QWidget(parent) {
             Audio::instance().play(SfxId::Ui);
         }
         if (settings.bgmEnabled && running_ && !session_.ended() && !session_.paused()) {
-            Audio::instance().startBgmLoop();
+            Audio::instance().ensureBgmLoop();
         }
     };
     {
@@ -409,7 +426,7 @@ GameWidget::GameWidget(QWidget* parent) : QWidget(parent) {
     connect(pauseBgmCheck_, &QCheckBox::toggled, this, [this, applyPauseAudio](bool on) {
         applyPauseAudio(false);
         if (on && running_ && !session_.ended()) {
-            Audio::instance().startBgmLoop();
+            Audio::instance().ensureBgmLoop();
         }
     });
     connect(pauseBgmSlider_, &QSlider::valueChanged, this, [applyPauseAudio](int) { applyPauseAudio(false); });
@@ -465,6 +482,7 @@ GameWidget::GameWidget(QWidget* parent) : QWidget(parent) {
     connect(confirmNo, &QPushButton::clicked, this, [this] {
         confirmPanel_->hide();
         Audio::instance().playRefuseBgm();
+        Audio::instance().playContinueVoice(femaleHero(session_.player().hero));
         if (session_.paused() && !session_.ended()) {
             pausePanel_->show();
             pausePanel_->raise();
@@ -504,6 +522,7 @@ GameWidget::GameWidget(QWidget* parent) : QWidget(parent) {
         session_.setPaused(false);
         Audio::instance().setBgmPaused(false);
         Audio::instance().playRefuseBgm();
+        Audio::instance().playContinueVoice(femaleHero(session_.player().hero));
         setFocus();
     });
     voidPanel_->setObjectName("panel");
@@ -524,22 +543,66 @@ GameWidget::GameWidget(QWidget* parent) : QWidget(parent) {
     reviveRow->addWidget(reviveYes);
     reviveRow->addWidget(reviveNo);
     reviveLayout->addLayout(reviveRow);
+    // 同时持有符咒与史莱姆核心时才出现的第三个选项
+    reviveCore_ = new QPushButton(QStringLiteral("使用史莱姆核心回归（转化为史莱姆之躯）"), revivePanel_);
+    reviveLayout->addWidget(reviveCore_);
     connect(reviveYes, &QPushButton::clicked, this, [this] {
         revivePanel_->hide();
         session_.acceptRevive();
         Audio::instance().setBgmPaused(false);
+        // 复活：4 号曲播一次
+        Audio::instance().playReviveBgm();
+        setFocus();
+    });
+    connect(reviveCore_, &QPushButton::clicked, this, [this] {
+        if (!session_.acceptReviveWithSlimeCore()) {
+            return;
+        }
+        revivePanel_->hide();
+        Audio::instance().setBgmPaused(false);
+        // 复活：4 号曲播一次
+        Audio::instance().playReviveBgm();
+        toast_ = QStringLiteral("史莱姆之躯：按 T 打开拟态图鉴，左 Ctrl 用拟态技能");
+        toastTime_ = 3.2f;
         setFocus();
     });
     connect(reviveNo, &QPushButton::clicked, this, [this] {
         revivePanel_->hide();
+        // 拒绝回归是直接结算，不算「拒绝结束本轮」：不播 3 号曲，结算时接 5 号曲
         session_.declineRevive();
         Audio::instance().setBgmPaused(false);
-        Audio::instance().playRefuseBgm();
         setFocus();
     });
     revivePanel_->setObjectName("panel");
     revivePanel_->setStyleSheet("QWidget#panel { background: #14110f; border: 1px solid #5c3a32; } QLabel { background: transparent; color: #d7c7b4; border: none; }");
     revivePanel_->hide();
+
+    // 拟态图鉴：史莱姆之躯按 T 打开，打开期间时停
+    mimicPanel_ = new QWidget(this);
+    auto* mimicLayout = new QVBoxLayout(mimicPanel_);
+    mimicLayout->setContentsMargins(14, 12, 14, 12);
+    mimicLabel_ = new QLabel(mimicPanel_);
+    mimicLabel_->setAlignment(Qt::AlignCenter);
+    mimicLabel_->setWordWrap(true);
+    mimicLayout->addWidget(mimicLabel_);
+    auto* mimicGrid = new QGridLayout();
+    mimicGrid->setSpacing(6);
+    for (int i = 0; i < int(MimicForm::Count); ++i) {
+        const MimicForm form = MimicForm(i);
+        auto* button = new QPushButton(mimicPanel_);
+        button->setMinimumSize(168, 56);
+        button->setIconSize(QSize(36, 36));
+        connect(button, &QPushButton::clicked, this, [this, form] {
+            session_.setMimicForm(form);
+            closeMimicPanel();
+        });
+        mimicButtons_.push_back(button);
+        mimicGrid->addWidget(button, i / 3, i % 3);
+    }
+    mimicLayout->addLayout(mimicGrid);
+    mimicPanel_->setObjectName("panel");
+    mimicPanel_->setStyleSheet("QWidget#panel { background: #101a10; border: 1px solid #4a7638; } QLabel { background: transparent; color: #cfe8c0; border: none; }");
+    mimicPanel_->hide();
 
     auto* esc = new QShortcut(QKeySequence(Qt::Key_Escape), this);
     esc->setContext(Qt::WidgetWithChildrenShortcut);
@@ -580,6 +643,8 @@ void GameWidget::leaveToMenu() {
     confirmPanel_->hide();
     voidPanel_->hide();
     revivePanel_->hide();
+    mimicPanel_->hide();
+    mimicOpen_ = false;
     releaseAllTouches();
     emit returnedToMenu();
 }
@@ -615,7 +680,7 @@ void GameWidget::refreshGuide() {
     }
 #endif
     html += block(touch ? "按钮" : "Q", guardSkillText(), "冷却 " + cdText(player.cdGuard));
-    html += block(touch ? "按钮" : "E", healSkillText(), "冷却 " + cdText(player.cdHeal));
+    html += block(touch ? "按钮" : "E", healSkillText(player.slimeBody), "冷却 " + cdText(player.cdHeal));
     auto skillExtra = [&](int skill, float cd) -> QString {
         if (skill == kSkillSwordQi) {
             return player.stacksQi < 3
@@ -664,6 +729,39 @@ void GameWidget::refreshGuide() {
     html += progress("熟练", float(player.skillCasts), 12.f, player.talentMastery, talentMasteryDetail());
     html += progress("世界指引", float(player.worldKills), 20.f, player.talentGuide, talentGuideDetail());
     html += progress("以小博大", float(player.underdogKills), 10.f, player.talentUnderdog, talentUnderdogDetail());
+    if (player.slimeBody) {
+        html += progress("暴食", float(session_.devourCount()), float(kGluttonyDevours), player.talentGluttony,
+            talentGluttonyDetail());
+    }
+    if (player.slimeBody) {
+        html += "<p style='color:#e4d4c4; margin:12px 0 4px 0;'><b>玩法　史莱姆之躯</b></p>";
+        html += "<p style='margin:8px 0 10px 0;'><span style='color:#a89888;'>"
+                "受到的伤害 -10%，「恢复」改为回复 20% 最大生命与体力。<br>"
+                "按 T 打开拟态图鉴（打开时时停）选择外形：只能选已吞噬的怪物——史莱姆之躯下击杀即吞噬；"
+                "自己原本的躯体与史莱姆本体会默认解锁。<br>"
+                "每个外形附带一个左 Ctrl 技能与一项属性加成，换形态立即生效。</span></p>";
+        for (int i = 0; i < int(MimicForm::Count); ++i) {
+            const MimicForm form = MimicForm(i);
+            const MimicText text = mimicText(form);
+            const bool owned = form == MimicForm::Hero || session_.devoured(form);
+            html += QString("<p style='margin:4px 0;'><b>%1</b>　%2<br><span style='color:%3;'>%4　%5</span></p>")
+                        .arg(owned ? text.name : QString("%1（未吞噬）").arg(text.name))
+                        .arg(player.mimic == form ? QStringLiteral("◀ 当前") : QString())
+                        .arg(owned ? "#a89888" : "#6a6058")
+                        .arg(text.skillName)
+                        .arg(text.bonus);
+        }
+    }
+    // 浅水 boss 房：进过一次场地后，把排雷玩法简要写在天赋下面
+    if (const ShallowPool& pool = session_.pool(); pool.active && pool.entered) {
+        html += "<p style='color:#e4d4c4; margin:12px 0 4px 0;'><b>玩法　浅水区·排雷</b></p>";
+        html += "<p style='margin:8px 0 10px 0;'><span style='color:#a89888;'>"
+                "在棋盘格上跳跃即可揭示方块（起跳与落地各算一次）：数字＝相邻地雷数，0 格会自动连锁翻开。"
+                "踩中地雷（腐蚀史莱姆）受到一次腐蚀伤害，并使本场理智上限 -10。"
+                "揭开全部安全格、或踩完全部地雷，巨型腐化史莱姆就会从水中浮出。"
+                "它靠冲撞、弹跳砸击与腐蚀水弹进攻，途经处留下腐蚀粘液（约 3 秒后自行消失），踩上持续掉血——"
+                "护盾、飞行或跳跃时可免疫粘液。</span></p>";
+    }
     if (const int charms = session_.talismanCount()) {
         html += QString("<p style='color:#e4d4c4; margin:12px 0 4px 0;'><b>物品</b></p>");
         html += QString("<p style='margin:8px 0 10px 0;'><b>%1 x%2</b><br><span style='color:#a89888;'>%3</span></p>")
@@ -696,7 +794,10 @@ void GameWidget::startNew(HeroClass hero, int skillD, int skillF, int skillC, in
     confirmPanel_->hide();
     voidPanel_->hide();
     revivePanel_->hide();
-    Audio::instance().startBgmLoop();
+    mimicPanel_->hide();
+    mimicOpen_ = false;
+    // 新的一局：结算后一直放的 5 号曲到此为止，换回 1 号循环
+    Audio::instance().beginRun();
     setFocus();
 }
 
@@ -704,6 +805,7 @@ void GameWidget::startContinue(const QJsonObject& game) {
     running_ = true;
     session_.loadFrom(game);
     session_.drainVfx();
+    // 新的一局：结算后一直放的 5 号曲到此为止，换回 1 号循环
     particles_.clear();
     endCommitted_ = false;
     clock_.restart();
@@ -713,7 +815,9 @@ void GameWidget::startContinue(const QJsonObject& game) {
     confirmPanel_->hide();
     voidPanel_->hide();
     revivePanel_->hide();
-    Audio::instance().startBgmLoop();
+    mimicPanel_->hide();
+    mimicOpen_ = false;
+    Audio::instance().beginRun();
     setFocus();
 }
 
@@ -729,6 +833,7 @@ void GameWidget::setPaused(bool paused) {
     Audio::instance().setBgmPaused(paused);
     if (declined) {
         Audio::instance().playRefuseBgm();
+        Audio::instance().playContinueVoice(femaleHero(session_.player().hero));
     }
     if (paused) {
         const AppSettings settings = Storage::loadSettings();
@@ -751,6 +856,11 @@ void GameWidget::setPaused(bool paused) {
 }
 
 void GameWidget::togglePause() {
+    // 拟态图鉴开着时，Esc / Tab 先关图鉴而不是弹暂停菜单
+    if (mimicOpen_) {
+        closeMimicPanel();
+        return;
+    }
     if (session_.ended() || (voidPanel_ && voidPanel_->isVisible()) || (revivePanel_ && revivePanel_->isVisible())) {
         return;
     }
@@ -807,11 +917,86 @@ void GameWidget::showRevivePrompt() {
     confirmPanel_->hide();
     voidPanel_->hide();
     const int owned = session_.talismanCount();
-    reviveText_->setText(QStringLiteral("意识回归符咒生效\n持有 %1 张\n确认回归：消耗一张，原地复活，生命恢复到 25%\n拒绝回归：直接结算，剩余符咒折算积分")
-            .arg(owned));
+    const int cores = session_.slimeCoreCount();
+    QString text = QStringLiteral("意识回归符咒生效\n持有 %1 张　史莱姆核心 %2 个\n"
+                                  "确认回归：消耗一张符咒，原地复活，生命恢复到 25%\n"
+                                  "拒绝回归：直接结算，剩余符咒与核心折算积分")
+                       .arg(owned)
+                       .arg(cores);
+    if (session_.canUseSlimeCore()) {
+        text += QStringLiteral("\n使用史莱姆核心回归：额外消耗 1 个核心，复活并永久转化为史莱姆之躯");
+    } else if (cores > 0) {
+        text += QStringLiteral("\n史莱姆核心需要与符咒同时持有才可使用");
+    }
+    reviveText_->setText(text);
+    reviveCore_->setVisible(session_.canUseSlimeCore());
     revivePanel_->show();
     revivePanel_->raise();
     layoutOverlays();
+}
+
+void GameWidget::refreshMimicPanel() {
+    const bool slime = session_.slimeBody();
+    if (slime) {
+        mimicLabel_->setText(QStringLiteral("拟态　点击选择要幻化的外形　Esc / T 关闭\n"
+                                            "已吞噬 %1 只怪物　左 Ctrl 使用该形态的技能")
+                                 .arg(session_.devourCount()));
+    } else {
+        mimicLabel_->setText(QStringLiteral("尚未转化为史莱姆之躯"));
+    }
+    for (int i = 0; i < mimicButtons_.size(); ++i) {
+        const MimicForm form = MimicForm(i);
+        QPushButton* button = mimicButtons_[i];
+        const MimicText text = mimicText(form);
+        const bool owned = form == MimicForm::Hero || session_.devoured(form);
+        const bool current = slime && session_.mimicForm() == form;
+        button->setIcon(mimicIcon(form));
+        button->setEnabled(slime && owned);
+        button->setText(QString("%1%2\n%3")
+                .arg(current ? QStringLiteral("▶ ") : QString())
+                .arg(text.name)
+                .arg(slime && owned ? text.bonus : QStringLiteral("尚未吞噬")));
+        button->setToolTip(owned ? text.skill : QStringLiteral("史莱姆之躯下击杀该类怪物即可吞噬"));
+    }
+}
+
+void GameWidget::toggleMimicPanel() {
+    if (mimicOpen_) {
+        closeMimicPanel();
+        return;
+    }
+    if (!running_ || session_.ended() || !session_.slimeBody()
+        || session_.player().state == ActorState::Dead) {
+        return;
+    }
+    // 别的模态面板开着时不开图鉴，避免叠在一起
+    if (pausePanel_->isVisible() || resultPanel_->isVisible() || confirmPanel_->isVisible()
+        || revivePanel_->isVisible() || voidPanel_->isVisible()) {
+        return;
+    }
+    refreshMimicPanel();
+    mimicOpen_ = true;
+    // 时停：暂停模拟，但不弹暂停菜单
+    session_.setPaused(true);
+    pausePanel_->hide();
+    confirmPanel_->hide();
+    voidPanel_->hide();
+    revivePanel_->hide();
+    mimicPanel_->show();
+    mimicPanel_->raise();
+    layoutOverlays();
+}
+
+void GameWidget::closeMimicPanel() {
+    if (!mimicOpen_ && !mimicPanel_->isVisible()) {
+        return;
+    }
+    mimicOpen_ = false;
+    mimicPanel_->hide();
+    if (running_ && !session_.ended() && !pausePanel_->isVisible()) {
+        session_.setPaused(false);
+    }
+    setFocus();
 }
 
 void GameWidget::commitEnd() {
@@ -822,10 +1007,14 @@ void GameWidget::commitEnd() {
     session_.setPaused(false);
     // 结算前若正暂停（从暂停菜单主动结算），把 BGM 唤醒，结果面板不再静音
     Audio::instance().setBgmPaused(false);
+    // 结算后接 5 号曲：回主菜单不断，直到下一局开始（beginRun）
+    Audio::instance().playFinaleBgm();
     pausePanel_->hide();
     confirmPanel_->hide();
     voidPanel_->hide();
     revivePanel_->hide();
+    mimicPanel_->hide();
+    mimicOpen_ = false;
     releaseAllTouches();
     Records records = Storage::loadRecords();
     if (session_.time() > records.bestTime) {
@@ -839,7 +1028,7 @@ void GameWidget::commitEnd() {
     const QString reason = session_.reason() == EndReason::Death ? "你倒下了" : "本局已结算";
     QString result = reason + "\n用时 " + formatTime(session_.time()) + "\n积分 " + QString::number(session_.score());
     if (const int bonus = session_.talismanBonus()) {
-        result += QString("\n意识回归符咒折算 +%1 积分").arg(bonus);
+        result += QString("\n符咒 / 核心折算 +%1 积分").arg(bonus);
     }
     resultText_->setText(result);
     resultPanel_->show();
@@ -870,6 +1059,8 @@ void GameWidget::layoutOverlays() {
     voidPanel_->move((width() - voidPanel_->width()) / 2, (height() - voidPanel_->height()) / 2);
     revivePanel_->adjustSize();
     revivePanel_->move((width() - revivePanel_->width()) / 2, (height() - revivePanel_->height()) / 2);
+    mimicPanel_->adjustSize();
+    mimicPanel_->move((width() - mimicPanel_->width()) / 2, (height() - mimicPanel_->height()) / 2);
 }
 
 void GameWidget::tick() {
@@ -945,7 +1136,7 @@ void GameWidget::spawnVfx(const VfxEvent& event) {
             particles_.push_back(p);
         }
     };
-    const bool big = event.monster == MonsterKind::Eye;
+    const bool big = event.monster == MonsterKind::Eye || event.monster == MonsterKind::SlimeBoss;
     const float bodyZ = big ? 30.f : (event.monster == MonsterKind::Flyer ? 22.f : 10.f);
     switch (event.kind) {
     case VfxKind::Hit: {
@@ -967,6 +1158,7 @@ void GameWidget::spawnVfx(const VfxEvent& event) {
         case MonsterKind::Caster: debris[0] = QColor(176, 84, 214); debris[1] = QColor(96, 40, 124); break;
         case MonsterKind::Killbot: debris[0] = QColor(150, 160, 172); debris[1] = QColor(255, 160, 60); break;
         case MonsterKind::Eye: debris[0] = QColor(224, 40, 52); debris[1] = QColor(255, 204, 204); break;
+        case MonsterKind::SlimeBoss: debris[0] = QColor(108, 190, 62); debris[1] = QColor(196, 240, 120); break;
         default: break;
         }
         spray(big ? 28 : 10, 30.f, big ? 140.f : 90.f, 60.f, 150.f, 340.f, 0.5f, 0.9f, 2.f, 3.5f, bodyZ * 0.8f, big ? 10.f : 4.f, debris, 2, false);
@@ -1025,6 +1217,22 @@ void GameWidget::spawnVfx(const VfxEvent& event) {
         spray(34, 40.f, 150.f, 8.f, 40.f, 90.f, 0.7f, 1.3f, 3.f, 6.f, 2.f, 64.f, dust, 2, false);
         // 碎石：抛得高，落地还会弹一下
         spray(40, 150.f, 300.f, 90.f, 210.f, 430.f, 0.6f, 1.2f, 1.5f, 3.f, 12.f, 18.f, debris, 2, false);
+        break;
+    }
+    case VfxKind::Corrosion: {
+        // 踩雷 / 踩到粘液：溅起一圈绿色腐蚀液
+        static const QColor acid[] = {QColor(126, 196, 62), QColor(196, 240, 120), QColor(62, 96, 34)};
+        const float r = std::max(6.f, event.radius);
+        spray(6 + int(r / 3.f), r * 1.2f, r * 2.6f, 20.f, 70.f, 210.f, 0.3f, 0.6f, 2.f, 3.5f, 6.f, r * 0.35f, acid, 3, true);
+        break;
+    }
+    case VfxKind::Rise: {
+        // 浮出水面：大片水花与绿色黏液从水心往外炸开
+        static const QColor water[] = {QColor(150, 214, 228), QColor(206, 240, 246)};
+        static const QColor slime[] = {QColor(126, 196, 62), QColor(196, 240, 120)};
+        const float r = std::max(20.f, event.radius);
+        spray(30, r * 1.2f, r * 3.2f, 30.f, 120.f, 300.f, 0.5f, 1.0f, 2.f, 4.f, 8.f, r * 0.4f, water, 2, true);
+        spray(24, r * 0.8f, r * 2.2f, 20.f, 80.f, 240.f, 0.5f, 1.0f, 3.f, 6.f, 4.f, r * 0.5f, slime, 2, false);
         break;
     }
     }
@@ -1163,6 +1371,18 @@ void GameWidget::syncKey(int key, bool down) {
     case Qt::Key_G:
         if (down) {
             input_.gEdge = true;
+        }
+        break;
+    case Qt::Key_Control:
+        // 左 Ctrl（左右 Ctrl 在 Qt 里同码，都接受）：史莱姆之躯的拟态技能
+        if (down) {
+            input_.ctrlEdge = true;
+        }
+        break;
+    case Qt::Key_T:
+        // 拟态图鉴：不塞进 InputState，直接开关面板（打开时时停）
+        if (down) {
+            toggleMimicPanel();
         }
         break;
     default:
@@ -1307,6 +1527,11 @@ QVector<GameWidget::TouchButton> GameWidget::touchButtons() const {
     if (player.talentGuide) {
         // 天赋「世界指引」解锁后才有的开关，桌面版是 G 键
         buttons.push_back({TouchControl::Seek, QPointF(w - u * 0.405, u * 0.075), top, QStringLiteral("寻路")});
+    }
+    if (player.slimeBody) {
+        // 史莱姆之躯专属：拟态图鉴（T）与拟态技能（左 Ctrl）
+        buttons.push_back({TouchControl::Mimic, QPointF(w - u * 0.515, u * 0.075), top, QStringLiteral("拟态")});
+        buttons.push_back({TouchControl::MimicSkill, QPointF(w - u * 0.625, u * 0.075), top, QStringLiteral("形态技")});
     }
     return buttons;
 }
@@ -1501,6 +1726,14 @@ void GameWidget::pressTouch(TouchControl control, bool down) {
         break;
     case TouchControl::Seek:
         input_.gEdge = input_.gEdge || down;
+        break;
+    case TouchControl::Mimic:
+        if (down) {
+            toggleMimicPanel();
+        }
+        break;
+    case TouchControl::MimicSkill:
+        input_.ctrlEdge = input_.ctrlEdge || down;
         break;
     default:
         break;
@@ -1768,6 +2001,105 @@ void GameWidget::drawAnim(QPainter& painter, const SpriteAnim& anim, ActorState 
     anim.draw(painter, frameIndex(anim, animT, loop, fps), x, y, flip);
 }
 
+// 拟态成两个 boss 时的玩家本体：把 boss 的造型缩小，不带血条与铭牌
+void GameWidget::drawBossMimic(QPainter& painter, MimicForm form, float x, float y, float animT, float scale, bool hurt) {
+    const float bob = std::sin(animT * 3.f) * 1.2f;
+    if (form == MimicForm::Eye) {
+        const float rx = 16.f * scale;
+        const float ry = 11.f * scale;
+        const float cy = y - ry - 4.f - bob;
+        painter.setPen(Qt::NoPen);
+        painter.setBrush(QColor(28, 0, 6, 90));
+        painter.drawEllipse(QRectF(x - rx * 1.4f, cy - ry * 1.5f, rx * 2.8f, ry * 3.f));
+        painter.setPen(QPen(QColor(48, 6, 10, 230), 1.6f));
+        painter.setBrush(hurt ? QColor(255, 236, 220) : QColor(214, 186, 164));
+        painter.drawEllipse(QRectF(x - rx, cy - ry, rx * 2.f, ry * 2.f));
+        painter.setPen(QPen(QColor(120, 16, 22, 170), 1));
+        painter.drawLine(QPointF(x - rx * 0.82f, cy - ry * 0.15f), QPointF(x - rx * 0.38f, cy + ry * 0.12f));
+        painter.drawLine(QPointF(x + rx * 0.82f, cy - ry * 0.15f), QPointF(x + rx * 0.38f, cy + ry * 0.12f));
+        painter.setPen(Qt::NoPen);
+        painter.setBrush(QColor(110, 8, 16, 245));
+        painter.drawEllipse(QRectF(x - rx * 0.4f, cy - ry * 0.55f, rx * 0.8f, ry * 1.1f));
+        painter.setBrush(QColor(12, 0, 4, 250));
+        painter.drawRoundedRect(QRectF(x - rx * 0.06f, cy - ry * 0.46f, rx * 0.12f, ry * 0.92f), 1.2, 1.2);
+        return;
+    }
+    // 腐化史莱姆形态
+    const float rx = 14.f * scale;
+    const float ry = 10.f * scale;
+    const float wobble = std::sin(animT * 4.2f) * 0.9f;
+    const float cy = y - ry - 3.f - bob;
+    painter.setPen(Qt::NoPen);
+    painter.setBrush(QColor(20, 44, 16, 90));
+    painter.drawEllipse(QRectF(x - rx * 1.5f, cy - ry * 1.4f, rx * 3.f, ry * 3.1f));
+    painter.setPen(QPen(QColor(38, 74, 26, 230), 1.6f));
+    painter.setBrush(hurt ? QColor(236, 255, 214) : QColor(96, 168, 58));
+    painter.drawEllipse(QRectF(x - rx + wobble, cy - ry, (rx - wobble) * 2.f, ry * 2.f));
+    painter.setPen(Qt::NoPen);
+    painter.setBrush(QColor(52, 40, 24, 150));
+    painter.drawEllipse(QRectF(x - rx * 0.6f, cy + ry * 0.12f, rx * 0.66f, ry * 0.5f));
+    painter.setBrush(QColor(220, 250, 190, 130));
+    painter.drawEllipse(QRectF(x - rx * 0.55f, cy - ry * 0.52f, rx * 0.3f, ry * 0.24f));
+    painter.setBrush(QColor(16, 26, 12, 250));
+    painter.drawEllipse(QRectF(x - rx * 0.36f, cy - ry * 0.3f, 3.f, 2.6f));
+    painter.drawEllipse(QRectF(x + rx * 0.06f, cy - ry * 0.3f, 3.f, 2.6f));
+}
+
+QIcon GameWidget::mimicIcon(MimicForm form) {
+    constexpr int kIcon = 36;
+    QPixmap pixmap(kIcon, kIcon);
+    pixmap.fill(Qt::transparent);
+    QPainter painter(&pixmap);
+    painter.setRenderHint(QPainter::Antialiasing, true);
+    const SpriteAnim* anim = nullptr;
+    switch (form) {
+    case MimicForm::Hero:
+        switch (session_.player().hero) {
+        case HeroClass::Sword:
+            anim = &sprites_.swordIdle;
+            break;
+        case HeroClass::Mage:
+            anim = &sprites_.mageIdle;
+            break;
+        case HeroClass::Robot:
+            anim = &sprites_.robotIdle;
+            break;
+        default:
+            anim = &sprites_.warriorIdle;
+            break;
+        }
+        break;
+    case MimicForm::Skeleton:
+        anim = &sprites_.skeletonIdle;
+        break;
+    case MimicForm::Mushroom:
+        anim = &sprites_.mushroomIdle;
+        break;
+    case MimicForm::Flyer:
+        anim = &sprites_.flyerIdle;
+        break;
+    case MimicForm::Caster:
+        anim = &sprites_.mushroomIdle;
+        break;
+    case MimicForm::Killbot:
+        anim = &sprites_.killbotWalk;
+        break;
+    default:
+        anim = &sprites_.slimeIdle;
+        break;
+    }
+    const bool bossForm = form == MimicForm::Eye || form == MimicForm::SlimeBoss;
+    if (!bossForm && anim && anim->ok()) {
+        const QColor tint = form == MimicForm::Caster ? QColor(88, 42, 112) : QColor();
+        anim->draw(painter, 0, kIcon * 0.5f, float(kIcon) - 3.f, false, 0.8f, 0.f, tint, 0);
+    } else {
+        // 贴图缺失或 boss 形态：直接画个小本体
+        drawBossMimic(painter, form, kIcon * 0.5f, float(kIcon) - 5.f, 0.f, 0.85f, false);
+    }
+    painter.end();
+    return QIcon(pixmap);
+}
+
 void GameWidget::drawWorld(QPainter& painter) {
     const Player& player = session_.player();
     float shakeX = 0.f;
@@ -1807,6 +2139,144 @@ void GameWidget::drawWorld(QPainter& painter) {
             }
         }
     }
+
+    // 腐蚀粘液：boss 拖在地面的黏液，压在实体之下；3 秒到点前渐隐收缩
+    for (const SlimeSpot& spot : session_.slimeSpots()) {
+        const float left = std::clamp(1.f - spot.age / SlimeSpot::kLife, 0.f, 1.f);
+        // 最后 0.8 秒淡出并收小，消失前能看出「快没了」
+        const float fade = std::min(1.f, left * 3.75f);
+        const float breathe = 1.f + std::sin(spot.age * 3.f) * 0.06f;
+        const float r = spot.radius * breathe * (0.72f + 0.28f * fade);
+        painter.setPen(Qt::NoPen);
+        painter.setBrush(QColor(58, 92, 34, int(150 * fade)));
+        painter.drawEllipse(QRectF(spot.x - r, spot.y - r * 0.55f, r * 2.f, r * 1.1f));
+        painter.setBrush(QColor(126, 196, 62, int(130 * fade)));
+        painter.drawEllipse(QRectF(spot.x - r * 0.6f, spot.y - r * 0.34f, r * 1.2f, r * 0.68f));
+        painter.setBrush(QColor(196, 236, 120, int(110 * fade)));
+        painter.drawEllipse(QRectF(spot.x - r * 0.22f, spot.y - r * 0.14f, r * 0.44f, r * 0.26f));
+    }
+
+    // 排雷棋盘：地面上的方格、数字与已被踩过的雷
+    if (const ShallowPool& pool = session_.pool(); pool.active && pool.phase == ShallowPool::Phase::Live) {
+        const float cell = float(kTile);
+        for (int ly = 0; ly < ShallowPool::kBoardSize; ++ly) {
+            for (int lx = 0; lx < ShallowPool::kBoardSize; ++lx) {
+                const float px = float(pool.boardX + lx) * cell;
+                const float py = float(pool.boardY + ly) * cell;
+                const QRectF box(px + 0.5f, py + 0.5f, cell - 1.f, cell - 1.f);
+                const bool mine = pool.isMine(lx, ly);
+                const bool triggered = pool.isTriggered(lx, ly);
+                const bool revealed = pool.isRevealed(lx, ly);
+                const int adj = revealed ? pool.adjacentMines(lx, ly) : 0;
+                painter.setPen(QPen(QColor(120, 132, 96, 190), 1));
+                if (mine && triggered) {
+                    painter.setBrush(QColor(62, 96, 34, 210));
+                } else if (revealed) {
+                    painter.setBrush(QColor(52, 66, 44, 150));
+                } else {
+                    painter.setBrush(QColor(96, 88, 62, 200));
+                }
+                painter.drawRect(box);
+                painter.setFont(QFont(Platform::uiFontFamily(), 7, QFont::Bold));
+                if (mine && triggered) {
+                    // 被踩过的雷：一格小腐蚀史莱姆
+                    const float sx = float(px + cell * 0.5f);
+                    const float sy = float(py + cell * 0.62f);
+                    painter.setPen(QPen(QColor(46, 78, 30, 220), 1));
+                    painter.setBrush(QColor(126, 196, 62));
+                    painter.drawEllipse(QRectF(sx - 5.5f, sy - 4.5f, 11.f, 9.f));
+                    painter.setPen(Qt::NoPen);
+                    painter.setBrush(QColor(28, 40, 20));
+                    painter.drawEllipse(QRectF(sx - 3.f, sy - 2.f, 2.f, 2.f));
+                    painter.drawEllipse(QRectF(sx + 1.f, sy - 2.f, 2.f, 2.f));
+                    painter.setPen(QPen(QColor(206, 246, 140, 200), 1));
+                    painter.setBrush(Qt::NoBrush);
+                    painter.drawRect(box);
+                } else if (revealed) {
+                    if (adj > 0) {
+                        static const QColor numColor[5] = {
+                            QColor(150, 220, 255), QColor(140, 240, 160), QColor(255, 214, 120),
+                            QColor(255, 160, 110), QColor(255, 120, 120)};
+                        painter.setPen(numColor[std::clamp(adj, 1, 5) - 1]);
+                        painter.drawText(box, Qt::AlignCenter, QString::number(adj));
+                    } else {
+                        painter.setPen(QColor(150, 190, 150, 180));
+                        painter.drawText(box, Qt::AlignCenter, QStringLiteral("空"));
+                    }
+                }
+            }
+        }
+        // 只画棋盘边框；玩法说明放在 Tab「说明」的天赋下方，不往地图上写字
+        const QRectF outline(float(pool.boardX) * cell - 1.f, float(pool.boardY) * cell - 1.f,
+            float(ShallowPool::kBoardSize) * cell + 2.f, float(ShallowPool::kBoardSize) * cell + 2.f);
+        painter.setBrush(Qt::NoBrush);
+        painter.setPen(QPen(QColor(240, 226, 168, 210), 2));
+        painter.drawRect(outline);
+    }
+
+    // 腐化史莱姆的攻击范围预警：冲刺走廊 / 落点圈 / 水弹射线，压在地面、实体之下
+    if (const ShallowPool& pool = session_.pool();
+        pool.active && pool.cleared && !pool.bossDead && pool.arrive <= 0.f) {
+        const Monster* boss = nullptr;
+        for (const Monster& monster : session_.monsters()) {
+            if (monster.kind == MonsterKind::SlimeBoss && monster.state != ActorState::Dead) {
+                boss = &monster;
+                break;
+            }
+        }
+        if (boss) {
+            if (pool.warningT > 0.f) {
+                // 冲撞走廊：从本体沿锁定方向伸出一整段冲刺距离，宽度＝本体半径＋玩家半径
+                const float len = ShallowPool::kChargeSpeed * ShallowPool::kChargeTime;
+                const float halfW = ShallowPool::kBossRadius + 7.f;
+                const float nx = -pool.chargeY;
+                const float ny = pool.chargeX;
+                const float tx = pool.chargeX * len;
+                const float ty = pool.chargeY * len;
+                const float u = 1.f - std::clamp(pool.warningT / ShallowPool::kWarnCharge, 0.f, 1.f);
+                QPainterPath corridor;
+                corridor.moveTo(boss->x + nx * halfW, boss->y + ny * halfW);
+                corridor.lineTo(boss->x + nx * halfW + tx, boss->y + ny * halfW + ty);
+                corridor.lineTo(boss->x - nx * halfW + tx, boss->y - ny * halfW + ty);
+                corridor.lineTo(boss->x - nx * halfW, boss->y - ny * halfW);
+                corridor.closeSubpath();
+                painter.setPen(Qt::NoPen);
+                painter.setBrush(QColor(206, 90, 60, int(38 + 42 * u)));
+                painter.drawPath(corridor);
+                painter.setBrush(Qt::NoBrush);
+                painter.setPen(QPen(QColor(255, 150, 110, int(170 + 70 * u)), 2));
+                painter.drawPath(corridor);
+            }
+            if (pool.leapWarnT > 0.f || pool.leapT > 0.f) {
+                // 落点圈：判定就是一个正圆，指示也画成正圆；内圈收拢到外圈时正好落地
+                const float r = ShallowPool::kLeapRadius;
+                painter.setPen(Qt::NoPen);
+                painter.setBrush(QColor(126, 196, 62, 55));
+                painter.drawEllipse(QRectF(pool.leapToX - r, pool.leapToY - r, r * 2.f, r * 2.f));
+                painter.setBrush(Qt::NoBrush);
+                painter.setPen(QPen(QColor(210, 255, 150, 220), 2));
+                painter.drawEllipse(QRectF(pool.leapToX - r, pool.leapToY - r, r * 2.f, r * 2.f));
+                const float u = pool.leapT > 0.f
+                    ? 1.f
+                    : 1.f - std::clamp(pool.leapWarnT / ShallowPool::kWarnLeap, 0.f, 1.f);
+                const float inner = r * std::clamp(1.f - u, 0.06f, 1.f);
+                painter.setPen(QPen(QColor(255, 255, 225, 235), 2));
+                painter.drawEllipse(QRectF(pool.leapToX - inner, pool.leapToY - inner, inner * 2.f, inner * 2.f));
+            }
+            if (pool.shootWarnT > 0.f) {
+                // 腐蚀水弹：五条射线就是五发子弹的飞行方向
+                painter.setPen(QPen(QColor(150, 220, 80, 190), 2));
+                for (int i = 0; i < ShallowPool::kShootShots; ++i) {
+                    const float a = pool.shootAim
+                        + (float(i) - float(ShallowPool::kShootShots - 1) * 0.5f) * ShallowPool::kShootSpread;
+                    painter.drawLine(QPointF(boss->x, boss->y - 16.f),
+                        QPointF(boss->x + std::cos(a) * ShallowPool::kShootHintRange,
+                            boss->y - 16.f + std::sin(a) * ShallowPool::kShootHintRange));
+                }
+            }
+        }
+    }
+
     // 墙体与树木不再统一先画一层，而是和角色一起按脚下深度排序：
     // 屏幕更靠下（y 更大）的后画，压住更靠上的目标
     auto paintMazeBlock = [&](int x, int y) {
@@ -1904,8 +2374,13 @@ void GameWidget::drawWorld(QPainter& painter) {
         const Tile tile = session_.map().at(tileOf(x), tileOf(y));
         return tile == Tile::Rock || tile == Tile::Bush;
     };
+    // 史莱姆之躯的振翅 / 跳砸也算离地，抬升量按剩余时间算
+    const float mimicFlyLift = player.mimicFlyT > 0.f ? 14.f : 0.f;
+    const float mimicSlamLift = player.mimicSlamT > 0.f
+        ? std::sin((1.f - std::clamp(player.mimicSlamT / 0.55f, 0.f, 1.f)) * 3.14159f) * 22.f
+        : 0.f;
     const float playerLift = (player.jumpT > 0.f ? std::sin(player.jumpT / 0.34f * 3.14159f) * 14.f : 0.f)
-        + (player.flying ? 12.f : 0.f);
+        + (player.flying ? 12.f : 0.f) + mimicFlyLift + mimicSlamLift;
     auto monsterLift = [](const Monster& monster) {
         return monster.kind == MonsterKind::Flyer ? 12.f : monster.kind == MonsterKind::Eye ? 8.f : 0.f;
     };
@@ -1977,8 +2452,42 @@ void GameWidget::drawWorld(QPainter& painter) {
             } else if (player.hero == HeroClass::Robot) {
                 set = {&sprites_.robotIdle, &sprites_.robotRun, &sprites_.robotAttack, &sprites_.robotHurt, &sprites_.robotDeath};
             }
+            const bool mimicking = player.slimeBody && player.mimic != MimicForm::Hero;
+            const bool mimicBossForm = player.slimeBody
+                && (player.mimic == MimicForm::Eye || player.mimic == MimicForm::SlimeBoss);
             const SpriteAnim* anim = set.idle;
-            if (player.state == ActorState::Dead) {
+            if (mimicking) {
+                // 史莱姆之躯：外观换成吞噬过的怪物贴图（boss 形态没有贴图，走下面的专绘）
+                const bool dead = player.state == ActorState::Dead;
+                const bool attack = player.state == ActorState::Attack;
+                const bool hurt = player.state == ActorState::Hurt;
+                const bool moving = player.state == ActorState::Run || player.state == ActorState::Dodge;
+                switch (player.mimic) {
+                case MimicForm::Skeleton:
+                    anim = dead ? &sprites_.skeletonDeath : attack ? &sprites_.skeletonAttack
+                        : hurt ? &sprites_.skeletonHurt
+                        : moving ? &sprites_.skeletonWalk
+                                 : &sprites_.skeletonIdle;
+                    break;
+                case MimicForm::Mushroom:
+                case MimicForm::Caster:
+                    anim = dead ? &sprites_.mushroomDeath : attack ? &sprites_.mushroomJump : &sprites_.mushroomIdle;
+                    break;
+                case MimicForm::Flyer:
+                    anim = dead ? &sprites_.flyerDeath : attack ? &sprites_.flyerAttack
+                        : hurt ? &sprites_.flyerHurt
+                        : moving ? &sprites_.flyerFly
+                                 : &sprites_.flyerIdle;
+                    break;
+                case MimicForm::Killbot:
+                    anim = dead ? &sprites_.killbotDeath : attack ? &sprites_.killbotAttack : &sprites_.killbotWalk;
+                    break;
+                default:
+                    // 史莱姆形态（含默认）
+                    anim = dead ? &sprites_.slimeDeath : moving ? &sprites_.slimeWalk : &sprites_.slimeIdle;
+                    break;
+                }
+            } else if (player.state == ActorState::Dead) {
                 anim = set.death;
             } else if (player.state == ActorState::Attack) {
                 anim = set.attack;
@@ -2069,16 +2578,25 @@ void GameWidget::drawWorld(QPainter& painter) {
                     painter.drawEllipse(QRectF(cx - player.burialR, cy - player.burialR, player.burialR * 2.f, player.burialR * 2.f));
                 }
             }
-            if (anim->ok()) {
+            if (mimicBossForm) {
+                // 两个 boss 形态没有贴图：手绘一个缩小版本体
+                drawBossMimic(painter, player.mimic, player.x, player.y, player.animT,
+                    player.state == ActorState::Dead ? 0.62f : 1.f, player.hurtT > 0.1f);
+            } else if (anim->ok()) {
                 const bool loop = player.state != ActorState::Attack && player.state != ActorState::Hurt && player.state != ActorState::Dead;
                 const float fps = player.state == ActorState::Attack ? 18.f : 12.f;
                 const int dir = anim->dirs() >= 4 ? facingDir(player.facingX, player.facingY, anim->dirs()) : 0;
                 const bool flip = anim->dirs() < 4 && player.facingX < 0.f;
                 const float heroScale = anim->dirs() >= 8 ? 1.f : 1.25f;
                 // 机甲人贴图整体下沉 5% 帧高，枪口高度见 Session 的 kRobotMuzzleLift
-                const float sink = player.hero == HeroClass::Robot ? anim->size() * 0.05f : 0.f;
-                anim->draw(painter, frameIndex(*anim, player.animT, loop, fps), player.x, player.y + sink, flip, heroScale, lift, QColor(), dir);
-                if (player.hero == HeroClass::Robot && player.flying) {
+                const float sink = (player.hero == HeroClass::Robot && !mimicking) ? anim->size() * 0.05f : 0.f;
+                // 术士形态用蘑菇贴图染色，受击时闪白黄
+                QColor tint = (player.slimeBody && player.mimic == MimicForm::Caster) ? QColor(88, 42, 112) : QColor();
+                if (player.hurtT > 0.1f) {
+                    tint = QColor(255, 220, 80);
+                }
+                anim->draw(painter, frameIndex(*anim, player.animT, loop, fps), player.x, player.y + sink, flip, heroScale, lift, tint, dir);
+                if (player.hero == HeroClass::Robot && player.flying && !mimicking) {
                     const float footY = player.y + sink - lift;
                     painter.setPen(Qt::NoPen);
                     painter.setBrush(QColor(255, 150, 50, 50));
@@ -2169,6 +2687,10 @@ void GameWidget::drawWorld(QPainter& painter) {
         } else {
             const Monster& monster = *item.monster;
             if (monster.kind == MonsterKind::Eye && session_.ruin().arrive == 0.f) {
+                continue;
+            }
+            // 雷还没排完：腐化史莱姆整只沉在水下，不画
+            if (monster.kind == MonsterKind::SlimeBoss && !session_.pool().cleared) {
                 continue;
             }
             drawShadow(painter, monster.x, monster.y);
@@ -2282,6 +2804,109 @@ void GameWidget::drawWorld(QPainter& painter) {
                 painter.setPen(QColor(255, 236, 220));
                 painter.drawText(QRectF(barX, barY - 1, barW, barH + 2), Qt::AlignCenter, hpText);
                 lift = 8.f;
+            } else if (monster.kind == MonsterKind::SlimeBoss) {
+                custom = true;
+                const ShallowPool& pool = session_.pool();
+                float fade = monster.state == ActorState::Dead ? 0.4f : 1.f;
+                float descend = 0.f;
+                if (pool.arrive > 0.f) {
+                    // 浮出：从水底升起，水面翻起涟漪
+                    const float u = 1.f - std::clamp(pool.arrive / ShallowPool::kRiseTime, 0.f, 1.f);
+                    const float eased = u * u * (3.f - 2.f * u);
+                    descend = (1.f - eased) * 96.f;
+                    fade *= 0.15f + 0.85f * eased;
+                    painter.setBrush(Qt::NoBrush);
+                    const float ring = 20.f + (1.f - eased) * 70.f;
+                    painter.setPen(QPen(QColor(170, 226, 200, int(200 * eased)), 2));
+                    painter.drawEllipse(QRectF(monster.x - ring, monster.y - ring * 0.32f, ring * 2.f, ring * 0.64f));
+                    painter.setPen(QPen(QColor(120, 190, 150, int(160 * (1.f - eased))), 3));
+                    painter.drawLine(QPointF(monster.x, monster.y - 120.f), QPointF(monster.x, monster.y - 10.f));
+                }
+                float leapLift = 0.f;
+                if (pool.leapT > 0.f) {
+                    const float u = 1.f - std::clamp(pool.leapT / ShallowPool::kLeapTime, 0.f, 1.f);
+                    leapLift = std::sin(u * 3.14159f) * 52.f;
+                }
+                const float wobble = monster.state == ActorState::Dead ? 0.f : std::sin(monster.animT * 4.2f) * 1.6f;
+                const float rx = 26.f + wobble;
+                const float ry = 20.f - wobble * 0.6f;
+                const float cy = monster.y - ry - leapLift - descend;
+                const bool flash = monster.hurtT > 0.1f;
+                const bool broken = monster.stunT > 0.f;
+                painter.setPen(Qt::NoPen);
+                painter.setBrush(QColor(20, 44, 16, int(90 * fade)));
+                painter.drawEllipse(QRectF(monster.x - 40.f, cy - 26.f, 80.f, 68.f));
+                painter.setPen(QPen(QColor(38, 74, 26, int(230 * fade)), 2.5));
+                painter.setBrush(flash ? QColor(236, 255, 214, int(240 * fade)) : QColor(96, 168, 58, int(240 * fade)));
+                painter.drawEllipse(QRectF(monster.x - rx, cy - ry, rx * 2.f, ry * 2.f));
+                // 体内堆积的腐蚀物与高光
+                painter.setPen(Qt::NoPen);
+                painter.setBrush(QColor(52, 40, 24, int(150 * fade)));
+                painter.drawEllipse(QRectF(monster.x - rx * 0.62f, cy + ry * 0.1f, rx * 0.7f, ry * 0.55f));
+                painter.drawEllipse(QRectF(monster.x + rx * 0.1f, cy + ry * 0.34f, rx * 0.5f, ry * 0.4f));
+                painter.setBrush(QColor(178, 220, 96, int(180 * fade)));
+                painter.drawEllipse(QRectF(monster.x - rx * 0.34f, cy - ry * 0.62f, rx * 0.34f, ry * 0.3f));
+                painter.setBrush(QColor(220, 250, 190, int(120 * fade)));
+                painter.drawEllipse(QRectF(monster.x - rx * 0.52f, cy - ry * 0.5f, rx * 0.3f, ry * 0.24f));
+                // 眼睛（被破韧时眯成一条缝）
+                const float gx = monster.facingX * 4.f;
+                const float gy = monster.facingY * 3.f;
+                painter.setBrush(QColor(16, 26, 12, int(250 * fade)));
+                painter.drawEllipse(QRectF(monster.x - 11.f + gx, cy - 6.f + gy, 7.f, broken ? 2.4f : 6.f));
+                painter.drawEllipse(QRectF(monster.x + 4.f + gx, cy - 6.f + gy, 7.f, broken ? 2.4f : 6.f));
+                if (broken) {
+                    painter.setPen(QPen(QColor(30, 46, 20, int(200 * fade)), 2));
+                    painter.drawLine(QPointF(monster.x - 14.f, cy - 2.f), QPointF(monster.x + 14.f, cy + 1.f));
+                }
+                // 冲撞蓄力：外圈鼓起一圈腐蚀光环
+                if (pool.warningT > 0.f || pool.chargeT > 0.f) {
+                    painter.setPen(QPen(QColor(210, 255, 170, int(130 * fade)), 2));
+                    painter.setBrush(Qt::NoBrush);
+                    painter.drawEllipse(QRectF(monster.x - rx - 7.f, cy - ry - 5.f, (rx + 7.f) * 2.f, (ry + 5.f) * 2.f));
+                }
+                // 本体铭牌：简单名字 + 血/护盾/韧性条，贴着本体盯着打也有得看
+                {
+                    const float barW = 104.f;
+                    const float barH = 8.f;
+                    const float barX = monster.x - barW * 0.5f;
+                    const float barY = cy - ry - 30.f;
+                    const float hpRatio = monster.maxHp <= 0.f ? 0.f : std::clamp(monster.hp / monster.maxHp, 0.f, 1.f);
+                    painter.setPen(QPen(QColor(74, 118, 56, int(230 * fade)), 1));
+                    painter.setBrush(QColor(16, 26, 14, int(225 * fade)));
+                    painter.drawRoundedRect(QRectF(barX - 10.f, barY - 16.f, barW + 20.f, 15.f), 3, 3);
+                    painter.setFont(QFont(Platform::uiFontFamily(), 9, QFont::Bold));
+                    painter.setPen(QColor(212, 240, 194, int(255 * fade)));
+                    painter.drawText(QRectF(barX - 10.f, barY - 16.f, barW + 20.f, 15.f), Qt::AlignCenter,
+                        QString("腐化史莱姆  Lv%1").arg(monster.level));
+                    painter.setPen(Qt::NoPen);
+                    painter.setBrush(QColor(0, 0, 0, int(220 * fade)));
+                    painter.drawRoundedRect(QRectF(barX - 2.f, barY - 2.f, barW + 4.f, barH + 4.f), 2, 2);
+                    painter.setBrush(QColor(26, 40, 22, int(240 * fade)));
+                    painter.drawRect(QRectF(barX, barY, barW, barH));
+                    painter.setBrush(QColor(122, 200, 72, int(255 * fade)));
+                    painter.drawRect(QRectF(barX, barY, barW * hpRatio, barH));
+                    if (monster.maxShield > 0.f) {
+                        painter.setBrush(QColor(150, 196, 230, int(235 * fade)));
+                        painter.drawRect(QRectF(barX, barY - 4.f,
+                            barW * std::clamp(monster.shield / monster.maxShield, 0.f, 1.f), 3.f));
+                    }
+                    painter.setBrush(QColor(24, 16, 8, int(240 * fade)));
+                    painter.drawRect(QRectF(barX, barY + barH + 2.f, barW, 4.f));
+                    if (broken) {
+                        painter.setBrush(QColor(90, 42, 28, int(240 * fade)));
+                        painter.drawRect(QRectF(barX, barY + barH + 2.f,
+                            barW * std::clamp(monster.stunT / 1.6f, 0.f, 1.f), 4.f));
+                    } else {
+                        painter.setBrush(QColor(196, 148, 48, int(240 * fade)));
+                        painter.drawRect(QRectF(barX, barY + barH + 2.f,
+                            barW * std::clamp(monster.poise / std::max(1.f, monster.maxPoise), 0.f, 1.f), 4.f));
+                    }
+                    painter.setFont(QFont(Platform::uiFontFamily(), 7, QFont::Bold));
+                    painter.setPen(QColor(240, 252, 232, int(255 * fade)));
+                    painter.drawText(QRectF(barX, barY - 1.f, barW, barH + 2.f), Qt::AlignCenter,
+                        QString::number(int(std::ceil(std::max(0.f, monster.hp)))));
+                }
+                lift = 8.f + leapLift;
             } else if (monster.kind == MonsterKind::Slime) {
                 anim = monster.state == ActorState::Dead ? &sprites_.slimeDeath : monster.state == ActorState::Run ? &sprites_.slimeWalk : &sprites_.slimeIdle;
             } else if (monster.kind == MonsterKind::Mushroom) {
@@ -2357,7 +2982,7 @@ void GameWidget::drawWorld(QPainter& painter) {
                 const bool flip = anim->dirs() < 4 && monster.flip;
                 anim->draw(painter, frameIndex(*anim, monster.animT, loop, 10.f), monster.x, monster.y, flip, scale, lift, tint, dir);
             }
-            if (monster.kind == MonsterKind::Eye) {
+            if (monster.kind == MonsterKind::Eye || monster.kind == MonsterKind::SlimeBoss) {
                 continue;
             }
             // 清晰血条：黑底描边 + 亮红 + 等级
@@ -2754,6 +3379,25 @@ void GameWidget::drawWorld(QPainter& painter) {
                 painter.setBrush(QColor(255, 255, 255, 230));
                 painter.drawEllipse(QRectF(bolt.x - head, by - head, head * 2.f, head * 2.f));
             }
+        } else if (bolt.corrosion) {
+            // 腐蚀水弹：绿色黏液弹，拖一条黏尾巴
+            const float speed = std::max(1.f, std::sqrt(bolt.vx * bolt.vx + bolt.vy * bolt.vy));
+            const float tail = 12.f;
+            const QPointF from(bolt.x - bolt.vx / speed * tail, bolt.y - bolt.vy / speed * tail);
+            QPen pen(QColor(126, 196, 62, 110));
+            pen.setCapStyle(Qt::RoundCap);
+            pen.setWidthF(7.f);
+            painter.setPen(pen);
+            painter.drawLine(from, QPointF(bolt.x, bolt.y));
+            pen.setColor(QColor(150, 220, 80));
+            pen.setWidthF(3.f);
+            painter.setPen(pen);
+            painter.drawLine(from, QPointF(bolt.x, bolt.y));
+            painter.setPen(Qt::NoPen);
+            painter.setBrush(QColor(196, 240, 120));
+            painter.drawEllipse(QRectF(bolt.x - 4.f, bolt.y - 4.f, 8.f, 8.f));
+            painter.setBrush(QColor(236, 255, 190, 220));
+            painter.drawEllipse(QRectF(bolt.x - 1.5f, bolt.y - 1.5f, 3.f, 3.f));
         } else {
             painter.setBrush(bolt.hostile ? QColor(126, 72, 148) : (bolt.crit ? QColor(255, 200, 60) : QColor(214, 196, 160)));
             painter.drawEllipse(QRectF(bolt.x - 3, bolt.y - 3, 6, 6));
@@ -2795,7 +3439,8 @@ void GameWidget::drawWorld(QPainter& painter) {
 }
 
 void GameWidget::drawSanBar(QPainter& painter, const QRect& view) {
-    if (!session_.sanActive()) {
+    // 理智还没开始流逝时也显示：只要被踩雷削过上限，就得让玩家立刻看见上限在掉
+    if (!session_.sanActive() && session_.sanCapCut() <= 0.1f) {
         return;
     }
     const float ratio = session_.maxSan() <= 0.f ? 0.f : std::clamp(session_.san() / session_.maxSan(), 0.f, 1.f);
@@ -2864,7 +3509,11 @@ void GameWidget::drawSanBar(QPainter& painter, const QRect& view) {
     // 标签（注明是玩家的 SAN）+ 警示 + 剩余时间（mm:ss）
     painter.setFont(QFont(Platform::uiFontFamily(), 9, QFont::Bold));
     painter.setPen(weak ? QColor(244, 130, 118) : QColor(176, 214, 226));
-    const QString label = QStringLiteral("玩家 SAN");
+    QString label = QStringLiteral("玩家 SAN");
+    if (session_.sanCapCut() > 0.1f) {
+        // 把「当前上限 / 理论上限」写出来，踩雷的代价一眼可见
+        label += QString("　上限 %1/%2").arg(int(std::lround(session_.maxSan()))).arg(int(std::lround(session_.sanCapBase())));
+    }
     painter.drawText(QRect(bx, by - 14, barW, 12), Qt::AlignLeft | Qt::AlignVCenter, label);
     const int remain = int(std::ceil(session_.sanRemaining()));
     const int mm = remain / 60, ss = remain % 60;
@@ -2875,10 +3524,10 @@ void GameWidget::drawSanBar(QPainter& painter, const QRect& view) {
     QString warn;
     QColor warnColor;
     if (weak) {
-        warn = QStringLiteral("！警告：虚弱！理智耗尽即死，不可复活，立刻击杀投影");
+        warn = QStringLiteral("！警告：虚弱！理智耗尽即死，不可复活，立刻击杀 boss");
         warnColor = QColor(242, 96, 84);
     } else if (ratio <= 0.3f) {
-        warn = QStringLiteral("！警告：理智正在快速流失，尽快击败投影");
+        warn = QStringLiteral("！警告：理智正在快速流失，尽快击败 boss");
         warnColor = QColor(238, 178, 74);
     }
     if (!warn.isEmpty()) {
@@ -2953,6 +3602,8 @@ void GameWidget::drawRadar(QPainter& painter, const QRect& view) {
             return QColor(255, 150, 60);
         case MonsterKind::Eye:
             return QColor(220, 40, 50);
+        case MonsterKind::SlimeBoss:
+            return QColor(140, 220, 80);
         default:
             return QColor(220, 80, 70);
         }
@@ -2963,6 +3614,10 @@ void GameWidget::drawRadar(QPainter& painter, const QRect& view) {
             continue;
         }
         if (monster.kind == MonsterKind::Eye && session_.ruin().arrive == 0.f) {
+            continue;
+        }
+        // 雷没排完：boss 还沉在水下，雷达上也不显示
+        if (monster.kind == MonsterKind::SlimeBoss && !session_.pool().cleared) {
             continue;
         }
         bool onRim = false;
@@ -3031,6 +3686,33 @@ void GameWidget::drawRadar(QPainter& painter, const QRect& view) {
         painter.setFont(QFont(Platform::uiFontFamily(), 8));
         painter.setPen(QColor(255, 214, 120));
         painter.drawText(QRectF(p.x() - 16.f, p.y() + 4.f, 32.f, 12.f), Qt::AlignCenter, QStringLiteral("遗迹"));
+    }
+    // 浅水 boss 房：开启寻路时也在雷达上标出方向
+    const ShallowPool& shallow = session_.pool();
+    if (player.seekOn && shallow.active && shallow.phase == ShallowPool::Phase::Live) {
+        bool onRim = false;
+        const QPointF p = toRadar(shallow.centerX(), shallow.centerY(), &onRim);
+        painter.setPen(QPen(QColor(170, 240, 150), 1.4));
+        painter.setBrush(QColor(110, 200, 80));
+        QPainterPath mark;
+        mark.moveTo(p.x(), p.y() - 5.f);
+        mark.lineTo(p.x() + 4.f, p.y());
+        mark.lineTo(p.x(), p.y() + 5.f);
+        mark.lineTo(p.x() - 4.f, p.y());
+        mark.closeSubpath();
+        painter.drawPath(mark);
+        if (onRim) {
+            const float dx = shallow.centerX() - player.x;
+            const float dy = shallow.centerY() - player.y;
+            const float d = std::sqrt(dx * dx + dy * dy);
+            if (d > 1.f) {
+                painter.setPen(QPen(QColor(160, 230, 120), 1.6));
+                painter.drawLine(p, QPointF(p.x() + dx / d * 8.f, p.y() + dy / d * 8.f));
+            }
+        }
+        painter.setFont(QFont(Platform::uiFontFamily(), 8));
+        painter.setPen(QColor(190, 244, 160));
+        painter.drawText(QRectF(p.x() - 16.f, p.y() + 4.f, 32.f, 12.f), Qt::AlignCenter, QStringLiteral("浅水"));
     }
 
     painter.setBrush(Qt::NoBrush);
@@ -3141,6 +3823,23 @@ QRect GameWidget::bossBarPlate(const QRect& view) const {
 }
 
 void GameWidget::drawBossBar(QPainter& painter, const QRect& view) {
+    // 两套 boss 房可能同时存在：玩家站在浅水区影响范围内时优先显示腐化史莱姆
+    const ShallowPool& pool = session_.pool();
+    const int ptx = tileOf(session_.player().x);
+    const int pty = tileOf(session_.player().y);
+    if (pool.active && pool.cleared && !pool.bossDead && pool.inClearZone(ptx, pty)) {
+        const Monster* slime = nullptr;
+        for (const Monster& monster : session_.monsters()) {
+            if (monster.kind == MonsterKind::SlimeBoss && monster.state != ActorState::Dead) {
+                slime = &monster;
+                break;
+            }
+        }
+        if (slime) {
+            drawSlimeBossBar(painter, view, *slime);
+            return;
+        }
+    }
     const MazeRuin& ruin = session_.ruin();
     if (!ruin.active || ruin.phase != MazeRuin::Phase::Live || ruin.bossDead) {
         return;
@@ -3252,6 +3951,108 @@ void GameWidget::drawBossBar(QPainter& painter, const QRect& view) {
     }
 }
 
+void GameWidget::drawSlimeBossBar(QPainter& painter, const QRect& view, const Monster& boss) {
+    const ShallowPool& pool = session_.pool();
+    const QRect plate = bossBarPlate(view);
+    painter.setPen(QPen(QColor(74, 118, 56), 1));
+    painter.setBrush(QColor(20, 30, 18, 235));
+    painter.drawRect(plate);
+    painter.setPen(Qt::NoPen);
+    painter.setBrush(QColor(0, 0, 0, 90));
+    painter.drawRect(QRect(plate.x(), plate.y(), plate.width(), 8));
+    painter.drawRect(QRect(plate.x(), plate.bottom() - 7, plate.width(), 8));
+
+    painter.setFont(QFont(Platform::uiFontFamily(), 8, QFont::Bold));
+    painter.setPen(QColor(150, 220, 120));
+    painter.drawText(QRect(plate.x() + 8, plate.y() + 3, 36, 14), Qt::AlignVCenter | Qt::AlignLeft, QStringLiteral("BOSS"));
+    painter.setFont(QFont(Platform::uiFontFamily(), 11, QFont::Bold));
+    painter.setPen(QColor(214, 240, 198));
+    const QString bossName = QStringLiteral("巨型腐化史莱姆");
+    painter.drawText(QRect(plate.x() + 44, plate.y() + 2, plate.width() - 150, 16), Qt::AlignVCenter | Qt::AlignLeft, bossName);
+    const int nameW = painter.fontMetrics().horizontalAdvance(bossName);
+    const QRect tag(plate.x() + 48 + nameW, plate.y() + 3, 34, 14);
+    painter.setPen(QPen(QColor(38, 74, 32), 1));
+    painter.setBrush(QColor(8, 18, 8, 230));
+    painter.drawRoundedRect(tag, 2, 2);
+    painter.setFont(QFont(Platform::uiFontFamily(), 8, QFont::Bold));
+    painter.setPen(QColor(130, 190, 106));
+    painter.drawText(tag, Qt::AlignCenter, QStringLiteral("腐化"));
+    painter.setPen(QColor(104, 128, 96));
+    painter.drawText(QRect(plate.x() + 8, plate.y() + 2, plate.width() - 16, 16), Qt::AlignVCenter | Qt::AlignRight,
+        QString("Lv%1").arg(boss.level));
+    const int hpShown = boss.hp <= 0.f ? 0 : int(std::ceil(boss.hp));
+
+    const float dist = std::hypot(session_.player().x - boss.x, session_.player().y - boss.y);
+    QString status;
+    if (pool.arrive > 0.f) {
+        status = QStringLiteral("状态  正在从水中浮出");
+    } else if (boss.stunT > 0.f) {
+        status = QStringLiteral("状态  韧性崩溃，攻击中断");
+    } else if (pool.chargeT > 0.f) {
+        status = QStringLiteral("状态  冲撞中");
+    } else if (pool.warningT > 0.f) {
+        status = QStringLiteral("状态  蓄力冲撞");
+    } else if (pool.leapT > 0.f) {
+        status = QStringLiteral("状态  弹跳砸击");
+    } else if (session_.sanCapCut() > 0.1f) {
+        status = QStringLiteral("状态  本场理智上限 -%1（踩雷 %2 次）")
+                     .arg(int(session_.sanCapCut()))
+                     .arg(int(session_.sanCapCut() / 10.f));
+    } else if (dist > 320.f) {
+        status = QStringLiteral("状态  盘踞浅水区，尚未锁定");
+    } else {
+        switch (pool.attackStep % 3) {
+        case 0:
+            status = QStringLiteral("状态  下一击是冲撞");
+            break;
+        case 1:
+            status = QStringLiteral("状态  下一击是弹跳砸击");
+            break;
+        default:
+            status = QStringLiteral("状态  下一击是腐蚀水弹");
+            break;
+        }
+    }
+    painter.setPen(QColor(84, 110, 78));
+    painter.drawText(QRect(plate.x() + 8, plate.y() + 18, plate.width() - 16, 14), Qt::AlignVCenter | Qt::AlignLeft, status);
+
+    const int trackX = plate.x() + 8;
+    const int trackW = plate.width() - 16;
+    const int trackY = plate.y() + 36;
+    const float hpRatio = boss.maxHp <= 0.f ? 0.f : std::clamp(boss.hp / boss.maxHp, 0.f, 1.f);
+    painter.setPen(Qt::NoPen);
+    painter.setBrush(QColor(26, 40, 22));
+    painter.drawRect(QRect(trackX, trackY, trackW, 8));
+    painter.setBrush(QColor(122, 200, 72));
+    painter.drawRect(QRect(trackX, trackY, int(trackW * hpRatio), 8));
+    painter.setPen(QColor(240, 252, 232));
+    painter.setFont(QFont(Platform::uiFontFamily(), 7, QFont::Bold));
+    painter.drawText(QRect(trackX, trackY - 1, trackW, 10), Qt::AlignCenter,
+        QString("%1 / %2").arg(hpShown).arg(int(std::lround(boss.maxHp))));
+    painter.setPen(Qt::NoPen);
+    if (boss.maxShield > 0.f) {
+        const float shieldRatio = std::clamp(boss.shield / boss.maxShield, 0.f, 1.f);
+        painter.setBrush(QColor(18, 16, 20));
+        painter.drawRect(QRect(trackX, trackY + 9, trackW, 3));
+        painter.setBrush(QColor(58, 66, 76));
+        painter.drawRect(QRect(trackX, trackY + 9, int(trackW * shieldRatio), 3));
+    }
+    const int poiseY = trackY + 14;
+    painter.setBrush(QColor(20, 14, 8));
+    painter.drawRect(QRect(trackX, poiseY, trackW, 5));
+    if (boss.stunT > 0.f) {
+        painter.setBrush(QColor(110, 48, 28));
+        painter.drawRect(QRect(trackX, poiseY, int(trackW * std::clamp(boss.stunT / 1.6f, 0.f, 1.f)), 5));
+        painter.setPen(QColor(210, 160, 120));
+        painter.setFont(QFont(Platform::uiFontFamily(), 7, QFont::Bold));
+        painter.drawText(QRect(trackX, poiseY - 1, trackW, 7), Qt::AlignCenter, QStringLiteral("韧性崩溃"));
+    } else {
+        const float poiseRatio = boss.maxPoise <= 0.f ? 0.f : std::clamp(boss.poise / boss.maxPoise, 0.f, 1.f);
+        painter.setBrush(QColor(168, 124, 42));
+        painter.drawRect(QRect(trackX, poiseY, int(trackW * poiseRatio), 5));
+    }
+}
+
 void GameWidget::paintEvent(QPaintEvent* event) {
     Q_UNUSED(event);
     QPainter painter(this);
@@ -3333,7 +4134,10 @@ void GameWidget::paintEvent(QPaintEvent* event) {
         painter.drawText(QRect(originX + 20, originY + 138 + index * 13, 200, 14), Qt::AlignLeft | Qt::AlignVCenter,
             QString("%1  %2 / %3").arg(name).arg(int(std::min(current, need))).arg(int(need)));
     };
-    painter.fillRect(QRect(originX + 14, originY + 136, 210, 84), QColor(12, 10, 9, 190));
+    // 史莱姆之躯多一行「暴食」进度，面板跟着长高
+    const bool showGluttony = session_.slimeBody();
+    const int talentRows = showGluttony ? 7 : 6;
+    painter.fillRect(QRect(originX + 14, originY + 136, 210, 8 + talentRows * 13), QColor(12, 10, 9, 190));
     painter.setPen(QColor(168, 148, 128));
     talentLine(0, "重手", player.damageDealt, 250.f);
     talentLine(1, "远行", player.distanceMoved, 900.f);
@@ -3341,12 +4145,96 @@ void GameWidget::paintEvent(QPaintEvent* event) {
     talentLine(3, "熟练", float(player.skillCasts), 12.f);
     talentLine(4, "指引", float(player.worldKills), 20.f);
     talentLine(5, "以小博大", float(player.underdogKills), 10.f);
+    if (showGluttony) {
+        talentLine(6, "暴食", float(session_.devourCount()), float(kGluttonyDevours));
+    }
+    int hudY = originY + 136 + 8 + talentRows * 13 + 2;
+    // 史莱姆之躯的形态面板：当前外形、加成与拟态技能冷却
+    if (session_.slimeBody()) {
+        const MimicText text = mimicText(session_.mimicForm());
+        const int panelX = originX + 14;
+        const int panelW = 210;
+        const int panelH = 60;
+        if (hudY + panelH <= originY + viewH - 56) {
+            painter.setPen(Qt::NoPen);
+            painter.setBrush(QColor(12, 22, 12, 200));
+            painter.drawRect(QRect(panelX, hudY, panelW, panelH));
+            painter.setBrush(Qt::NoBrush);
+            painter.setPen(QPen(QColor(74, 118, 56), 1));
+            painter.drawRect(QRect(panelX, hudY, panelW - 1, panelH - 1));
+            painter.setFont(QFont(Platform::uiFontFamily(), 9, QFont::Bold));
+            painter.setPen(QColor(196, 236, 160));
+            painter.drawText(QRect(panelX + 6, hudY + 2, panelW - 12, 14), Qt::AlignLeft | Qt::AlignVCenter,
+                QString("史莱姆之躯　形态：%1").arg(text.name));
+            painter.setFont(QFont(Platform::uiFontFamily(), 7));
+            painter.setPen(QColor(168, 190, 148));
+            painter.drawText(QRect(panelX + 6, hudY + 17, panelW - 12, 12), Qt::AlignLeft | Qt::AlignVCenter,
+                QString("加成：%1").arg(text.bonus));
+            const float cdMax = session_.mimicSkillCooldownMax();
+            const float cd = session_.mimicSkillCooldown();
+            painter.drawText(QRect(panelX + 6, hudY + 29, panelW - 12, 12), Qt::AlignLeft | Qt::AlignVCenter,
+                cdMax <= 0.f
+                    ? QStringLiteral("左 Ctrl：无（本形态纯外观）")
+                    : QString("左 Ctrl：%1　%2").arg(text.skillName,
+                          cd > 0.05f ? QString("%1s").arg(cd, 0, 'f', 1) : QStringLiteral("就绪")));
+            painter.setPen(QColor(210, 190, 150));
+            painter.drawText(QRect(panelX + 6, hudY + 41, panelW - 12, 12), Qt::AlignLeft | Qt::AlignVCenter,
+                QString("T：拟态图鉴（时停）　已吞噬 %1 只").arg(session_.devourCount()));
+        }
+        hudY += panelH + 4;
+    }
+    // 浅水区排雷：人在场地里时，把玩法提示挂在天赋进度 HUD 的正下方
+    if (const ShallowPool& pool = session_.pool();
+        pool.active && !pool.bossDead && !pool.cleared
+        && pool.inClearZone(tileOf(player.x), tileOf(player.y))) {
+        const int panelX = originX + 14;
+        const int panelY = hudY;
+        const int panelW = 210;
+        const int panelH = 74;
+        // 窗口太小（缩放 1 倍）时下方就是技能栏，宁可不画也不叠字
+        if (panelY + panelH <= originY + viewH - 56) {
+            painter.setPen(Qt::NoPen);
+            painter.setBrush(QColor(12, 10, 9, 200));
+            painter.drawRect(QRect(panelX, panelY, panelW, panelH));
+            painter.setBrush(Qt::NoBrush);
+            painter.setPen(QPen(QColor(74, 118, 56), 1));
+            painter.drawRect(QRect(panelX, panelY, panelW - 1, panelH - 1));
+            painter.setFont(QFont(Platform::uiFontFamily(), 9, QFont::Bold));
+            painter.setPen(QColor(196, 236, 160));
+            painter.drawText(QRect(panelX + 6, panelY + 2, panelW - 12, 14), Qt::AlignLeft | Qt::AlignVCenter,
+                QStringLiteral("玩法　浅水区·排雷"));
+            painter.setFont(QFont(Platform::uiFontFamily(), 7));
+            painter.setPen(QColor(168, 148, 128));
+            const QString lines[4] = {
+                QStringLiteral("在棋盘格上跳跃即可揭示方块"),
+                QStringLiteral("数字＝相邻雷数，0 格自动连锁翻开"),
+                QStringLiteral("踩雷：腐蚀伤害＋本场 SAN 上限 -10"),
+                QStringLiteral("排完安全格或踩完所有雷，Boss 浮出"),
+            };
+            for (int i = 0; i < 4; ++i) {
+                painter.drawText(QRect(panelX + 6, panelY + 17 + i * 12, panelW - 12, 12),
+                    Qt::AlignLeft | Qt::AlignVCenter, lines[i]);
+            }
+            painter.setPen(QColor(210, 190, 150));
+            painter.drawText(QRect(panelX + 6, panelY + 17 + 48, panelW - 12, 12), Qt::AlignLeft | Qt::AlignVCenter,
+                QString("进度　安全格 %1/%2　地雷 %3/%4")
+                    .arg(pool.revealedCount())
+                    .arg(pool.safeTotal())
+                    .arg(pool.triggeredCount())
+                    .arg(ShallowPool::kMines));
+        }
+    }
     painter.setPen(QColor(228, 212, 188));
     // 意识回归符咒按获取个数挂在 SCORE 旁边
     const int charms = session_.talismanCount();
-    const QString scoreText = charms > 0
-        ? QString("符咒 x%1   SCORE %2").arg(charms).arg(session_.score())
-        : QString("SCORE %1").arg(session_.score());
+    const int cores = session_.slimeCoreCount();
+    QString scoreText = QString("SCORE %1").arg(session_.score());
+    if (cores > 0) {
+        scoreText = QString("核心 x%1   ").arg(cores) + scoreText;
+    }
+    if (charms > 0) {
+        scoreText = QString("符咒 x%1   ").arg(charms) + scoreText;
+    }
     painter.drawText(QRect(originX, originY + 10, viewW, 22), Qt::AlignHCenter | Qt::AlignTop, formatTime(session_.time()));
     if (touchUi_) {
         // 右上角留给「索敌 / 说明 / 暂停」按钮
@@ -3469,6 +4357,26 @@ void GameWidget::paintEvent(QPaintEvent* event) {
     }
     if (player.talentGuide) {
         pushSkillChip("G", kSkillSeek, 0.f);
+    }
+    if (session_.slimeBody()) {
+        // 史莱姆之躯：拟态图鉴（T）与形态技能（左 Ctrl）
+        const float cdMax = session_.mimicSkillCooldownMax();
+        if (cdMax > 0.f) {
+            Chip mimic;
+            mimic.key = "Ctrl";
+            mimic.name = mimicText(player.mimic).skillName;
+            mimic.remain = std::max(0.f, session_.mimicSkillCooldown());
+            mimic.maxCd = cdMax;
+            mimic.sub = mimic.remain > 0.05f ? QString("%1s").arg(mimic.remain, 0, 'f', 1) : QStringLiteral("就绪");
+            chips.push_back(mimic);
+        }
+        Chip tome;
+        tome.key = "T";
+        tome.name = QStringLiteral("拟态");
+        tome.remain = 0.f;
+        tome.maxCd = 0.f;
+        tome.sub = mimicText(player.mimic).name;
+        chips.push_back(tome);
     }
     if (touchUi_) {
         chips.clear();

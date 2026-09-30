@@ -29,6 +29,64 @@ bool TileMap::inRuin(int x, int y) const {
     return lx >= 0 && ly >= 0 && lx < ruinW_ && ly < ruinH_;
 }
 
+void TileMap::setShallowPool(int cx, int cy, int radius, int margin, int boardX, int boardY, int boardSize, int boardMargin) {
+    shallowActive_ = radius > 0;
+    shallowX_ = cx;
+    shallowY_ = cy;
+    shallowR_ = radius;
+    shallowMargin_ = std::max(0, margin);
+    boardX_ = boardX;
+    boardY_ = boardY;
+    boardSize_ = boardSize;
+    boardMargin_ = std::max(0, boardMargin);
+}
+
+void TileMap::clearShallowPool() {
+    shallowActive_ = false;
+    shallowR_ = 0;
+    shallowMargin_ = 0;
+    boardSize_ = 0;
+    boardMargin_ = 0;
+}
+
+bool TileMap::inShallowPool(int x, int y) const {
+    if (!shallowActive_) {
+        return false;
+    }
+    const int dx = x - shallowX_;
+    const int dy = y - shallowY_;
+    return dx * dx + dy * dy <= shallowR_ * shallowR_;
+}
+
+bool TileMap::inShallowClearZone(int x, int y) const {
+    if (!shallowActive_) {
+        return false;
+    }
+    const int dx = x - shallowX_;
+    const int dy = y - shallowY_;
+    const int r = shallowR_ + shallowMargin_;
+    if (dx * dx + dy * dy <= r * r) {
+        return true;
+    }
+    // 棋盘整块矩形也要清干净，树/岩石的贴图会向上溢出十几像素盖住格子数字
+    if (boardSize_ > 0) {
+        if (x >= boardX_ - boardMargin_ && y >= boardY_ - boardMargin_
+            && x < boardX_ + boardSize_ + boardMargin_ && y < boardY_ + boardSize_ + boardMargin_) {
+            return true;
+        }
+    }
+    return false;
+}
+
+bool TileMap::onShallowBoard(int x, int y) const {
+    if (!shallowActive_ || boardSize_ <= 0) {
+        return false;
+    }
+    const int lx = x - boardX_;
+    const int ly = y - boardY_;
+    return lx >= 0 && ly >= 0 && lx < boardSize_ && ly < boardSize_;
+}
+
 void TileMap::scorchAt(int x, int y) {
     const int64_t key = tileKey(x, y);
     if (scorch_.insert(key).second) {
@@ -81,6 +139,23 @@ Tile TileMap::at(int x, int y) const {
         }
         return Tile::MazeFloor;
     }
+    // 浅水 boss 房：圆形水面盖住原地形，棋盘格强制成可走地面
+    if (inShallowPool(x, y)) {
+        return Tile::Shallow;
+    }
+    if (onShallowBoard(x, y)) {
+        return Tile::Grass;
+    }
+    // 先算出原本该是什么地形，再按浅水区清空带决定要不要把障碍物抹平
+    const Tile base = baseTile(x, y);
+    if (inShallowClearZone(x, y) && (base == Tile::Rock || base == Tile::Bush || base == Tile::Water)) {
+        return Tile::Grass;
+    }
+    return base;
+}
+
+// 不含任何 boss 房覆盖层的地形：烧焦 → 迷宫清空带 → 程序化地表
+Tile TileMap::baseTile(int x, int y) const {
     if (scorched(x, y)) {
         return Tile::Dirt;
     }
@@ -122,6 +197,10 @@ bool TileMap::blocks(int x, int y, int pass) const {
     // 迷宫墙任何通行等级都过不去，包括跳跃、飞行和飞行怪。
     if (tile == Tile::MazeWall) {
         return true;
+    }
+    // 浅水与平地通行完全一致，只靠 Session 侧的速度系数略微减速
+    if (tile == Tile::Shallow) {
+        return false;
     }
     if (pass >= 2) {
         return false;

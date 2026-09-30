@@ -7,6 +7,7 @@
 #include <QColor>
 #include <QElapsedTimer>
 #include <QHash>
+#include <QIcon>
 #include <QJsonObject>
 #include <QPointer>
 #include <QPointF>
@@ -18,6 +19,7 @@ class QPainter;
 class QAbstractButton;
 class QCheckBox;
 class QLabel;
+class QPushButton;
 class QScrollArea;
 class QSlider;
 class QTimer;
@@ -46,7 +48,25 @@ protected:
     void resizeEvent(QResizeEvent* event) override;
 
 private:
-    enum class TouchControl { None, Stick, Attack, Dodge, Jump, Guard, Heal, SkillR, SkillF, SkillC, SkillV, Guide, Pause, AutoAim, Seek };
+    enum class TouchControl {
+        None,
+        Stick,
+        Attack,
+        Dodge,
+        Jump,
+        Guard,
+        Heal,
+        SkillR,
+        SkillF,
+        SkillC,
+        SkillV,
+        Guide,
+        Pause,
+        AutoAim,
+        Seek,
+        Mimic,
+        MimicSkill
+    };
     struct TouchButton {
         TouchControl control = TouchControl::None;
         QPointF center;
@@ -64,12 +84,18 @@ private:
     void showVoidPrompt();
     void showRevivePrompt();
     void commitEnd();
+    // 史莱姆之躯的拟态图鉴：T 键 / 触屏按钮开关，打开时时停
+    void toggleMimicPanel();
+    void closeMimicPanel();
+    void refreshMimicPanel();
     void layoutOverlays();
     void syncKey(int key, bool down);
     QRect viewRect() const;
     QPointF mouseWorld() const;
     void drawWorld(QPainter& painter);
     void drawBossBar(QPainter& painter, const QRect& view);
+    // 浅水 boss 房的血条：与克苏鲁之眼共用底板几何，配色换成腐蚀绿
+    void drawSlimeBossBar(QPainter& painter, const QRect& view, const Monster& boss);
     // boss 血条的底板几何：drawBossBar 与 drawSanBar 共用，保证理智条与血条严格对齐
     QRect bossBarPlate(const QRect& view) const;
     // 理智（SAN）条：boss 激活后显示，距耗尽时间 / 虚弱提示
@@ -101,6 +127,10 @@ private:
     void drawParticles(QPainter& painter);
     float vfxRand();
     void drawShadow(QPainter& painter, float x, float y);
+    // 拟态成 boss 时的本体（比原 boss 小一圈、不带血条铭牌）
+    void drawBossMimic(QPainter& painter, MimicForm form, float x, float y, float animT, float scale, bool hurt);
+    // 图鉴按钮上的小图标
+    QIcon mimicIcon(MimicForm form);
     void drawAnim(QPainter& painter, const SpriteAnim& anim, ActorState state, float animT, float x, float y, bool flip, bool moving);
     static int frameIndex(const SpriteAnim& anim, float time, bool loop, float fps);
 
@@ -165,4 +195,9 @@ private:
     QWidget* voidPanel_ = nullptr;
     QWidget* revivePanel_ = nullptr;
     QLabel* reviveText_ = nullptr;
+    QPushButton* reviveCore_ = nullptr;
+    QWidget* mimicPanel_ = nullptr;
+    QLabel* mimicLabel_ = nullptr;
+    QVector<QPushButton*> mimicButtons_;
+    bool mimicOpen_ = false;
 };

@@ -38,6 +38,24 @@ inline int facingDir(float fx, float fy, int dirs = 4) {
     return fy < 0.f ? 3 : 0;
 }
 
+// 史莱姆之躯能幻化的外形：默认是自己的尸体（原本的躯体），其余是已吞噬的怪物
+enum class MimicForm : int {
+    Hero = 0,
+    Slime,
+    Skeleton,
+    Mushroom,
+    Flyer,
+    Caster,
+    Killbot,
+    Eye,
+    SlimeBoss,
+    Count,
+};
+
+inline uint32_t mimicBit(MimicForm form) {
+    return 1u << uint32_t(form);
+}
+
 struct InputState {
     bool w = false;
     bool a = false;
@@ -60,6 +78,8 @@ struct InputState {
     bool vEdge = false;
     bool bEdge = false;
     bool gEdge = false;
+    // 史莱姆之躯的拟态技能（左 Ctrl / 触屏按钮）
+    bool ctrlEdge = false;
     // 虚拟摇杆：方向 × 力度，长度 0~1
     float moveX = 0.f;
     float moveY = 0.f;
@@ -79,6 +99,7 @@ struct InputState {
         vEdge = false;
         bEdge = false;
         gEdge = false;
+        ctrlEdge = false;
     }
 
     void clearHeld() {

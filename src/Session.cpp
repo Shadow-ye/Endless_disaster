@@ -10,6 +10,61 @@ namespace {
 constexpr float kPlayerRadius = 7.f;
 constexpr float kMonsterRadius = 7.f;
 
+// 受击半径：玩家攻击判定用的体积。小怪沿用原来的 14；
+// boss 体型大得多，判定也跟着放大，不然大块头只有正中心那一点才吃得到伤害。
+constexpr float kMonsterHitRadius = 14.f;
+
+float monsterHitRadius(const Monster& monster) {
+    switch (monster.kind) {
+    case MonsterKind::Eye:
+        return 36.f;
+    case MonsterKind::SlimeBoss:
+        return 30.f;
+    default:
+        return kMonsterHitRadius;
+    }
+}
+
+// 把写死的「中心距」判定换算成「到怪物表面」的判定：
+// 小怪算出来与原值一模一样（不会改动既有平衡），boss 因为体积大而明显更好命中。
+float reachWithRadius(float radius, const Monster& monster) {
+    return radius - kMonsterHitRadius + monsterHitRadius(monster);
+}
+
+// 巨型腐化史莱姆：体型比小怪大一圈，攻击节奏按下面这些时长走。
+// 预警时长 / 攻击范围与 ShallowPool 里的常量共用，地上画出的指示就是真正的判定范围。
+constexpr float kSlimeBossRadius = ShallowPool::kBossRadius;
+constexpr float kSlimeBossVision = 340.f;
+constexpr float kSlimeChargeWarn = ShallowPool::kWarnCharge;
+constexpr float kSlimeChargeTime = ShallowPool::kChargeTime;
+constexpr float kSlimeChargeSpeed = ShallowPool::kChargeSpeed;
+constexpr float kSlimeLeapWarn = ShallowPool::kWarnLeap;
+constexpr float kSlimeLeapDamage = 18.f;
+constexpr float kSlimeLeapRadius = ShallowPool::kLeapRadius;
+constexpr float kSlimeLeapMaxRange = 260.f;
+constexpr float kSlimeShootWarn = ShallowPool::kWarnShoot;
+// 腐蚀粘液落痕间隔（秒）与单滴半径
+constexpr float kSlimeTrailGap = 0.2f;
+constexpr float kSlimeTrailRadius = 15.f;
+// 腐蚀粘液对玩家的持续伤害：每 tick 扣这么多，tick 间隔 0.5 秒
+constexpr float kCorrosionTickGap = 0.5f;
+constexpr float kCorrosionTickDamage = 1.5f;
+// 踩雷：单次腐蚀伤害与削减的理智上限
+constexpr float kMineDamage = 14.f;
+constexpr float kMineSanCut = 10.f;
+// 理智上限被削到原上限的这个比例就不再下降
+constexpr float kSanCutFloorRatio = 0.3f;
+
+// 史莱姆之躯：受到伤害的倍率，以及「恢复」按最大生命/体力的百分比
+constexpr float kSlimeBodyDamageTaken = 0.9f;
+constexpr float kSlimeBodyHealRatio = 0.2f;
+// 拟态技能：蘑菇跳砸的落点半径、飞虫振翅的滞空时间
+constexpr float kMimicSlamRadius = 56.f;
+constexpr float kMimicSlamTime = 0.55f;
+constexpr float kMimicFlyTime = 2.5f;
+constexpr float kMimicChargeTime = 0.36f;
+constexpr float kMimicChargeSpeed = 360.f;
+
 float lengthOf(float x, float y) {
     return std::sqrt(x * x + y * y);
 }
@@ -61,6 +116,12 @@ void setupMonster(Monster& monster, int level) {
         monster.maxShield = 48.f;
         monster.maxPoise = 36.f;
         break;
+    case MonsterKind::SlimeBoss:
+        // 等级固定为「玩家等级 + 5」，升级带来的成长已经够用，基础值放低一点免得变成血牛
+        monster.maxHp = 420.f;
+        monster.maxShield = 30.f;
+        monster.maxPoise = 36.f;
+        break;
     case MonsterKind::Slime:
         monster.maxHp = 16.f;
         monster.maxShield = 0.f;
@@ -96,6 +157,9 @@ int scoreFor(MonsterKind kind, int level) {
         break;
     case MonsterKind::Eye:
         base = 180;
+        break;
+    case MonsterKind::SlimeBoss:
+        base = 220;
         break;
     case MonsterKind::Slime:
         base = 10;
@@ -320,6 +384,9 @@ void Session::newGame(uint32_t seed, uint32_t runId, HeroClass hero, int skillD,
     pathTileX_ = tileOf(player_.x);
     pathTileY_ = tileOf(player_.y);
     ruin_.clear();
+    pool_.clear();
+    slime_.clear();
+    map_.clearShallowPool();
     shakeT_ = 0.f;
     plazaRed_ = 0.f;
     voidPrompt_ = false;
@@ -327,6 +394,9 @@ void Session::newGame(uint32_t seed, uint32_t runId, HeroClass hero, int skillD,
     wallStrikeId_ = -1;
     sanActive_ = false;
     sanKill_ = false;
+    // 玩家理论理智上限：踩雷削减只作用在本场浅水 boss 战，还原时回到这里
+    sanCapBase_ = player_.maxSan;
+    corrosionTick_ = 0.f;
     reviveState_ = ReviveState::None;
     revivePrompt_ = false;
     talismanBonus_ = 0;
@@ -394,6 +464,21 @@ bool Session::loadFrom(const QJsonObject& game) {
     player_.critBonus = p.value("critBonus").toInt(player_.critBonus);
     player_.seekOn = p.value("seekOn").toBool(false);
     player_.cursed = p.value("cursed").toBool(false);
+    // 史莱姆之躯与拟态：旧存档没有这些字段，按未转化处理
+    player_.slimeBody = p.value("slimeBody").toBool(false);
+    if (player_.slimeBody) {
+        const int mimic = std::clamp(p.value("mimic").toInt(int(MimicForm::Slime)), 0, int(MimicForm::Count) - 1);
+        player_.mimic = MimicForm(mimic);
+        player_.devouredMask = uint32_t(p.value("devoured").toDouble(double(mimicBit(MimicForm::Hero))));
+        // 存档里若指到没吞噬过的形态，退回默认的史莱姆形象
+        if (player_.mimic != MimicForm::Hero && (player_.devouredMask & mimicBit(player_.mimic)) == 0u) {
+            player_.mimic = MimicForm::Slime;
+        }
+    }
+    player_.devourCount = std::max(0, p.value("devourCount").toInt());
+    player_.talentGluttony = p.value("talentGluttony").toBool(false);
+    // 自己的尸体默认已被吞噬：任何情况下这一位都在
+    player_.devouredMask |= mimicBit(MimicForm::Hero);
     eliteCd_ = float(p.value("eliteCd").toDouble(0.0));
     if (p.contains("baseMaxHp")) {
         baseMaxHp_ = float(p.value("baseMaxHp").toDouble());
@@ -439,7 +524,8 @@ bool Session::loadFrom(const QJsonObject& game) {
             monster.kind = MonsterKind::Caster;
         } else if (kind == 5) {
             monster.kind = MonsterKind::Killbot;
-        } else if (kind == 6) {
+        } else if (kind == 6 || kind == 7) {
+            // 6 = 克苏鲁之眼、7 = 巨型腐化史莱姆：两个 boss 都由各自的 boss 房重建
             continue;
         }
         setupMonster(monster, std::max(1, m.value("level").toInt(1)));
@@ -459,6 +545,7 @@ bool Session::loadFrom(const QJsonObject& game) {
     pathTileX_ = tileOf(player_.x);
     pathTileY_ = tileOf(player_.y);
     restoreRuin(game);
+    restorePool(game);
     eyeDefeats_ = std::max(0, game.value("eyeDefeats").toInt());
     player_.san = float(game.value("san").toDouble(player_.maxSan));
     player_.sanWeak = player_.san <= player_.maxSan * 0.1f && player_.san > 0.f;
@@ -537,6 +624,15 @@ QJsonObject Session::toJson() const {
     if (player_.cursed) {
         p.insert("cursed", true);
     }
+    if (player_.slimeBody) {
+        p.insert("slimeBody", true);
+        p.insert("mimic", int(player_.mimic));
+        p.insert("devoured", double(player_.devouredMask));
+    }
+    p.insert("devourCount", player_.devourCount);
+    if (player_.talentGluttony) {
+        p.insert("talentGluttony", true);
+    }
     p.insert("eliteCd", eliteCd_);
     game.insert("player", p);
     auto writeItem = [](const Item& item) {
@@ -575,7 +671,7 @@ QJsonObject Session::toJson() const {
             kind = 4;
         } else if (m.kind == MonsterKind::Killbot) {
             kind = 5;
-        } else if (m.kind == MonsterKind::Eye) {
+        } else if (m.kind == MonsterKind::Eye || m.kind == MonsterKind::SlimeBoss) {
             continue;
         }
         obj.insert("kind", kind);
@@ -616,6 +712,43 @@ QJsonObject Session::toJson() const {
         }
         game.insert("ruin", ruin);
     }
+    if (pool_.phase != ShallowPool::Phase::None) {
+        QJsonObject pool;
+        pool.insert("phase", int(pool_.phase));
+        pool.insert("cx", pool_.cx);
+        pool.insert("cy", pool_.cy);
+        pool.insert("radius", pool_.radius);
+        pool.insert("bx", pool_.boardX);
+        pool.insert("by", pool_.boardY);
+        pool.insert("seed", double(pool_.seed));
+        pool.insert("bossDead", pool_.bossDead);
+        pool.insert("entered", pool_.entered);
+        pool.insert("cleared", pool_.cleared);
+        pool.insert("arrive", pool_.arrive);
+        pool.insert("cooldown", pool_.cooldown);
+        pool.insert("sanCut", pool_.sanCut);
+        // 雷位也要存：开局第一格安全会把踩到的雷挪走，光靠种子重现不出来
+        pool.insert("mines", double(pool_.mineMask));
+        pool.insert("revealed", double(pool_.revealedMask));
+        pool.insert("triggered", double(pool_.triggeredMask));
+        for (const Monster& m : monsters_) {
+            if (m.kind == MonsterKind::SlimeBoss && m.state != ActorState::Dead) {
+                pool.insert("bossHp", m.hp);
+                pool.insert("bossShield", m.shield);
+                pool.insert("bossLevel", m.level);
+                break;
+            }
+        }
+        game.insert("pool", pool);
+    }
+    if (!slime_.empty()) {
+        QJsonArray spots;
+        for (const SlimeSpot& spot : slime_) {
+            spots.append(double(spot.x));
+            spots.append(double(spot.y));
+        }
+        game.insert("slime", spots);
+    }
     return game;
 }
 
@@ -633,16 +766,25 @@ void Session::finishRun(EndReason reason) {
     paused_ = false;
 }
 
+// 本局结束：没用掉的符咒与史莱姆核心都折算成积分
 void Session::convertTalismansToScore() {
+    int bonus = 0;
     const int owned = talismanCount();
-    if (owned <= 0) {
+    if (owned > 0) {
+        bag_.erase(std::remove_if(bag_.begin(), bag_.end(), [](const Item& item) { return item.kind == kItemReturnTalisman; }), bag_.end());
+        bonus += owned * kTalismanScore;
+    }
+    const int cores = slimeCoreCount();
+    if (cores > 0) {
+        bag_.erase(std::remove_if(bag_.begin(), bag_.end(), [](const Item& item) { return item.kind == kItemSlimeCore; }), bag_.end());
+        bonus += cores * kSlimeCoreScore;
+    }
+    if (bonus <= 0) {
         return;
     }
-    bag_.erase(std::remove_if(bag_.begin(), bag_.end(), [](const Item& item) { return item.kind == kItemReturnTalisman; }), bag_.end());
-    const int bonus = owned * kTalismanScore;
     score_ += bonus;
     talismanBonus_ += bonus;
-    note(QString("%1 x%2 折算 %3 积分").arg(itemText(kItemReturnTalisman).name).arg(owned).arg(bonus));
+    note(QString("符咒 / 核心折算 %1 积分").arg(bonus));
 }
 
 void Session::addItem(int kind, int count) {
@@ -746,7 +888,8 @@ void Session::revivePlayer() {
                      }),
         bolts_.end());
     for (Monster& monster : monsters_) {
-        if (monster.state == ActorState::Dead || monster.kind == MonsterKind::Eye) {
+        if (monster.state == ActorState::Dead || monster.kind == MonsterKind::Eye
+            || monster.kind == MonsterKind::SlimeBoss) {
             continue;
         }
         if (lengthOf(monster.x - player_.x, monster.y - player_.y) > 220.f) {
@@ -779,9 +922,247 @@ void Session::revivePlayer() {
         eliteCd_ = 22.f + float(nextRand() % 22u);
     }
     note("意识回归　诅咒：存在被克苏鲁余光注意！");
+    // 复活也接上「继续前进」配音
+    Audio::instance().playContinueVoice(femaleHero(player_.hero));
+}
+
+// ---------------------------------------------------------------------------
+// 史莱姆核心 → 史莱姆之躯 → 拟态
+// ---------------------------------------------------------------------------
+
+bool Session::acceptReviveWithSlimeCore() {
+    if (reviveState_ != ReviveState::Offered || !canUseSlimeCore()) {
+        return false;
+    }
+    consumeItem(kItemReturnTalisman, 1);
+    consumeItem(kItemSlimeCore, 1);
+    reviveState_ = ReviveState::None;
+    revivePrompt_ = false;
+    paused_ = false;
+    // 先转化再复活：转化会改最大生命，让 25% 复血按新上限算
+    transformIntoSlimeBody();
+    revivePlayer();
+    note("史莱姆核心生效　转化为史莱姆之躯");
+    return true;
+}
+
+void Session::transformIntoSlimeBody() {
+    player_.slimeBody = true;
+    // 自己的尸体默认已经被吞噬，所以「原本的躯体」一开始就能选；复活后默认史莱姆形象
+    player_.devouredMask |= mimicBit(MimicForm::Hero);
+    player_.mimic = MimicForm::Slime;
+    player_.cdMimicSkill = 0.f;
+    player_.mimicFlyT = 0.f;
+    player_.mimicSlamT = 0.f;
+    player_.mimicChargeT = 0.f;
+    recomputeGear();
+    player_.hp = std::min(player_.hp, player_.maxHp);
+}
+
+void Session::setMimicForm(MimicForm form) {
+    if (!player_.slimeBody || player_.state == ActorState::Dead) {
+        return;
+    }
+    // 只有吞噬过的怪物才能变；「原本的躯体」是开局就解锁的
+    if (form != MimicForm::Hero && !devoured(form)) {
+        return;
+    }
+    if (player_.mimic == form) {
+        return;
+    }
+    player_.mimic = form;
+    // 换形态会改最大生命 / 护甲，重算并把当前值钳回上限
+    recomputeGear();
+    player_.hp = std::min(player_.hp, player_.maxHp);
+    player_.mp = std::min(player_.mp, player_.maxMp);
+    player_.mimicFlyT = 0.f;
+    player_.mimicSlamT = 0.f;
+    player_.mimicChargeT = 0.f;
+    pushFx(AttackFxKind::Ring, 30.f, 0.f, 0.35f, 0x7CE04A);
+    queueSfx(SfxId::Level);
+    note(QString("拟态：%1").arg(mimicText(form).name));
+}
+
+void Session::devour(MonsterKind kind) {
+    if (!player_.slimeBody) {
+        return;
+    }
+    player_.devouredMask |= mimicBit(mimicFormOf(kind));
+    player_.devourCount += 1;
+    if (!player_.talentGluttony && player_.devourCount >= kGluttonyDevours) {
+        player_.talentGluttony = true;
+        pushFx(AttackFxKind::Pillar, 80.f, 0.f, 0.8f, 0xFFD24A);
+        pushFx(AttackFxKind::Ring, 46.f, 0.f, 0.7f, 0xFFD24A);
+        queueVfx(VfxKind::LevelUp, player_.x, player_.y);
+        queueSfx(SfxId::Level);
+        note("天赋：暴食（经验翻倍）");
+    }
+}
+
+MimicBonus Session::mimicBonus() const {
+    MimicBonus bonus;
+    if (!player_.slimeBody) {
+        return bonus;
+    }
+    switch (player_.mimic) {
+    case MimicForm::Slime:
+        bonus.maxHp = 1.25f;
+        break;
+    case MimicForm::Skeleton:
+        bonus.armor = 1.5f;
+        break;
+    case MimicForm::Mushroom:
+        bonus.poise = 1.3f;
+        break;
+    case MimicForm::Flyer:
+        bonus.speed = 1.25f;
+        break;
+    case MimicForm::Caster:
+        bonus.cooldown = 0.75f;
+        break;
+    case MimicForm::Killbot:
+        bonus.atkSpeed = 1.3f;
+        break;
+    case MimicForm::Eye:
+        bonus.crit = 15;
+        break;
+    case MimicForm::SlimeBoss:
+        bonus.damage = 1.4f;
+        break;
+    default:
+        break;  // 原本的躯体：纯外观，不给任何加成
+    }
+    return bonus;
+}
+
+float Session::mimicSkillCooldownMax() const {
+    if (!player_.slimeBody) {
+        return 0.f;
+    }
+    switch (player_.mimic) {
+    case MimicForm::Hero:
+        return 0.f;  // 本来就是自己，没有额外技能
+    case MimicForm::Eye:
+    case MimicForm::SlimeBoss:
+        return 6.f;  // boss 形态更强，冷却也更长
+    default:
+        return 4.f;
+    }
+}
+
+void Session::castMimicSkill() {
+    const float cdMax = mimicSkillCooldownMax();
+    if (cdMax <= 0.f || player_.cdMimicSkill > 0.f || player_.state == ActorState::Dead) {
+        return;
+    }
+    const float aimX = player_.facingX;
+    const float aimY = player_.facingY;
+    switch (player_.mimic) {
+    case MimicForm::Slime: {
+        // 腐蚀喷吐：朝面向吐一发腐蚀黏液弹，命中或飞完都会在地上留一滩
+        Bolt bolt;
+        bolt.x = player_.x + aimX * 14.f;
+        bolt.y = player_.y - 8.f + aimY * 12.f;
+        bolt.vx = aimX * 210.f;
+        bolt.vy = aimY * 210.f;
+        bolt.life = 0.7f;
+        bolt.corrosion = true;
+        bolt.damage = rollDamage(18.f, &bolt.crit);
+        bolts_.push_back(bolt);
+        queueSfx(SfxId::Skill);
+        break;
+    }
+    case MimicForm::Skeleton: {
+        // 骨刺突进：突进一段并伤害身前扇形（与「突刺」同款判定）
+        player_.state = ActorState::Dodge;
+        player_.dodgeT = 0.26f;
+        player_.dodgeX = aimX;
+        player_.dodgeY = aimY;
+        player_.invuln = 0.24f;
+        player_.attackId += 1;
+        player_.animT = 0.f;
+        pushFx(AttackFxKind::Lunge, 72.f, 0.35f, 0.3f, 0x8FB8FF);
+        queueSfx(SfxId::Skill);
+        for (Monster& monster : monsters_) {
+            if (monster.state == ActorState::Dead) {
+                continue;
+            }
+            const float dx = monster.x - player_.x;
+            const float dy = monster.y - player_.y;
+            const float dist = lengthOf(dx, dy);
+            if (dist < reachWithRadius(52.f, monster) && dist > 0.01f) {
+                const float dot = (dx / dist) * aimX + (dy / dist) * aimY;
+                if (dot > 0.2f) {
+                    bool crit = false;
+                    hurtMonster(monster, rollDamage(16.f, &crit), 12.f, crit, 22.f);
+                }
+            }
+        }
+        break;
+    }
+    case MimicForm::Mushroom:
+        // 毒孢跳砸：先滞空，落点再结算范围伤害（位移在 updatePlayer 的跳砸分支里）
+        player_.mimicSlamT = kMimicSlamTime;
+        player_.state = ActorState::Attack;
+        player_.attackT = kMimicSlamTime;
+        player_.animT = 0.f;
+        pushFx(AttackFxKind::Mushroom, kMimicSlamRadius, 0.f, kMimicSlamTime, 0xE05A40);
+        queueSfx(SfxId::Dodge);
+        break;
+    case MimicForm::Flyer:
+        player_.mimicFlyT = kMimicFlyTime;
+        queueSfx(SfxId::Dodge);
+        note("振翅");
+        break;
+    case MimicForm::Caster:
+        fireMageBolt(false);
+        break;
+    case MimicForm::Killbot:
+        castMissile();
+        break;
+    case MimicForm::Eye: {
+        // 血环：以自身为中心炸开一圈，判定画同一个圆
+        constexpr float kRingR = 96.f;
+        player_.attackId += 1;
+        player_.state = ActorState::Attack;
+        player_.attackT = 0.4f;
+        player_.animT = 0.f;
+        pushFx(AttackFxKind::Pulse, kRingR, 0.f, 0.45f, 0xD01E24);
+        queueSfx(SfxId::Skill);
+        for (Monster& monster : monsters_) {
+            if (monster.state == ActorState::Dead) {
+                continue;
+            }
+            if (lengthOf(monster.x - player_.x, monster.y - player_.y) <= reachWithRadius(kRingR, monster)) {
+                bool crit = false;
+                hurtMonster(monster, rollDamage(20.f, &crit), 14.f, crit, 16.f);
+            }
+        }
+        break;
+    }
+    case MimicForm::SlimeBoss:
+        // 腐化冲撞：朝面向高速冲撞，位移与沿途伤害交给 updatePlayer 的冲撞分支
+        player_.mimicChargeT = kMimicChargeTime;
+        player_.dodgeX = aimX;  // 借用闪避的方向字段锁定冲撞方向
+        player_.dodgeY = aimY;
+        player_.attackId += 1;
+        player_.state = ActorState::Attack;
+        player_.invuln = std::max(player_.invuln, 0.2f);
+        pushFx(AttackFxKind::Dash, 40.f, 0.4f, 0.36f, 0x8CE04A);
+        queueSfx(SfxId::Swing);
+        break;
+    default:
+        return;
+    }
+    player_.cdMimicSkill = cdMax;
+    checkTalents();
 }
 
 void Session::gainXp(int amount) {
+    // 天赋【暴食】：经验获取翻倍
+    if (player_.talentGluttony) {
+        amount *= 2;
+    }
     player_.xp += float(amount);
     if (player_.xp >= float(xpToNext())) {
         pushFx(AttackFxKind::Pillar, 90.f, 0.f, 0.9f, 0xFFD24A);
@@ -829,7 +1210,7 @@ void Session::checkTalents() {
 }
 
 float Session::cdMul() const {
-    return player_.talentMastery ? 0.75f : 1.f;
+    return (player_.talentMastery ? 0.75f : 1.f) * mimicBonus().cooldown;
 }
 
 float Session::atkSpeedMul() const {
@@ -840,7 +1221,7 @@ float Session::atkSpeedMul() const {
     if (player_.overloadT > 0.f) {
         mul *= 1.6f;
     }
-    return mul;
+    return mul * mimicBonus().atkSpeed;
 }
 
 float Session::rollDamage(float base, bool* critOut) {
@@ -863,7 +1244,7 @@ float Session::rollDamage(float base, bool* critOut) {
     } else if (player_.hero == HeroClass::Warrior) {
         damage *= 1.1f;
     }
-    bool crit = int(nextRand() % 100u) < uint32_t(12 + player_.critBonus);
+    bool crit = int(nextRand() % 100u) < uint32_t(12 + player_.critBonus + mimicBonus().crit);
     if (crit) {
         damage *= 2.0f;
     }
@@ -923,6 +1304,10 @@ void Session::hurtPlayer(float damage, Monster* source) {
     }
     if (player_.fieldT > 0.f) {
         damage *= 0.05f;
+    }
+    // 史莱姆之躯：少量减伤
+    if (player_.slimeBody) {
+        damage *= kSlimeBodyDamageTaken;
     }
     damage *= 40.f / (40.f + player_.armor);
     if (player_.shield > 0.f) {
@@ -987,6 +1372,14 @@ void Session::hurtMonster(Monster& monster, float damage, float poiseDamage, boo
     if (monster.kind == MonsterKind::Eye && ruin_.arrive >= 0.f) {
         return;
     }
+    // 腐化史莱姆在雷排完前还沉在水里、浮出动画期间也打不到
+    if (monster.kind == MonsterKind::SlimeBoss && (!pool_.cleared || pool_.arrive > 0.f)) {
+        return;
+    }
+    // 史莱姆之躯拟态时的伤害 / 破韧加成
+    const MimicBonus bonus = mimicBonus();
+    damage *= bonus.damage;
+    poiseDamage *= bonus.poise;
     if (player_.talentUnderdog && monster.level > player_.level) {
         damage *= 1.3f;
     }
@@ -1007,7 +1400,7 @@ void Session::hurtMonster(Monster& monster, float damage, float poiseDamage, boo
     pushFloat(monster.x, monster.y, damage, crit);
     queueSfx(crit ? SfxId::Crit : SfxId::Hit);
     queueVfx(VfxKind::Hit, monster.x, monster.y, 0.f, crit, monster.kind);
-    if (knockback > 0.f && monster.kind != MonsterKind::Eye) {
+    if (knockback > 0.f && monster.kind != MonsterKind::Eye && monster.kind != MonsterKind::SlimeBoss) {
         float kx = monster.x - player_.x;
         float ky = monster.y - player_.y;
         float kd = lengthOf(kx, ky);
@@ -1025,7 +1418,7 @@ void Session::hurtMonster(Monster& monster, float damage, float poiseDamage, boo
     }
     if (monster.poise <= 0.f) {
         monster.poise = monster.maxPoise;
-        monster.stunT = monster.kind == MonsterKind::Eye ? 1.6f : 0.7f;
+        monster.stunT = (monster.kind == MonsterKind::Eye || monster.kind == MonsterKind::SlimeBoss) ? 1.6f : 0.7f;
     }
     checkTalents();
 }
@@ -1068,12 +1461,14 @@ void Session::fireMageLaser() {
         }
         const float dx = monster.x - player_.x;
         const float dy = monster.y - player_.y;
+        // boss 体积越大，光束的命中带就越宽、越长
+        const float extra = monsterHitRadius(monster) - kMonsterHitRadius;
         const float along = dx * nx + dy * ny;
-        if (along < 0.f || along > kRange) {
+        if (along < 0.f || along > kRange + extra) {
             continue;
         }
         const float perp = std::abs(dx * (-ny) + dy * nx);
-        if (perp <= kHalfWidth) {
+        if (perp <= kHalfWidth + extra) {
             bool crit = false;
             hurtMonster(monster, rollDamage(22.f, &crit), 14.f, crit, 20.f);
         }
@@ -1098,7 +1493,7 @@ void Session::castHeavySwordQi() {
         const float dx = monster.x - player_.x;
         const float dy = monster.y - player_.y;
         const float dist = lengthOf(dx, dy);
-        if (dist < kRange && dist > 0.01f) {
+        if (dist < reachWithRadius(kRange, monster) && dist > 0.01f) {
             const float dot = (dx / dist) * player_.facingX + (dy / dist) * player_.facingY;
             if (dot > kMeleeConeDot) {
                 bool crit = false;
@@ -1264,8 +1659,11 @@ void Session::applyEyeLevel() {
 }
 
 int Session::playerPass() const {
-    // 跳跃/飞行本身就跨过岩石和灌木，否则从普通档起步
-    const int base = (player_.jumpT > 0.f || player_.flying) ? 1 : 0;
+    // 跳跃/飞行本身就跨过岩石和灌木；史莱姆之躯的振翅与跳砸同理
+    const int base = (player_.jumpT > 0.f || player_.flying || player_.mimicFlyT > 0.f
+                         || player_.mimicSlamT > 0.f)
+        ? 1
+        : 0;
     // 若脚下这格过不去（落点被岩石/灌木占据，或被恢复的地形——如水——困住），
     // 逐档放行直到能迈出来，否则会永久卡死；迷宫墙任何档位都挡得住
     for (int pass = base; pass < 2; ++pass) {
@@ -1511,7 +1909,8 @@ void Session::explodeBolt(const Bolt& bolt) {
     queueVfx(VfxKind::Explode, bolt.x, bolt.y, bolt.blast);
     breakMazeWallsRadius(bolt.x, bolt.y, bolt.blast);
     for (Monster& monster : monsters_) {
-        if (monster.state != ActorState::Dead && lengthOf(monster.x - bolt.x, monster.y - bolt.y) <= bolt.blast) {
+        if (monster.state != ActorState::Dead
+            && lengthOf(monster.x - bolt.x, monster.y - bolt.y) <= reachWithRadius(bolt.blast, monster)) {
             hurtMonster(monster, bolt.damage, 16.f, bolt.crit, 18.f);
         }
     }
@@ -1703,7 +2102,7 @@ void Session::explodeDrone(const Drone& drone, bool harmful) {
         float kx = monster.x - drone.x;
         float ky = monster.y - drone.y;
         float kd = lengthOf(kx, ky);
-        if (kd > kDroneBlast) {
+        if (kd > reachWithRadius(kDroneBlast, monster)) {
             continue;
         }
         hurtMonster(monster, drone.damage, 10.f, drone.crit);
@@ -1731,7 +2130,8 @@ void Session::castBoost() {
     pushFx(AttackFxKind::Ring, 36.f, 0.f, 0.26f, 0x80D8FF);
     queueSfx(SfxId::Dodge);
     for (Monster& monster : monsters_) {
-        if (monster.state != ActorState::Dead && lengthOf(monster.x - player_.x, monster.y - player_.y) < 36.f) {
+        if (monster.state != ActorState::Dead
+            && lengthOf(monster.x - player_.x, monster.y - player_.y) < reachWithRadius(36.f, monster)) {
             bool crit = false;
             hurtMonster(monster, rollDamage(10.f, &crit), 8.f, crit, 20.f);
         }
@@ -1777,7 +2177,7 @@ void Session::castSpin() {
     pushFx(AttackFxKind::Spin, 42.f, 0.f, 0.4f, 0xFFE0C2);
     queueSfx(SfxId::Skill);
     for (Monster& monster : monsters_) {
-        if (lengthOf(monster.x - player_.x, monster.y - player_.y) < 42.f) {
+        if (lengthOf(monster.x - player_.x, monster.y - player_.y) < reachWithRadius(42.f, monster)) {
             bool crit = false;
             const float dmg = rollDamage(16.f, &crit);
             hurtMonster(monster, dmg, 12.f, crit, 14.f);
@@ -1812,7 +2212,7 @@ void Session::castNova() {
     pushFx(AttackFxKind::Pulse, 64.f, 0.f, 0.4f, 0xB070FF);
     queueSfx(SfxId::Skill);
     for (Monster& monster : monsters_) {
-        if (lengthOf(monster.x - player_.x, monster.y - player_.y) < 64.f) {
+        if (lengthOf(monster.x - player_.x, monster.y - player_.y) < reachWithRadius(64.f, monster)) {
             bool crit = false;
             const float dmg = rollDamage(12.f, &crit);
             hurtMonster(monster, dmg, 8.f, crit, 12.f);
@@ -1852,7 +2252,7 @@ void Session::castSwordQi() {
         const float dx = monster.x - player_.x;
         const float dy = monster.y - player_.y;
         const float dist = lengthOf(dx, dy);
-        if (dist < kQiRange && dist > 0.01f) {
+        if (dist < reachWithRadius(kQiRange, monster) && dist > 0.01f) {
             const float dot = (dx / dist) * player_.facingX + (dy / dist) * player_.facingY;
             if (dot > kMeleeConeDot) {
                 bool crit = false;
@@ -1888,7 +2288,7 @@ void Session::castThrustStack() {
         const float dx = monster.x - player_.x;
         const float dy = monster.y - player_.y;
         const float dist = lengthOf(dx, dy);
-        if (dist < 48.f && dist > 0.01f) {
+        if (dist < reachWithRadius(48.f, monster) && dist > 0.01f) {
             const float dot = (dx / dist) * player_.facingX + (dy / dist) * player_.facingY;
             if (dot > 0.2f) {
                 bool crit = false;
@@ -1935,7 +2335,7 @@ void Session::burialBlast(int stage) {
         if (monster.state == ActorState::Dead) {
             continue;
         }
-        if (lengthOf(monster.x - player_.x, monster.y - player_.y) <= player_.burialR) {
+        if (lengthOf(monster.x - player_.x, monster.y - player_.y) <= reachWithRadius(player_.burialR, monster)) {
             bool crit = false;
             const float dmg = rollDamage(base, &crit);
             hurtMonster(monster, dmg, poise, crit, knock);
@@ -2017,7 +2417,14 @@ void Session::atomicBlast() {
         if (monster.state == ActorState::Dead) {
             continue;
         }
-        if (std::abs(monster.x - player_.x) > kAtomicHalfW || std::abs(monster.y - player_.y) > kAtomicHalfH) {
+        // 大体积 boss 只要身体有一截在画面里就算被波及
+        const float extra = monsterHitRadius(monster) - kMonsterHitRadius;
+        if (std::abs(monster.x - player_.x) > kAtomicHalfW + extra
+            || std::abs(monster.y - player_.y) > kAtomicHalfH + extra) {
+            continue;
+        }
+        // 还没排完雷的腐化史莱姆整只沉在水下，画面里根本没有它，抹不到
+        if (monster.kind == MonsterKind::SlimeBoss && !pool_.cleared) {
             continue;
         }
         // 无视护盾、减伤与 boss 入场保护：这一发是抹除，不是伤害
@@ -2209,7 +2616,8 @@ void Session::updateRobotBuffs(float dt) {
     // 要盖住近战怪的出手距离（28），否则贴身怪碰不到磁场
     constexpr float kFieldRadius = 30.f;
     for (Monster& monster : monsters_) {
-        if (monster.state != ActorState::Dead && lengthOf(monster.x - player_.x, monster.y - player_.y) <= kFieldRadius) {
+        if (monster.state != ActorState::Dead
+            && lengthOf(monster.x - player_.x, monster.y - player_.y) <= reachWithRadius(kFieldRadius, monster)) {
             bool crit = false;
             hurtMonster(monster, rollDamage(8.f, &crit), 4.f, crit, 4.f);
         }
@@ -2301,6 +2709,7 @@ void Session::update(float dt, const InputState& input, float mouseX, float mous
     updateFloats(dt);
     updateAttackFx(dt);
     updateRuin(dt);
+    updatePool(dt);
     updateSan(dt);
     if (player_.state != ActorState::Dead) {
         spawn(dt);
@@ -2325,6 +2734,7 @@ void Session::updatePlayer(float dt, const InputState& input, float mouseX, floa
     player_.animT += dt;
     player_.invuln = std::max(0.f, player_.invuln - dt);
     player_.hurtT = std::max(0.f, player_.hurtT - dt);
+    const bool wasJumping = player_.jumpT > 0.f;
     player_.jumpT = std::max(0.f, player_.jumpT - dt);
     player_.guardT = std::max(0.f, player_.guardT - dt);
     player_.cdGuard = std::max(0.f, player_.cdGuard - dt);
@@ -2353,6 +2763,85 @@ void Session::updatePlayer(float dt, const InputState& input, float mouseX, floa
     player_.mp = std::min(player_.maxMp, player_.mp + 10.f * dt);
     player_.shield = std::min(player_.maxShield, player_.shield + 3.f * dt);
     if (player_.state == ActorState::Dead) {
+        return;
+    }
+
+    // 落地那一下也算「跳上这一格」：与起跳一起构成排雷小游戏的揭示动作
+    if (wasJumping && player_.jumpT <= 0.f) {
+        revealBoardTile(tileOf(player_.x), tileOf(player_.y));
+        if (player_.state == ActorState::Dead) {
+            return;  // 踩雷把人踩死了
+        }
+    }
+
+    // —— 史莱姆之躯：拟态计时与左 Ctrl 技能
+    player_.cdMimicSkill = std::max(0.f, player_.cdMimicSkill - dt);
+    player_.mimicFlyT = std::max(0.f, player_.mimicFlyT - dt);
+    if (input.ctrlEdge) {
+        castMimicSkill();
+    }
+    auto mimicAim = [&](float& ax, float& ay) {
+        ax = mouseX - player_.x;
+        ay = mouseY - player_.y;
+        const float len = lengthOf(ax, ay);
+        if (len > 6.f) {
+            ax /= len;
+            ay /= len;
+            faceToward(player_.facingX, player_.facingY, player_.flip, ax, ay);
+        } else {
+            ax = player_.facingX;
+            ay = player_.facingY;
+        }
+    };
+    // 蘑菇形态跳砸：滞空期间朝落点飘过去，落地时范围结算
+    if (player_.mimicSlamT > 0.f) {
+        float ax = 0.f;
+        float ay = 0.f;
+        mimicAim(ax, ay);
+        player_.mimicSlamT -= dt;
+        const int pass = playerPass();
+        tryMove(player_.x, player_.y, ax * 150.f, ay * 150.f, dt, kPlayerRadius, pass, &player_.distanceMoved);
+        player_.state = ActorState::Attack;
+        if (player_.mimicSlamT <= 0.f) {
+            pushFx(AttackFxKind::Ring, kMimicSlamRadius, 0.f, 0.35f, 0xE05A40);
+            queueVfx(VfxKind::Explode, player_.x, player_.y, kMimicSlamRadius);
+            triggerShake();
+            for (Monster& monster : monsters_) {
+                if (monster.state == ActorState::Dead) {
+                    continue;
+                }
+                if (lengthOf(monster.x - player_.x, monster.y - player_.y) <= reachWithRadius(kMimicSlamRadius, monster)) {
+                    bool crit = false;
+                    hurtMonster(monster, rollDamage(22.f, &crit), 16.f, crit, 20.f);
+                }
+            }
+            player_.attackT = 0.24f;
+        }
+        checkTalents();
+        return;
+    }
+    // 腐化史莱姆形态冲撞：朝锁定方向高速突进，沿途撞飞并拖出黏液
+    if (player_.mimicChargeT > 0.f) {
+        player_.mimicChargeT -= dt;
+        const int pass = playerPass();
+        tryMove(player_.x, player_.y, player_.dodgeX * kMimicChargeSpeed, player_.dodgeY * kMimicChargeSpeed, dt,
+            kPlayerRadius, pass, &player_.distanceMoved);
+        addCorrosion(player_.x, player_.y);
+        for (Monster& monster : monsters_) {
+            if (monster.state == ActorState::Dead || monster.lastHitBy == player_.attackId) {
+                continue;
+            }
+            if (lengthOf(monster.x - player_.x, monster.y - player_.y) > reachWithRadius(34.f, monster)) {
+                continue;
+            }
+            bool crit = false;
+            hurtMonster(monster, rollDamage(24.f, &crit), 18.f, crit, 26.f);
+        }
+        player_.state = ActorState::Attack;
+        if (player_.mimicChargeT <= 0.f) {
+            player_.attackT = 0.24f;
+        }
+        checkTalents();
         return;
     }
 
@@ -2452,6 +2941,11 @@ void Session::updatePlayer(float dt, const InputState& input, float mouseX, floa
     if (input.spaceEdge && player_.jumpT <= 0.f && player_.stamina >= 12.f) {
         player_.stamina -= 12.f;
         player_.jumpT = 0.34f;
+        // 起跳即揭示脚下这一格：排雷小游戏的主要操作
+        revealBoardTile(tileOf(player_.x), tileOf(player_.y));
+        if (player_.state == ActorState::Dead) {
+            return;
+        }
     }
     if (input.qEdge) {
         if (player_.cdGuard <= 0.f && player_.mp >= 12.f) {
@@ -2463,9 +2957,13 @@ void Session::updatePlayer(float dt, const InputState& input, float mouseX, floa
     if (input.eEdge && player_.cdHeal <= 0.f && player_.mp >= 20.f) {
         player_.mp -= 20.f;
         player_.cdHeal = 5.5f * cdMul();
-        player_.hp = std::min(player_.maxHp, player_.hp + 22.f);
-        player_.stamina = std::min(player_.maxStamina, player_.stamina + 20.f);
-        note("恢复");
+        // 史莱姆之躯：恢复改成按最大生命 / 体力比例回复
+        const bool slime = player_.slimeBody;
+        const float healHp = slime ? player_.maxHp * kSlimeBodyHealRatio : 22.f;
+        const float healSta = slime ? player_.maxStamina * kSlimeBodyHealRatio : 20.f;
+        player_.hp = std::min(player_.maxHp, player_.hp + healHp);
+        player_.stamina = std::min(player_.maxStamina, player_.stamina + healSta);
+        note(slime ? QString("恢复 +%1").arg(int(healHp)) : QString("恢复"));
         pushFx(AttackFxKind::Pulse, 24.f, 0.f, 0.3f, 0x60FF90);
         queueVfx(VfxKind::Heal, player_.x, player_.y);
         queueSfx(SfxId::Heal);
@@ -2609,6 +3107,11 @@ void Session::updatePlayer(float dt, const InputState& input, float mouseX, floa
     if (player_.state == ActorState::Attack) {
         speed *= 0.45f;
     }
+    // 浅水：对生物略微减速；飞行 / 跳跃跨过水面时不吃这个惩罚
+    speed *= shallowMoveMul(player_.x, player_.y,
+        player_.flying || player_.jumpT > 0.f || player_.mimicFlyT > 0.f);
+    // 史莱姆之躯拟态：飞虫形态提速
+    speed *= mimicBonus().speed;
     const int pass = playerPass();
     if (moving) {
         tryMove(player_.x, player_.y, vx * speed, vy * speed, dt, kPlayerRadius, pass, &player_.distanceMoved);
@@ -2765,6 +3268,10 @@ void Session::updateBolts(float dt) {
         }
         bolt.life -= dt;
         bolt.age += dt;
+        // 玩家吐出的腐蚀黏液弹飞到尽头也会在地上留一滩
+        if (bolt.life <= 0.f && bolt.corrosion && !bolt.hostile && bolt.blast <= 0.f) {
+            addCorrosion(bolt.x, bolt.y);
+        }
         if (bolt.life <= 0.f && bolt.blast > 0.f) {
             explodeBolt(bolt);
             continue;
@@ -2812,11 +3319,14 @@ void Session::updateBolts(float dt) {
             if (monster.kind == MonsterKind::Eye && ruin_.arrive >= 0.f) {
                 continue;
             }
-            if (lengthOf(monster.x - bolt.x, monster.y - bolt.y) < 14.f) {
+            if (lengthOf(monster.x - bolt.x, monster.y - bolt.y) < monsterHitRadius(monster)) {
                 if (bolt.blast > 0.f) {
                     explodeBolt(bolt);
                 } else {
                     hurtMonster(monster, bolt.damage, 6.f, bolt.crit, 16.f);
+                    if (bolt.corrosion) {
+                        addCorrosion(monster.x, monster.y);  // 命中处糊一滩
+                    }
                 }
                 bolt.life = 0.f;
                 break;
@@ -2943,6 +3453,9 @@ void Session::updateMonsters(float dt) {
             monster.animT = 0.f;
             queueVfx(VfxKind::Kill, monster.x, monster.y, 0.f, false, monster.kind);
             if (!monster.scored) {
+                // 史莱姆之躯：击杀即吞噬。先吞噬再结算经验，
+                // 这样「刚好凑满 100 只」的那一次击杀自己也能吃到暴食的双倍。
+                devour(monster.kind);
                 const bool overLevel = monster.level > player_.level;
                 const int gained = scoreFor(monster.kind, monster.level) * (monster.elite ? 2 : 1);
                 score_ += gained;
@@ -2953,6 +3466,8 @@ void Session::updateMonsters(float dt) {
                 }
                 if (monster.kind == MonsterKind::Eye) {
                     onEyeDefeated();
+                } else if (monster.kind == MonsterKind::SlimeBoss) {
+                    onSlimeBossDefeated();
                 } else {
                     player_.worldKills += 1;
                 }
@@ -2971,13 +3486,10 @@ void Session::updateMonsters(float dt) {
             pass = 1;
         }
 
-        if (monster.kind == MonsterKind::Eye) {
-            updateEye(monster, dt);
-            continue;
-        }
-
+        // 玩家的近战命中判定必须排在 boss 分派之前：腐化史莱姆是贴地的大家伙，
+        // 站到它身上砍却砍不动就很怪；判定范围按受击半径放大（见 reachWithRadius）。
         if ((!rangedHero() || player_.meleeSwing) && player_.state == ActorState::Attack && !player_.heavy && player_.attackT > 0.12f && player_.attackT < 0.30f && monster.lastHitBy != player_.attackId) {
-            if (dist < 34.f && dist > 0.01f) {
+            if (dist < reachWithRadius(34.f, monster) && dist > 0.01f) {
                 const float dot = (-dx / dist) * player_.facingX + (-dy / dist) * player_.facingY;
                 if (dot > 0.35f) {
                     if (monster.kind == MonsterKind::Skeleton && monster.defenseT <= 0.f && (nextRand() % 100u) < 45u) {
@@ -2987,6 +3499,15 @@ void Session::updateMonsters(float dt) {
                     hurtMonster(monster, rollDamage(11.f, &crit), 4.f, crit, 18.f);
                 }
             }
+        }
+
+        if (monster.kind == MonsterKind::Eye) {
+            updateEye(monster, dt);
+            continue;
+        }
+        if (monster.kind == MonsterKind::SlimeBoss) {
+            updateSlimeBoss(monster, dt);
+            continue;
         }
 
         if (monster.stunT > 0.f) {
@@ -3130,6 +3651,9 @@ void Session::updateMonsters(float dt) {
         } else if (monster.kind == MonsterKind::Flyer) {
             speed = 48.f;
         }
+        // 浅水：对生物略微减速，史莱姆和飞行单位免疫
+        speed *= shallowMoveMul(monster.x, monster.y,
+            monster.kind == MonsterKind::Slime || monster.kind == MonsterKind::Flyer);
         const bool closeEnough = monster.kind != MonsterKind::Flyer && monster.kind != MonsterKind::Slime && monster.kind != MonsterKind::Caster && dist < 28.f;
         if (md > 2.f && !closeEnough) {
             tryMove(monster.x, monster.y, mx / md * speed, my / md * speed, dt, kMonsterRadius, pass, nullptr);
@@ -3144,7 +3668,8 @@ void Session::updateMonsters(float dt) {
             if (monsters_[i].state == ActorState::Dead || monsters_[j].state == ActorState::Dead) {
                 continue;
             }
-            if (monsters_[i].kind == MonsterKind::Eye || monsters_[j].kind == MonsterKind::Eye) {
+            if (monsters_[i].kind == MonsterKind::Eye || monsters_[j].kind == MonsterKind::Eye
+                || monsters_[i].kind == MonsterKind::SlimeBoss || monsters_[j].kind == MonsterKind::SlimeBoss) {
                 continue;
             }
             float dx = monsters_[j].x - monsters_[i].x;
@@ -3247,10 +3772,12 @@ void Session::updateKillbot(Monster& monster, float dt, float dist) {
 }
 
 void Session::recomputeGear() {
+    // 史莱姆之躯拟态时的临时加成在这里落地（换形态必须重算一次）
+    const MimicBonus bonus = mimicBonus();
     player_.weaponAtk = 0;
-    player_.maxHp = baseMaxHp_;
+    player_.maxHp = baseMaxHp_ * bonus.maxHp;
     player_.maxMp = baseMaxMp_;
-    player_.armor = baseArmor_;
+    player_.armor = baseArmor_ * bonus.armor;
     player_.hp = std::min(player_.hp, player_.maxHp);
     player_.mp = std::min(player_.mp, player_.maxMp);
 }
@@ -3460,8 +3987,10 @@ void Session::updateSan(float dt) {
     if (!sanActive_ || player_.state == ActorState::Dead) {
         return;
     }
-    // 每帧消耗 maxSan / 600，10 分钟耗尽
-    player_.san = std::max(0.f, player_.san - player_.maxSan / 600.f * dt);
+    // 每帧消耗基准上限 / 600，10 分钟耗尽。
+    // 用基准值而不是当前上限：踩雷削掉的上限会实实在在地缩短本场剩余时间。
+    const float drainBase = sanCapBase_ > 0.f ? sanCapBase_ : player_.maxSan;
+    player_.san = std::max(0.f, player_.san - drainBase / 600.f * dt);
     const bool weak = player_.san <= player_.maxSan * 0.1f && player_.san > 0.f;
     player_.sanWeak = weak;
     if (player_.san <= 0.f) {
@@ -3595,5 +4124,605 @@ void Session::restoreRuin(const QJsonObject& game) {
         const float shield = ruin.contains("eyeShield") ? float(ruin.value("eyeShield").toDouble()) : -1.f;
         const int level = ruin.value("eyeLevel").toInt(-1);
         spawnEye(hp, shield, level);
+    }
+}
+
+// ---------------------------------------------------------------------------
+// 浅水 boss 房「巨型腐化史莱姆」
+// 独立于迷宫遗迹的另一套 boss 房：圆形浅水区 + 旁边的排雷小游戏
+// ---------------------------------------------------------------------------
+
+float Session::shallowMoveMul(float x, float y, bool immune) const {
+    if (immune || !pool_.active) {
+        return 1.f;
+    }
+    if (!pool_.contains(tileOf(x), tileOf(y))) {
+        return 1.f;
+    }
+    return 0.82f;
+}
+
+void Session::syncPoolMap() {
+    if (pool_.active) {
+        map_.setShallowPool(pool_.cx, pool_.cy, pool_.radius, ShallowPool::kClearMargin,
+            pool_.boardX, pool_.boardY, ShallowPool::kBoardSize, ShallowPool::kBoardMargin);
+    } else {
+        map_.clearShallowPool();
+    }
+}
+
+void Session::dismissPool() {
+    pool_.active = false;
+    map_.clearShallowPool();
+    slime_.clear();
+    monsters_.erase(std::remove_if(monsters_.begin(), monsters_.end(), [](const Monster& monster) {
+        return monster.kind == MonsterKind::SlimeBoss;
+    }), monsters_.end());
+    restoreSanCap();
+}
+
+bool Session::spawnPool() {
+    const int px = tileOf(player_.x);
+    const int py = tileOf(player_.y);
+    constexpr int kBoard = ShallowPool::kBoardSize;
+    constexpr int kR = ShallowPool::kRadiusTiles;
+    for (int attempt = 0; attempt < 60; ++attempt) {
+        const float angle = float(nextRand() % 628u) / 100.f;
+        const int dist = 42 + int(nextRand() % 44u);
+        const int cx = px + int(std::cos(angle) * float(dist));
+        const int cy = py + int(std::sin(angle) * float(dist));
+        const int dx = cx - px;
+        const int dy = cy - py;
+        if (dx * dx + dy * dy < 38 * 38) {
+            continue;
+        }
+        // 棋盘摆在浅水区正右方的一片空地上
+        const int bx = cx + kR + 1;
+        const int by = cy - kBoard / 2;
+        const int m = ShallowPool::kClearMargin;
+        const int x0 = cx - kR - m;
+        const int x1 = bx + kBoard - 1;
+        const int y0 = cy - kR - m;
+        const int y1 = cy + kR + m;
+        // 别和迷宫遗迹（含外圈清空带）挤在一起，两套覆盖层互相打架
+        if (ruin_.active) {
+            const int rx0 = ruin_.originX - MazeRuin::kClearMargin;
+            const int ry0 = ruin_.originY - MazeRuin::kClearMargin;
+            const int rx1 = ruin_.originX + MazeRuin::kSize + MazeRuin::kClearMargin - 1;
+            const int ry1 = ruin_.originY + MazeRuin::kSize + MazeRuin::kClearMargin - 1;
+            if (!(x1 < rx0 || x0 > rx1 || y1 < ry0 || y0 > ry1)) {
+                continue;
+            }
+        }
+        if (!pool_.generate(cx, cy, bx, by, nextRand() | 1u)) {
+            continue;
+        }
+        pool_.phase = ShallowPool::Phase::Live;
+        pool_.cooldown = 0.f;
+        syncPoolMap();
+        spawnSlimeBoss();
+        note("浅水区域出现");
+        return true;
+    }
+    pool_.clear();
+    map_.clearShallowPool();
+    return false;
+}
+
+void Session::spawnSlimeBoss(float hp, float shield, int level) {
+    Monster monster;
+    monster.id = nextId_++;
+    monster.kind = MonsterKind::SlimeBoss;
+    monster.x = pool_.centerX();
+    monster.y = pool_.centerY();
+    const int shown = level > 0 ? level : 1;
+    setupMonster(monster, shown);
+    monster.level = shown;
+    if (hp >= 0.f) {
+        monster.hp = std::min(monster.maxHp, hp);
+    }
+    if (shield >= 0.f) {
+        monster.shield = std::min(monster.maxShield, shield);
+    }
+    monsters_.push_back(monster);
+    pool_.attackStep = 0;
+    pool_.attackCd = 2.4f;
+    pool_.warningT = 0.f;
+    pool_.chargeT = 0.f;
+    pool_.leapWarnT = 0.f;
+    pool_.leapT = 0.f;
+    pool_.shootWarnT = 0.f;
+    pool_.trailT = 0.f;
+}
+
+void Session::applySlimeBossLevel() {
+    // 等级只比玩家高 5 级（数值也按这个等级正常成长，不再是克苏鲁之眼那种 +99 虚标）
+    const int bossLevel = std::max(1, player_.level) + 5;
+    for (Monster& monster : monsters_) {
+        if (monster.kind != MonsterKind::SlimeBoss || monster.state == ActorState::Dead) {
+            continue;
+        }
+        setupMonster(monster, bossLevel);
+        monster.level = bossLevel;
+    }
+}
+
+void Session::slimeBossClampToPool(Monster& monster) const {
+    const float cx = pool_.centerX();
+    const float cy = pool_.centerY();
+    const float limit = float(pool_.radius) * float(kTile) - kSlimeBossRadius;
+    const float dx = monster.x - cx;
+    const float dy = monster.y - cy;
+    const float d = lengthOf(dx, dy);
+    if (d <= limit || d < 0.001f || limit <= 0.f) {
+        return;
+    }
+    monster.x = cx + dx / d * limit;
+    monster.y = cy + dy / d * limit;
+}
+
+void Session::slimeBossContact(Monster& monster, float dist, float damage) {
+    if (monster.contactCd > 0.f || dist > kSlimeBossRadius + kPlayerRadius) {
+        return;
+    }
+    // 贴身蹭伤也算一种「攻击」，间隔放长一点，别让它变成持续掉血的磨盘
+    monster.contactCd = 1.0f;
+    hurtPlayer(damage, &monster);
+}
+
+void Session::slimeBossTrail(Monster& monster, float dt) {
+    pool_.trailT -= dt;
+    if (pool_.trailT > 0.f) {
+        return;
+    }
+    pool_.trailT = kSlimeTrailGap;
+    addCorrosion(monster.x, monster.y);
+    // 旁边再甩一滴，拖出一条有宽度的黏液带
+    addCorrosion(monster.x + float(nextRand() % 15u) - 7.f, monster.y + float(nextRand() % 13u) - 6.f);
+}
+
+void Session::addCorrosion(float x, float y) {
+    if (slime_.size() >= 260) {
+        return;
+    }
+    SlimeSpot spot;
+    spot.x = x;
+    spot.y = y;
+    spot.radius = kSlimeTrailRadius;
+    spot.age = 0.f;
+    slime_.push_back(spot);
+}
+
+void Session::updateCorrosion(float dt) {
+    for (SlimeSpot& spot : slime_) {
+        spot.age += dt;
+    }
+    // 黏液只在地面上留 3 秒，到点自行消失
+    slime_.erase(std::remove_if(slime_.begin(), slime_.end(), [](const SlimeSpot& spot) {
+        return spot.age >= SlimeSpot::kLife;
+    }), slime_.end());
+    corrosionTick_ += dt;
+    if (corrosionTick_ < kCorrosionTickGap) {
+        return;
+    }
+    corrosionTick_ = 0.f;
+    if (slime_.empty() || player_.state == ActorState::Dead || player_.state == ActorState::Dodge) {
+        return;
+    }
+    // 护盾 / 逆反之盾 / 磁力场 / 飞行 / 跳跃 全部免疫腐蚀粘液。
+    // 粘液只伤害玩家，飞行怪与史莱姆天然不受影响；拟态振翅也算滞空。
+    if (player_.shield > 0.f || player_.mirrorT > 0.f || player_.fieldT > 0.f || player_.flying
+        || player_.jumpT > 0.f || player_.mimicFlyT > 0.f) {
+        return;
+    }
+    bool inside = false;
+    for (const SlimeSpot& spot : slime_) {
+        const float dx = player_.x - spot.x;
+        const float dy = player_.y - spot.y;
+        if (dx * dx + dy * dy <= spot.radius * spot.radius) {
+            inside = true;
+            break;
+        }
+    }
+    if (!inside) {
+        return;
+    }
+    const float tickDamage = kCorrosionTickDamage * (player_.slimeBody ? kSlimeBodyDamageTaken : 1.f);
+    player_.hp -= tickDamage;
+    player_.hurtT = std::max(player_.hurtT, 0.1f);
+    pushFloat(player_.x, player_.y - 4.f, tickDamage, false);
+    queueVfx(VfxKind::Corrosion, player_.x, player_.y, 12.f);
+    if (player_.hp <= 0.f) {
+        player_.hp = 0.f;
+        player_.state = ActorState::Dead;
+        player_.animT = 0.f;
+        player_.flying = false;
+        player_.mirrorT = 0.f;
+        queueSfx(SfxId::Death);
+    }
+}
+
+void Session::applySanCut() {
+    if (sanCapBase_ <= 0.f) {
+        sanCapBase_ = player_.maxSan > 0.f ? player_.maxSan : 100.f;
+    }
+    const float floorCap = sanCapBase_ * kSanCutFloorRatio;
+    player_.maxSan = std::max(floorCap, sanCapBase_ - pool_.sanCut);
+    player_.san = std::min(player_.san, player_.maxSan);
+    player_.sanWeak = player_.san <= player_.maxSan * 0.1f && player_.san > 0.f;
+}
+
+void Session::restoreSanCap() {
+    pool_.sanCut = 0.f;
+    if (sanCapBase_ <= 0.f) {
+        return;
+    }
+    player_.maxSan = sanCapBase_;
+    player_.san = std::min(player_.san, player_.maxSan);
+    player_.sanWeak = player_.san <= player_.maxSan * 0.1f && player_.san > 0.f;
+}
+
+void Session::revealBoardTile(int tileX, int tileY) {
+    if (!pool_.active || pool_.phase != ShallowPool::Phase::Live || pool_.cleared) {
+        return;
+    }
+    const int result = pool_.reveal(tileX, tileY);
+    if (result == 0) {
+        return;
+    }
+    const float wx = (float(tileX) + 0.5f) * float(kTile);
+    const float wy = (float(tileY) + 0.5f) * float(kTile);
+    if (result == 1) {
+        // 安全格：只揭开数字，给一声轻响
+        queueSfx(SfxId::Ui);
+    } else {
+        // 踩雷：一次腐蚀伤害 + 本场理智上限 -10，雷保留但不再重复触发
+        queueSfx(SfxId::Explode);
+        queueVfx(VfxKind::Corrosion, wx, wy, 24.f);
+        hurtPlayer(kMineDamage, nullptr);
+        pool_.sanCut += kMineSanCut;
+        applySanCut();
+        note(QString("踩中腐蚀史莱姆　本场理智上限 -%1").arg(int(kMineSanCut)));
+    }
+    if (!pool_.boardComplete()) {
+        return;
+    }
+    // 排雷完成：boss 浮出水面并开始本场战斗
+    pool_.cleared = true;
+    pool_.arrive = ShallowPool::kRiseTime;
+    applySlimeBossLevel();
+    triggerShake();
+    queueSfx(SfxId::Level);
+    queueVfx(VfxKind::Rise, pool_.centerX(), pool_.centerY(), 90.f);
+    if (!sanActive_) {
+        sanActive_ = true;
+        player_.san = player_.maxSan;
+        player_.sanWeak = false;
+    }
+    note("地雷排空　巨型腐化史莱姆浮出水面　理智开始流逝");
+}
+
+void Session::updateSlimeBoss(Monster& monster, float dt) {
+    const float cx = pool_.centerX();
+    const float cy = pool_.centerY();
+    // 雷没排完，或 boss 已死：整只泡在水下待机
+    if (!pool_.active || pool_.bossDead || !pool_.cleared) {
+        monster.x = cx;
+        monster.y = cy;
+        monster.state = ActorState::Idle;
+        return;
+    }
+    // 浮出动画：固定在水心往上冒，期间不出手也打不到
+    if (pool_.arrive > 0.f) {
+        monster.x = cx;
+        monster.y = cy;
+        monster.state = ActorState::Idle;
+        return;
+    }
+    // 等级就是真实等级（只比玩家高 5 级），伤害按常规公式放大
+    const float statMul = 1.f + float(std::max(1, monster.level) - 1) * 0.1f;
+    const float dx = player_.x - monster.x;
+    const float dy = player_.y - monster.y;
+    const float dist = lengthOf(dx, dy);
+    faceToward(monster.facingX, monster.facingY, monster.flip, dx, dy);
+    if (player_.state == ActorState::Dead) {
+        monster.state = ActorState::Idle;
+        return;
+    }
+    if (monster.stunT > 0.f) {
+        pool_.warningT = 0.f;
+        pool_.chargeT = 0.f;
+        pool_.leapWarnT = 0.f;
+        pool_.leapT = 0.f;
+        pool_.shootWarnT = 0.f;
+        pool_.attackCd = std::max(pool_.attackCd, 0.9f);
+        monster.state = ActorState::Hurt;
+        return;
+    }
+
+    // 冲撞：预警结束后朝锁定方向高速突进
+    if (pool_.chargeT > 0.f) {
+        pool_.chargeT -= dt;
+        tryMove(monster.x, monster.y, pool_.chargeX * kSlimeChargeSpeed, pool_.chargeY * kSlimeChargeSpeed,
+            dt, kSlimeBossRadius, 1, nullptr);
+        slimeBossClampToPool(monster);
+        slimeBossContact(monster, lengthOf(player_.x - monster.x, player_.y - monster.y), 14.f * statMul);
+        slimeBossTrail(monster, dt);
+        monster.state = ActorState::Attack;
+        if (pool_.chargeT <= 0.f) {
+            pool_.attackCd = 3.2f;  // 一轮进攻后的休整：单招间隔要拉得能看清
+            pool_.attackStep = (pool_.attackStep + 1) % 3;
+            monster.contactCd = std::max(monster.contactCd, 0.45f);
+        }
+        return;
+    }
+
+    // 弹跳砸击：腾空飞向落点，落地炸出一圈腐蚀冲击
+    if (pool_.leapT > 0.f) {
+        pool_.leapT -= dt;
+        const float u = 1.f - std::clamp(pool_.leapT / ShallowPool::kLeapTime, 0.f, 1.f);
+        monster.x = pool_.leapFromX + (pool_.leapToX - pool_.leapFromX) * u;
+        monster.y = pool_.leapFromY + (pool_.leapToY - pool_.leapFromY) * u;
+        monster.state = ActorState::Attack;
+        if (pool_.leapT <= 0.f) {
+            if (lengthOf(player_.x - monster.x, player_.y - monster.y) <= kSlimeLeapRadius) {
+                hurtPlayer(kSlimeLeapDamage * statMul, &monster);
+            }
+            AttackFx ring;
+            ring.kind = AttackFxKind::Ring;
+            ring.x = monster.x;
+            ring.y = monster.y;
+            ring.radius = kSlimeLeapRadius;
+            ring.life = 0.4f;
+            ring.maxLife = 0.4f;
+            ring.color = 0x8CE04A;
+            attackFx_.push_back(ring);
+            queueVfx(VfxKind::Explode, monster.x, monster.y, kSlimeLeapRadius);
+            triggerShake();
+            for (int i = 0; i < 8; ++i) {
+                const float a = float(i) * 0.78539816339f;
+                addCorrosion(monster.x + std::cos(a) * kSlimeLeapRadius * 0.72f,
+                    monster.y + std::sin(a) * kSlimeLeapRadius * 0.44f);
+            }
+            slimeBossClampToPool(monster);
+            pool_.attackCd = 4.0f;  // 砸击后给足喘息时间
+            pool_.attackStep = (pool_.attackStep + 1) % 3;
+            monster.contactCd = std::max(monster.contactCd, 0.45f);
+        }
+        return;
+    }
+
+    // 冲撞前摇：地上画出冲刺走廊，方向一路跟着玩家；结束时锁定并冲出
+    if (pool_.warningT > 0.f) {
+        pool_.warningT -= dt;
+        monster.state = ActorState::Attack;
+        if (dist > 0.01f) {
+            pool_.chargeX = dx / dist;
+            pool_.chargeY = dy / dist;
+        } else {
+            pool_.chargeX = monster.facingX;
+            pool_.chargeY = monster.facingY;
+        }
+        if (pool_.warningT <= 0.f) {
+            pool_.chargeT = kSlimeChargeTime;
+            queueSfx(SfxId::Swing);
+        }
+        return;
+    }
+
+    // 弹跳砸击预警：落点先在地上圈出来，站出去就能躲开
+    if (pool_.leapWarnT > 0.f) {
+        pool_.leapWarnT -= dt;
+        monster.state = ActorState::Attack;
+        if (pool_.leapWarnT <= 0.f) {
+            pool_.leapFromX = monster.x;
+            pool_.leapFromY = monster.y;
+            pool_.leapT = ShallowPool::kLeapTime;
+            queueSfx(SfxId::Dodge);
+        }
+        return;
+    }
+
+    // 腐蚀水弹预警：五条射线先亮出来再开火
+    if (pool_.shootWarnT > 0.f) {
+        pool_.shootWarnT -= dt;
+        monster.state = ActorState::Attack;
+        if (pool_.shootWarnT <= 0.f) {
+            for (int i = 0; i < ShallowPool::kShootShots; ++i) {
+                Bolt bolt;
+                bolt.hostile = true;
+                bolt.corrosion = true;
+                bolt.x = monster.x;
+                bolt.y = monster.y - 16.f;
+                const float a = pool_.shootAim
+                    + (float(i) - float(ShallowPool::kShootShots - 1) * 0.5f) * ShallowPool::kShootSpread;
+                bolt.vx = std::cos(a) * 155.f;
+                bolt.vy = std::sin(a) * 155.f;
+                bolt.life = 2.0f;
+                bolt.damage = 9.f * statMul;
+                bolts_.push_back(bolt);
+            }
+            queueSfx(SfxId::Skill);
+            pool_.attackCd = 3.4f;
+            pool_.attackStep = (pool_.attackStep + 1) % 3;
+        }
+        return;
+    }
+
+    // 平时慢吞吞挪向玩家，顺手把黏液拖在地上
+    if (dist > kSlimeBossRadius + kPlayerRadius) {
+        const float step = 34.f;
+        tryMove(monster.x, monster.y, dx / std::max(1.f, dist) * step, dy / std::max(1.f, dist) * step, dt,
+            kSlimeBossRadius, 1, nullptr);
+        slimeBossClampToPool(monster);
+        pool_.trailT -= dt;
+        if (pool_.trailT <= 0.f) {
+            pool_.trailT = kSlimeTrailGap;
+            addCorrosion(monster.x, monster.y);
+        }
+        monster.state = ActorState::Run;
+    } else if (monster.state != ActorState::Attack) {
+        monster.state = ActorState::Idle;
+    }
+    slimeBossContact(monster, lengthOf(player_.x - monster.x, player_.y - monster.y), 12.f * statMul);
+
+    // 攻击间隔到了就按 冲撞 → 砸击 → 水弹 的顺序放下一招
+    pool_.attackCd -= dt;
+    if (pool_.attackCd > 0.f || dist > kSlimeBossVision) {
+        return;
+    }
+    switch (pool_.attackStep % 3) {
+    case 0:
+        pool_.warningT = kSlimeChargeWarn;
+        break;
+    case 1: {
+        if (dist > kSlimeLeapMaxRange) {
+            pool_.attackCd = 0.3f;
+            break;
+        }
+        // 预警开始时就把落点定死，地上的圈就是最终判定位置
+        float tx = player_.x;
+        float ty = player_.y;
+        const float ldx = tx - cx;
+        const float ldy = ty - cy;
+        const float ld = lengthOf(ldx, ldy);
+        const float limit = float(pool_.radius) * float(kTile) - kSlimeBossRadius;
+        if (ld > limit && ld > 0.001f) {
+            tx = cx + ldx / ld * limit;
+            ty = cy + ldy / ld * limit;
+        }
+        pool_.leapToX = tx;
+        pool_.leapToY = ty;
+        pool_.leapWarnT = kSlimeLeapWarn;
+        break;
+    }
+    default:
+        pool_.shootAim = std::atan2(dy, dx);
+        pool_.shootWarnT = kSlimeShootWarn;
+        break;
+    }
+}
+
+void Session::onSlimeBossDefeated() {
+    pool_.bossDead = true;
+    pool_.phase = ShallowPool::Phase::Leave;
+    pool_.warningT = 0.f;
+    pool_.chargeT = 0.f;
+    pool_.leapWarnT = 0.f;
+    pool_.leapT = 0.f;
+    pool_.shootWarnT = 0.f;
+    slime_.clear();
+    triggerShake();
+    // 史莱姆 boss 的掉落改成史莱姆核心：这是「史莱姆之躯」流派的门票
+    addItem(kItemSlimeCore, 1);
+    note(QString("巨型腐化史莱姆被击败　获得 %1").arg(itemText(kItemSlimeCore).name));
+    restoreSanCap();
+    if (sanActive_) {
+        sanActive_ = false;
+        player_.san = player_.maxSan;
+        player_.sanWeak = false;
+        note("理智恢复");
+    }
+    eyeDefeats_ += 1;
+    if (eyeDefeats_ == 2 || (nextRand() % 5u) == 0u) {
+        voidPrompt_ = true;
+    }
+}
+
+void Session::updatePool(float dt) {
+    updateCorrosion(dt);
+    if (pool_.phase == ShallowPool::Phase::Live) {
+        if (pool_.arrive > 0.f) {
+            pool_.arrive = std::max(0.f, pool_.arrive - dt);
+        }
+        // 走进浅水区影响范围就给一次玩法提示
+        if (!pool_.entered && pool_.inClearZone(tileOf(player_.x), tileOf(player_.y))) {
+            pool_.entered = true;
+            note("浅水区　在棋盘格上跳跃即可排雷（玩法见 Tab 说明）");
+        }
+        return;
+    }
+    if (pool_.phase == ShallowPool::Phase::Wait) {
+        pool_.cooldown -= dt;
+        if (pool_.cooldown > 0.f) {
+            return;
+        }
+    }
+    if (pool_.phase == ShallowPool::Phase::Leave) {
+        // 等玩家走出影响区再恢复地形，否则复原的水面会把玩家夹住
+        if (!pool_.inClearZone(tileOf(player_.x), tileOf(player_.y))) {
+            dismissPool();
+            pool_.phase = ShallowPool::Phase::Wait;
+            pool_.cooldown = 60.f;
+            note("浅水区域渗回地下");
+        }
+        return;
+    }
+    // None / Wait 到点：击败第一个克苏鲁之眼投影后，浅水区才开始随机刷新
+    if (eyeDefeats_ < 1) {
+        return;
+    }
+    if (!spawnPool()) {
+        pool_.phase = ShallowPool::Phase::Wait;
+        pool_.cooldown = 10.f;
+    }
+}
+
+void Session::restorePool(const QJsonObject& game) {
+    monsters_.erase(std::remove_if(monsters_.begin(), monsters_.end(), [](const Monster& monster) {
+        return monster.kind == MonsterKind::SlimeBoss;
+    }), monsters_.end());
+    slime_.clear();
+    pool_.clear();
+    map_.clearShallowPool();
+    if (!game.contains("pool")) {
+        pool_.phase = ShallowPool::Phase::None;
+        return;
+    }
+    const QJsonObject obj = game.value("pool").toObject();
+    const auto phase = ShallowPool::Phase(std::clamp(obj.value("phase").toInt(), 0, 3));
+    const float cooldown = float(obj.value("cooldown").toDouble(0.0));
+    const float sanCut = float(obj.value("sanCut").toDouble(0.0));
+    if (phase == ShallowPool::Phase::None) {
+        pool_.clear();
+        pool_.phase = ShallowPool::Phase::None;
+        return;
+    }
+    if (phase != ShallowPool::Phase::Wait) {
+        const int cx = obj.value("cx").toInt();
+        const int cy = obj.value("cy").toInt();
+        const int bx = obj.value("bx").toInt();
+        const int by = obj.value("by").toInt();
+        pool_.generate(cx, cy, bx, by, uint32_t(obj.value("seed").toDouble()));
+        if (obj.contains("radius")) {
+            pool_.radius = std::max(2, obj.value("radius").toInt());
+        }
+        pool_.bossDead = obj.value("bossDead").toBool(false);
+        pool_.entered = obj.value("entered").toBool(false);
+        pool_.cleared = obj.value("cleared").toBool(false);
+        pool_.arrive = float(obj.value("arrive").toDouble(0.0));
+        if (obj.contains("mines")) {
+            // 雷位被「开局第一格安全」挪动过，按存档里的为准
+            pool_.mineMask = uint32_t(obj.value("mines").toDouble(double(pool_.mineMask)));
+        }
+        pool_.revealedMask = uint32_t(obj.value("revealed").toDouble(0));
+        pool_.triggeredMask = uint32_t(obj.value("triggered").toDouble(0));
+    }
+    pool_.phase = phase;
+    pool_.cooldown = cooldown;
+    pool_.sanCut = sanCut;
+    syncPoolMap();
+    if (phase == ShallowPool::Phase::Live && !pool_.bossDead) {
+        const float hp = obj.contains("bossHp") ? float(obj.value("bossHp").toDouble()) : -1.f;
+        const float shield = obj.contains("bossShield") ? float(obj.value("bossShield").toDouble()) : -1.f;
+        const int level = obj.value("bossLevel").toInt(-1);
+        spawnSlimeBoss(hp, shield, level);
+    }
+    const QJsonArray spots = game.value("slime").toArray();
+    for (int i = 0; i + 1 < spots.size(); i += 2) {
+        addCorrosion(float(spots.at(i).toDouble()), float(spots.at(i + 1).toDouble()));
+    }
+    if (pool_.sanCut > 0.f) {
+        applySanCut();
     }
 }

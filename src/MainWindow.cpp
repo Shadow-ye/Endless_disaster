@@ -348,7 +348,8 @@ MainWindow::MainWindow(QWidget* parent) : QWidget(parent) {
     prepareLayout->addWidget(skillHint_);
     glossary_ = new QLabel(
         "HP 生命　MP 魔力　STA 体力　SHD 护盾\n"
-        "ARM 护甲　CRT 暴击　SPD 移速　LV 等级　XP 经验　SCORE 积分",
+        "ARM 护甲　CRT 暴击　SPD 移速　LV 等级　XP 经验　SCORE 积分\n"
+        "浅水区＝腐化史莱姆的 boss 房：跳上棋盘格排雷，boss 才会浮出",
         prepareCard);
     glossary_->setObjectName("dim");
     glossary_->setAlignment(Qt::AlignCenter);
@@ -568,7 +569,8 @@ MainWindow::MainWindow(QWidget* parent) : QWidget(parent) {
         bgmSlider_->setEnabled(on);
         saveSettingsUi();
         if (on) {
-            Audio::instance().startBgmLoop();
+            // 结算后的 5 号曲正在放就别打断，交给 ensureBgmLoop 判断
+            Audio::instance().ensureBgmLoop();
         }
     });
     connect(bgmSlider_, &QSlider::valueChanged, this, [this](int value) {

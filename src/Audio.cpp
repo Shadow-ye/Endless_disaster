@@ -55,6 +55,11 @@ struct AudioState {
     QAudioOutput* burialOut = nullptr;
     QMediaPlayer* atomicVoice = nullptr;
     QAudioOutput* atomicOut = nullptr;
+    QMediaPlayer* continueVoice = nullptr;
+    QAudioOutput* continueOut = nullptr;
+    // 「继续前进」男女两版配音，按角色性别选一条
+    QUrl continueMale;
+    QUrl continueFemale;
 };
 
 AudioState& state() {
@@ -81,8 +86,26 @@ QString resolveBgmDir(const QString& assetDir) {
     return QCoreApplication::applicationDirPath() + "/BGM";
 }
 
+// 配音文件名里的空格 / 下划线 / 连字符 / 大小写都可能改（I am atomic → I_am_atomic_man），
+// 比较前统一抹平，免得改个名就静默找不到配音
+QString clipKey(const QString& text) {
+    QString out;
+    out.reserve(text.size());
+    for (const QChar& ch : text) {
+        if (ch.isLetterOrNumber()) {
+            out.append(ch.toLower());
+        }
+    }
+    return out;
+}
+
 QString findClip(const QString& assetDir, const QString& token) {
-    const QStringList filters = {"*.wav", "*.mp3", "*.m4a", "*.ogg", "*.flac"};
+    // 配音可能是 mp3 / m4a / mp4（音频轨）等，这里都要认
+    const QStringList filters = {"*.wav", "*.mp3", "*.m4a", "*.mp4", "*.ogg", "*.flac"};
+    const QString key = clipKey(token);
+    if (key.isEmpty()) {
+        return {};
+    }
     QString best;
     QDateTime bestTime;
     for (const QString& path : bgmDirCandidates(assetDir)) {
@@ -91,7 +114,7 @@ QString findClip(const QString& assetDir, const QString& token) {
             continue;
         }
         for (const QString& name : dir.entryList(filters, QDir::Files, QDir::Name)) {
-            if (!name.contains(token)) {
+            if (!clipKey(name).contains(key)) {
                 continue;
             }
             const QFileInfo info(dir.absoluteFilePath(name));
@@ -147,9 +170,22 @@ void Audio::load(const QString& assetDir) {
         state().atomicVoice = new QMediaPlayer(QCoreApplication::instance());
         state().atomicVoice->setAudioOutput(state().atomicOut);
         state().atomicVoice->setLoops(1);
-        const QString atomic = findClip(assetDir, QStringLiteral("I am atomic"));
+        // 文件当前叫 I_am_atomic_man.mp3，取 "atomic" 这个片段，改名换扩展名都还能对上
+        const QString atomic = findClip(assetDir, QStringLiteral("atomic"));
         if (!atomic.isEmpty()) {
             state().atomicVoice->setSource(Platform::mediaUrl(atomic));
+        }
+        state().continueOut = new QAudioOutput(QCoreApplication::instance());
+        state().continueVoice = new QMediaPlayer(QCoreApplication::instance());
+        state().continueVoice->setAudioOutput(state().continueOut);
+        state().continueVoice->setLoops(1);
+        const QString continueMale = findClip(assetDir, QStringLiteral("继续前进_男"));
+        if (!continueMale.isEmpty()) {
+            state().continueMale = Platform::mediaUrl(continueMale);
+        }
+        const QString continueFemale = findClip(assetDir, QStringLiteral("继续前进_女"));
+        if (!continueFemale.isEmpty()) {
+            state().continueFemale = Platform::mediaUrl(continueFemale);
         }
         loaded_ = true;
     }
@@ -162,19 +198,27 @@ QString Audio::bgmPath(BgmId id) const {
     if (!dir.exists()) {
         return {};
     }
-    const QString prefix = id == BgmId::Recover ? QStringLiteral("2")
-        : id == BgmId::Refuse                  ? QStringLiteral("3")
-                                               : QStringLiteral("1");
+    // BgmId 的序号就是文件名里的序号（1 号 / 2 号 / 3 号…），加曲只要补一个枚举值
+    const int number = int(id);
     const QStringList files = dir.entryList(QStringList{"*.m4a", "*.mp3", "*.wav", "*.ogg", "*.flac"},
         QDir::Files, QDir::Name);
-    for (const QString& name : files) {
-        if (name.startsWith(prefix) || name.startsWith(prefix + QStringLiteral("号"))) {
-            return dir.absoluteFilePath(name);
+    // 先按「N号」精确匹配，再退回只写数字的写法（数字后面不能跟数字，否则 1 会抢到 10号）
+    for (int pass = 0; pass < 2; ++pass) {
+        const QString key = pass == 0 ? QString::number(number) + QStringLiteral("号")
+                                      : QString::number(number);
+        for (const QString& name : files) {
+            if (!name.startsWith(key)) {
+                continue;
+            }
+            const QChar next = name.size() > key.size() ? name.at(key.size()) : QChar();
+            if (pass == 0 || next.isNull() || !next.isDigit()) {
+                return dir.absoluteFilePath(name);
+            }
         }
     }
-    // 回退：按排序取第 1 / 第 2 / 第 3 个文件
-    const int want = id == BgmId::Recover ? 1 : id == BgmId::Refuse ? 2 : 0;
-    if (want < files.size()) {
+    // 回退：序号 N 对应排序后的第 N 个文件
+    const int want = number - 1;
+    if (want >= 0 && want < files.size()) {
         return dir.absoluteFilePath(files.at(want));
     }
     if (!files.isEmpty()) {
@@ -280,6 +324,27 @@ void Audio::playAtomicVoice() {
     voice->play();
 }
 
+void Audio::playContinueVoice(bool female) {
+    QMediaPlayer* voice = state().continueVoice;
+    if (!loaded_ || !sfxEnabled_ || sfxVolumePercent_ <= 0 || !voice) {
+        return;
+    }
+    const QUrl url = female ? state().continueFemale : state().continueMale;
+    if (url.isEmpty()) {
+        return;
+    }
+    if (state().continueOut) {
+        state().continueOut->setVolume(float(sfxVolumePercent_) / 100.f);
+    }
+    if (voice->source() == url) {
+        voice->stop();
+        voice->setPosition(0);
+    } else {
+        voice->setSource(url);
+    }
+    voice->play();
+}
+
 void Audio::playBgm(BgmId id, bool loop) {
     if (!loaded_ || !state().bgm) {
         return;
@@ -301,16 +366,23 @@ void Audio::playBgm(BgmId id, bool loop) {
     state().bgm->play();
 }
 
-void Audio::startBgmLoop() {
+// 新的一局：退出结算后的终曲状态，回到 1 号循环
+void Audio::beginRun() {
+    finaleMode_ = false;
     playBgm(BgmId::Explore, true);
+}
+
+void Audio::startBgmLoop() {
+    playBgm(idleBgm(), true);
 }
 
 void Audio::ensureBgmLoop() {
     if (!loaded_ || !bgmEnabled_ || bgmVolumePercent_ <= 0 || !state().bgm) {
         return;
     }
-    // 一次性曲目（2 号 / 3 号）：在放就让它放完（notifyBgmEnded 会接回 1 号循环），
-    // 之前被暂停过就唤醒，已经放完则清标志回落到 1 号循环
+    const BgmId idle = idleBgm();
+    // 一次性曲目（2 / 3 / 4 号）：在放就让它放完（notifyBgmEnded 会接回循环曲），
+    // 之前被暂停过就唤醒，已经放完则清标志回落
     if (oneshotPlaying_) {
         const QMediaPlayer::PlaybackState bgmState = state().bgm->playbackState();
         if (bgmState == QMediaPlayer::PlayingState) {
@@ -321,16 +393,22 @@ void Audio::ensureBgmLoop() {
             return;
         }
         oneshotPlaying_ = false;
-        currentBgm_ = BgmId::Explore;
+        currentBgm_ = idle;
     }
-    if (currentBgm_ == BgmId::Explore
-        && state().bgm->playbackState() == QMediaPlayer::PlayingState) {
-        return;
+    // 循环曲正在放 / 被暂停：保持进度，别回主菜单就从头再来
+    if (currentBgm_ == idle) {
+        if (state().bgm->playbackState() == QMediaPlayer::PlayingState) {
+            return;
+        }
+        if (state().bgm->playbackState() == QMediaPlayer::PausedState) {
+            state().bgm->play();
+            return;
+        }
     }
     startBgmLoop();
 }
 
-// 达到回血条件：播一次 2 号曲，播完自动接回 1 号循环
+// 达到回血条件：播一次 2 号曲，播完自动接回循环曲
 void Audio::playRecoverBgm() {
     if (!loaded_ || !bgmEnabled_) {
         return;
@@ -341,12 +419,29 @@ void Audio::playRecoverBgm() {
     playBgm(BgmId::Recover, false);
 }
 
-// 玩家拒绝结束本轮：切到 3 号曲播一次，播完自动接回 1 号循环
+// 玩家拒绝结束本轮：切到 3 号曲播一次，播完自动接回循环曲
 void Audio::playRefuseBgm() {
     if (!loaded_ || !bgmEnabled_) {
         return;
     }
     playBgm(BgmId::Refuse, false);
+}
+
+// 复活：切到 4 号曲播一次（复活是玩家明确的选择，直接打断在放的一次性曲目）
+void Audio::playReviveBgm() {
+    if (!loaded_ || !bgmEnabled_) {
+        return;
+    }
+    playBgm(BgmId::Revive, false);
+}
+
+// 本局结算：切到 5 号曲循环，回主菜单不断，下一局由 beginRun() 换回 1 号
+void Audio::playFinaleBgm() {
+    finaleMode_ = true;
+    if (!loaded_ || !bgmEnabled_) {
+        return;
+    }
+    playBgm(BgmId::Finale, true);
 }
 
 void Audio::stopBgm() {
@@ -362,25 +457,22 @@ void Audio::setBgmPaused(bool paused) {
     }
     if (paused) {
         state().bgm->pause();
-    } else if (state().bgm->playbackState() == QMediaPlayer::PausedState) {
-        state().bgm->play();
-    } else if (state().bgm->playbackState() != QMediaPlayer::PlayingState) {
-        if (oneshotPlaying_ && currentBgm_ != BgmId::Explore) {
-            playBgm(currentBgm_, false);
-        } else {
-            startBgmLoop();
-        }
+        return;
     }
+    if (state().bgm->playbackState() == QMediaPlayer::PausedState) {
+        state().bgm->play();
+        return;
+    }
+    ensureBgmLoop();
 }
 
 void Audio::notifyBgmEnded() {
-    // 只有一次性曲目（2 号 / 3 号）放完才接回 1 号循环；换曲导致的旧媒体状态不处理
+    // 只有一次性曲目（2 / 3 / 4 号）放完才回落；换曲导致的旧媒体状态不处理
     if (!oneshotPlaying_ || !state().bgm
         || state().bgm->playbackState() != QMediaPlayer::StoppedState) {
         return;
     }
     oneshotPlaying_ = false;
-    currentBgm_ = BgmId::Explore;
     startBgmLoop();
 }
 
