@@ -45,19 +45,27 @@ jobs:
 
       - name: Package
         run: |
-          cd build
-          cpack -G DEB
-          dpkg-deb --info endless-disaster_*.deb
-          dpkg-deb --contents endless-disaster_*.deb
+          set -o pipefail
+          # 输出同时进 build.log：失败时 Report failure 会把它做成公开可见的注解
+          {
+            cd build
+            cpack -G DEB
+            dpkg-deb --info endless-disaster_*.deb
+            dpkg-deb --contents endless-disaster_*.deb
+          } 2>&1 | tee -a "$RUNNER_TEMP/build.log"
 
       - name: Smoke test
         run: |
-          sudo apt-get install -y ./build/endless-disaster_*.deb
-          test -f /usr/share/endless-disaster/assets/hero_warrior/idle.png
-          test -d /usr/share/endless-disaster/BGM
-          code=0
-          QT_QPA_PLATFORM=offscreen timeout 8 endless-disaster || code=$?
-          if [ "$code" -ne 124 ]; then echo "endless-disaster exited early with code $code"; exit 1; fi
+          set -o pipefail
+          {
+            sudo apt-get install -y ./build/endless-disaster_*.deb
+            dpkg -l endless-disaster
+            test -f /usr/share/endless-disaster/assets/hero_warrior/idle.png
+            test -d /usr/share/endless-disaster/BGM
+            code=0
+            QT_QPA_PLATFORM=offscreen timeout 8 endless-disaster || code=$?
+            if [ "$code" -ne 124 ]; then echo "endless-disaster exited early with code $code"; exit 1; fi
+          } 2>&1 | tee -a "$RUNNER_TEMP/build.log"
 
       - uses: actions/upload-artifact@v4
         with:
