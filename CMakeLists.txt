@@ -1,5 +1,5 @@
 cmake_minimum_required(VERSION 3.21)
-project(EndlessDisaster VERSION 0.5.8 LANGUAGES CXX)
+project(EndlessDisaster VERSION 0.6.0 LANGUAGES CXX)
 
 set(CMAKE_CXX_STANDARD 17)
 set(CMAKE_CXX_STANDARD_REQUIRED ON)
@@ -19,6 +19,8 @@ qt_add_executable(EndlessDisaster
     src/TileMap.cpp
     src/MazeRuin.h
     src/MazeRuin.cpp
+    src/ShallowPool.h
+    src/ShallowPool.cpp
     src/PathField.h
     src/PathField.cpp
     src/Sprites.h
