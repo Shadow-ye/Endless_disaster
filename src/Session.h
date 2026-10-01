@@ -67,6 +67,7 @@ struct MimicBonus {
     float cooldown = 1.f;  // <1 表示冷却缩短
     float atkSpeed = 1.f;
     float damage = 1.f;
+    float manaRegen = 1.f;  // 回蓝速度倍率
     int crit = 0;  // 暴击率百分点
 };
 enum class HeroClass { Warrior, Sword, Mage, Robot };
@@ -432,8 +433,9 @@ public:
     float mimicSkillCooldownMax() const;
     // 图鉴里点选形态；未吞噬的形态不会生效
     void setMimicForm(MimicForm form);
-    // 史莱姆核心只能搭着意识回归符咒一起用：两个都持有才算可用
-    bool canUseSlimeCore() const { return talismanCount() > 0 && slimeCoreCount() > 0; }
+    // 史莱姆核心只能搭着意识回归符咒一起用：两个都持有才算可用；
+    // 已经是史莱姆之躯后核心不再生效，复活选项里也不该再出现
+    bool canUseSlimeCore() const { return !player_.slimeBody && talismanCount() > 0 && slimeCoreCount() > 0; }
     bool acceptReviveWithSlimeCore();
     // 结算时符咒折算出来的积分，只在结算面板上用
     int talismanBonus() const { return talismanBonus_; }

@@ -139,12 +139,12 @@ Tile TileMap::at(int x, int y) const {
         }
         return Tile::MazeFloor;
     }
-    // 浅水 boss 房：圆形水面盖住原地形，棋盘格强制成可走地面
-    if (inShallowPool(x, y)) {
-        return Tile::Shallow;
-    }
+    // 浅水 boss 房：棋盘摆在圆形水面正中央，棋盘格强制成可走地面，其余是浅水
     if (onShallowBoard(x, y)) {
         return Tile::Grass;
+    }
+    if (inShallowPool(x, y)) {
+        return Tile::Shallow;
     }
     // 先算出原本该是什么地形，再按浅水区清空带决定要不要把障碍物抹平
     const Tile base = baseTile(x, y);

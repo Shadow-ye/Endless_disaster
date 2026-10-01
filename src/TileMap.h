@@ -21,7 +21,7 @@ public:
     void setRuin(int originX, int originY, int width, int height, const std::vector<uint8_t>& walls);
     void clearRuin();
 
-    // 浅水 boss 房覆盖层：一块圆形浅水区（通行与平地无异）+ 旁边一块排雷棋盘。
+    // 浅水 boss 房覆盖层：一块圆形浅水区（通行与平地无异）+ 正中央一块排雷棋盘。
     // 棋盘格强制成可走地面；浅水区外 margin 格内、以及棋盘外 boardMargin 格内的
     // 岩石/灌木/水塘也一并清掉，只留平地（棋盘上方的树会把格子数字盖住）。
     void setShallowPool(int cx, int cy, int radius, int margin, int boardX, int boardY, int boardSize, int boardMargin);

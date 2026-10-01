@@ -89,6 +89,8 @@ private:
     void closeMimicPanel();
     void refreshMimicPanel();
     void layoutOverlays();
+    // 有界面弹出时压低 BGM 音量（不停播），全部关掉后恢复；结算面板不算，它配的是 5 号终曲
+    void updateBgmDuck();
     void syncKey(int key, bool down);
     QRect viewRect() const;
     QPointF mouseWorld() const;
@@ -127,8 +129,10 @@ private:
     void drawParticles(QPainter& painter);
     float vfxRand();
     void drawShadow(QPainter& painter, float x, float y);
-    // 拟态成 boss 时的本体（比原 boss 小一圈、不带血条铭牌）
-    void drawBossMimic(QPainter& painter, MimicForm form, float x, float y, float animT, float scale, bool hurt);
+    // 拟态成 boss 时的本体（比原 boss 小一圈、不带血条铭牌）；
+    // gazeX / gazeY 是朝向（攻击方向）单位向量，仅供克苏鲁之眼形态的眼珠跟随
+    void drawBossMimic(QPainter& painter, MimicForm form, float x, float y, float animT, float scale, bool hurt,
+        float gazeX = 0.f, float gazeY = 0.f);
     // 图鉴按钮上的小图标
     QIcon mimicIcon(MimicForm form);
     void drawAnim(QPainter& painter, const SpriteAnim& anim, ActorState state, float animT, float x, float y, bool flip, bool moving);

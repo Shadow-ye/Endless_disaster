@@ -520,7 +520,7 @@ GameWidget::GameWidget(QWidget* parent) : QWidget(parent) {
     connect(voidStay, &QPushButton::clicked, this, [this] {
         voidPanel_->hide();
         session_.setPaused(false);
-        Audio::instance().setBgmPaused(false);
+        updateBgmDuck();
         Audio::instance().playRefuseBgm();
         Audio::instance().playContinueVoice(femaleHero(session_.player().hero));
         setFocus();
@@ -549,7 +549,7 @@ GameWidget::GameWidget(QWidget* parent) : QWidget(parent) {
     connect(reviveYes, &QPushButton::clicked, this, [this] {
         revivePanel_->hide();
         session_.acceptRevive();
-        Audio::instance().setBgmPaused(false);
+        updateBgmDuck();
         // 复活：4 号曲播一次
         Audio::instance().playReviveBgm();
         setFocus();
@@ -559,7 +559,7 @@ GameWidget::GameWidget(QWidget* parent) : QWidget(parent) {
             return;
         }
         revivePanel_->hide();
-        Audio::instance().setBgmPaused(false);
+        updateBgmDuck();
         // 复活：4 号曲播一次
         Audio::instance().playReviveBgm();
         toast_ = QStringLiteral("史莱姆之躯：按 T 打开拟态图鉴，左 Ctrl 用拟态技能");
@@ -568,9 +568,9 @@ GameWidget::GameWidget(QWidget* parent) : QWidget(parent) {
     });
     connect(reviveNo, &QPushButton::clicked, this, [this] {
         revivePanel_->hide();
+        updateBgmDuck();
         // 拒绝回归是直接结算，不算「拒绝结束本轮」：不播 3 号曲，结算时接 5 号曲
         session_.declineRevive();
-        Audio::instance().setBgmPaused(false);
         setFocus();
     });
     revivePanel_->setObjectName("panel");
@@ -615,9 +615,8 @@ GameWidget::GameWidget(QWidget* parent) : QWidget(parent) {
     connect(qApp, &QGuiApplication::applicationStateChanged, this, [this](Qt::ApplicationState state) {
         const bool inGame = running_ && !session_.ended();
         if (state == Qt::ApplicationActive) {
-            if (!(inGame && session_.paused())) {
-                Audio::instance().setBgmPaused(false);
-            }
+            // 界面暂停不再影响 BGM：回到前台就恢复播放
+            Audio::instance().setBgmPaused(false);
             return;
         }
         if (inGame && !session_.paused()) {
@@ -645,6 +644,7 @@ void GameWidget::leaveToMenu() {
     revivePanel_->hide();
     mimicPanel_->hide();
     mimicOpen_ = false;
+    updateBgmDuck();
     releaseAllTouches();
     emit returnedToMenu();
 }
@@ -796,6 +796,7 @@ void GameWidget::startNew(HeroClass hero, int skillD, int skillF, int skillC, in
     revivePanel_->hide();
     mimicPanel_->hide();
     mimicOpen_ = false;
+    updateBgmDuck();
     // 新的一局：结算后一直放的 5 号曲到此为止，换回 1 号循环
     Audio::instance().beginRun();
     setFocus();
@@ -817,6 +818,7 @@ void GameWidget::startContinue(const QJsonObject& game) {
     revivePanel_->hide();
     mimicPanel_->hide();
     mimicOpen_ = false;
+    updateBgmDuck();
     Audio::instance().beginRun();
     setFocus();
 }
@@ -830,7 +832,7 @@ void GameWidget::setPaused(bool paused) {
     session_.setPaused(paused);
     confirmPanel_->hide();
     pausePanel_->setVisible(paused);
-    Audio::instance().setBgmPaused(paused);
+    // 任何界面都不再压 BGM：暂停菜单弹出时背景音乐照常放
     if (declined) {
         Audio::instance().playRefuseBgm();
         Audio::instance().playContinueVoice(femaleHero(session_.player().hero));
@@ -853,6 +855,8 @@ void GameWidget::setPaused(bool paused) {
         pausePanel_->raise();
         layoutOverlays();
     }
+    // 取消暂停不走 layoutOverlays，这里单独同步一次
+    updateBgmDuck();
 }
 
 void GameWidget::togglePause() {
@@ -899,7 +903,6 @@ void GameWidget::showVoidPrompt() {
         return;
     }
     session_.setPaused(true);
-    Audio::instance().setBgmPaused(true);
     pausePanel_->hide();
     confirmPanel_->hide();
     voidPanel_->show();
@@ -912,7 +915,6 @@ void GameWidget::showRevivePrompt() {
         return;
     }
     session_.setPaused(true);
-    Audio::instance().setBgmPaused(true);
     pausePanel_->hide();
     confirmPanel_->hide();
     voidPanel_->hide();
@@ -923,7 +925,10 @@ void GameWidget::showRevivePrompt() {
                                   "拒绝回归：直接结算，剩余符咒与核心折算积分")
                        .arg(owned)
                        .arg(cores);
-    if (session_.canUseSlimeCore()) {
+    if (session_.slimeBody()) {
+        // 已经是史莱姆之躯：核心不再可用，也不给这个选项
+        text += QStringLiteral("\n已是史莱姆之躯，不再需要史莱姆核心");
+    } else if (session_.canUseSlimeCore()) {
         text += QStringLiteral("\n使用史莱姆核心回归：额外消耗 1 个核心，复活并永久转化为史莱姆之躯");
     } else if (cores > 0) {
         text += QStringLiteral("\n史莱姆核心需要与符咒同时持有才可使用");
@@ -993,6 +998,7 @@ void GameWidget::closeMimicPanel() {
     }
     mimicOpen_ = false;
     mimicPanel_->hide();
+    updateBgmDuck();
     if (running_ && !session_.ended() && !pausePanel_->isVisible()) {
         session_.setPaused(false);
     }
@@ -1061,6 +1067,17 @@ void GameWidget::layoutOverlays() {
     revivePanel_->move((width() - revivePanel_->width()) / 2, (height() - revivePanel_->height()) / 2);
     mimicPanel_->adjustSize();
     mimicPanel_->move((width() - mimicPanel_->width()) / 2, (height() - mimicPanel_->height()) / 2);
+    // 面板显隐大多走这里，顺便同步一次 BGM 压音状态
+    updateBgmDuck();
+}
+
+void GameWidget::updateBgmDuck() {
+    const bool ducked = (pausePanel_ && pausePanel_->isVisible())
+        || (confirmPanel_ && confirmPanel_->isVisible())
+        || (voidPanel_ && voidPanel_->isVisible())
+        || (revivePanel_ && revivePanel_->isVisible())
+        || (mimicPanel_ && mimicPanel_->isVisible());
+    Audio::instance().setBgmDucked(ducked);
 }
 
 void GameWidget::tick() {
@@ -2002,7 +2019,8 @@ void GameWidget::drawAnim(QPainter& painter, const SpriteAnim& anim, ActorState 
 }
 
 // 拟态成两个 boss 时的玩家本体：把 boss 的造型缩小，不带血条与铭牌
-void GameWidget::drawBossMimic(QPainter& painter, MimicForm form, float x, float y, float animT, float scale, bool hurt) {
+void GameWidget::drawBossMimic(QPainter& painter, MimicForm form, float x, float y, float animT, float scale, bool hurt,
+    float gazeX, float gazeY) {
     const float bob = std::sin(animT * 3.f) * 1.2f;
     if (form == MimicForm::Eye) {
         const float rx = 16.f * scale;
@@ -2017,11 +2035,24 @@ void GameWidget::drawBossMimic(QPainter& painter, MimicForm form, float x, float
         painter.setPen(QPen(QColor(120, 16, 22, 170), 1));
         painter.drawLine(QPointF(x - rx * 0.82f, cy - ry * 0.15f), QPointF(x - rx * 0.38f, cy + ry * 0.12f));
         painter.drawLine(QPointF(x + rx * 0.82f, cy - ry * 0.15f), QPointF(x + rx * 0.38f, cy + ry * 0.12f));
+        // 眼珠（虹膜＋竖瞳）跟着朝向 / 攻击方向在眼白里偏移，与真 boss 的视线逻辑一致
+        float gx = gazeX;
+        float gy = gazeY;
+        const float gazeLen = std::sqrt(gx * gx + gy * gy);
+        if (gazeLen > 0.001f) {
+            gx /= gazeLen;
+            gy /= gazeLen;
+        } else {
+            gx = 0.f;
+            gy = 0.f;
+        }
+        const float eyeX = x + gx * rx * 0.42f;
+        const float eyeY = cy + gy * ry * 0.42f;
         painter.setPen(Qt::NoPen);
         painter.setBrush(QColor(110, 8, 16, 245));
-        painter.drawEllipse(QRectF(x - rx * 0.4f, cy - ry * 0.55f, rx * 0.8f, ry * 1.1f));
+        painter.drawEllipse(QRectF(eyeX - rx * 0.4f, eyeY - ry * 0.55f, rx * 0.8f, ry * 1.1f));
         painter.setBrush(QColor(12, 0, 4, 250));
-        painter.drawRoundedRect(QRectF(x - rx * 0.06f, cy - ry * 0.46f, rx * 0.12f, ry * 0.92f), 1.2, 1.2);
+        painter.drawRoundedRect(QRectF(eyeX - rx * 0.06f, eyeY - ry * 0.46f, rx * 0.12f, ry * 0.92f), 1.2, 1.2);
         return;
     }
     // 腐化史莱姆形态
@@ -2090,8 +2121,10 @@ QIcon GameWidget::mimicIcon(MimicForm form) {
     }
     const bool bossForm = form == MimicForm::Eye || form == MimicForm::SlimeBoss;
     if (!bossForm && anim && anim->ok()) {
-        const QColor tint = form == MimicForm::Caster ? QColor(88, 42, 112) : QColor();
-        anim->draw(painter, 0, kIcon * 0.5f, float(kIcon) - 3.f, false, 0.8f, 0.f, tint, 0);
+        // 史莱姆形态重上色成浅蓝，术士形态用蘑菇贴图染紫，与场上的拟态配色保持一致
+        const bool recolor = form == MimicForm::Slime;
+        const QColor tint = recolor ? QColor(150, 214, 246) : form == MimicForm::Caster ? QColor(88, 42, 112) : QColor();
+        anim->draw(painter, 0, kIcon * 0.5f, float(kIcon) - 3.f, false, 0.8f, 0.f, tint, 0, recolor);
     } else {
         // 贴图缺失或 boss 形态：直接画个小本体
         drawBossMimic(painter, form, kIcon * 0.5f, float(kIcon) - 5.f, 0.f, 0.85f, false);
@@ -2578,10 +2611,26 @@ void GameWidget::drawWorld(QPainter& painter) {
                     painter.drawEllipse(QRectF(cx - player.burialR, cy - player.burialR, player.burialR * 2.f, player.burialR * 2.f));
                 }
             }
+            // 史莱姆之躯指示：头顶一枚红色描边、绿色倒三角，闪烁
+            auto drawSlimeBodyMark = [&](float markX, float tipY) {
+                if (!player.slimeBody || player.state == ActorState::Dead) {
+                    return;
+                }
+                if (int(player.animT * 6.f) % 2 != 0) {
+                    return;
+                }
+                const QPointF tri[3] = {
+                    QPointF(markX, tipY), QPointF(markX - 5.5f, tipY - 9.f), QPointF(markX + 5.5f, tipY - 9.f)};
+                painter.setBrush(QColor(96, 226, 96));
+                painter.setPen(QPen(QColor(230, 58, 48), 1.6f));
+                painter.drawPolygon(tri, 3);
+            };
             if (mimicBossForm) {
-                // 两个 boss 形态没有贴图：手绘一个缩小版本体
-                drawBossMimic(painter, player.mimic, player.x, player.y, player.animT,
-                    player.state == ActorState::Dead ? 0.62f : 1.f, player.hurtT > 0.1f);
+                // 两个 boss 形态没有贴图：手绘一个缩小版本体；跳跃抬升同样要作用到本体上
+                drawBossMimic(painter, player.mimic, player.x, player.y - lift, player.animT,
+                    player.state == ActorState::Dead ? 0.62f : 1.f, player.hurtT > 0.1f,
+                    player.facingX, player.facingY);
+                drawSlimeBodyMark(player.x, player.y - lift - 28.f);
             } else if (anim->ok()) {
                 const bool loop = player.state != ActorState::Attack && player.state != ActorState::Hurt && player.state != ActorState::Dead;
                 const float fps = player.state == ActorState::Attack ? 18.f : 12.f;
@@ -2590,12 +2639,16 @@ void GameWidget::drawWorld(QPainter& painter) {
                 const float heroScale = anim->dirs() >= 8 ? 1.f : 1.25f;
                 // 机甲人贴图整体下沉 5% 帧高，枪口高度见 Session 的 kRobotMuzzleLift
                 const float sink = (player.hero == HeroClass::Robot && !mimicking) ? anim->size() * 0.05f : 0.f;
-                // 术士形态用蘑菇贴图染色，受击时闪白黄
+                // 史莱姆形态重上色成浅蓝，术士形态用蘑菇贴图染紫；受击时闪白黄
+                const bool slimeForm = player.slimeBody && player.mimic == MimicForm::Slime;
                 QColor tint = (player.slimeBody && player.mimic == MimicForm::Caster) ? QColor(88, 42, 112) : QColor();
+                if (slimeForm) {
+                    tint = QColor(150, 214, 246);
+                }
                 if (player.hurtT > 0.1f) {
                     tint = QColor(255, 220, 80);
                 }
-                anim->draw(painter, frameIndex(*anim, player.animT, loop, fps), player.x, player.y + sink, flip, heroScale, lift, tint, dir);
+                anim->draw(painter, frameIndex(*anim, player.animT, loop, fps), player.x, player.y + sink, flip, heroScale, lift, tint, dir, slimeForm);
                 if (player.hero == HeroClass::Robot && player.flying && !mimicking) {
                     const float footY = player.y + sink - lift;
                     painter.setPen(Qt::NoPen);
@@ -2631,6 +2684,7 @@ void GameWidget::drawWorld(QPainter& painter) {
                 painter.drawRoundedRect(nameBox, 2, 2);
                 painter.setPen(QColor(242, 230, 216));
                 painter.drawText(nameBox, Qt::AlignCenter, nick);
+                drawSlimeBodyMark(player.x, nameBox.top() - 3.f);
             }
             if (player.guardT > 0.f) {
                 painter.setPen(QPen(QColor(64, 148, 255, 220), 2));

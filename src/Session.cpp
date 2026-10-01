@@ -1007,6 +1007,7 @@ MimicBonus Session::mimicBonus() const {
     switch (player_.mimic) {
     case MimicForm::Slime:
         bonus.maxHp = 1.25f;
+        bonus.manaRegen = 2.f;
         break;
     case MimicForm::Skeleton:
         bonus.armor = 1.5f;
@@ -2760,7 +2761,7 @@ void Session::updatePlayer(float dt, const InputState& input, float mouseX, floa
     if (player_.state != ActorState::Dodge && !player_.flying) {
         player_.stamina = std::min(player_.maxStamina, player_.stamina + 32.f * dt);
     }
-    player_.mp = std::min(player_.maxMp, player_.mp + 10.f * dt);
+    player_.mp = std::min(player_.maxMp, player_.mp + 10.f * mimicBonus().manaRegen * dt);
     player_.shield = std::min(player_.maxShield, player_.shield + 3.f * dt);
     if (player_.state == ActorState::Dead) {
         return;
@@ -4129,7 +4130,7 @@ void Session::restoreRuin(const QJsonObject& game) {
 
 // ---------------------------------------------------------------------------
 // 浅水 boss 房「巨型腐化史莱姆」
-// 独立于迷宫遗迹的另一套 boss 房：圆形浅水区 + 旁边的排雷小游戏
+// 独立于迷宫遗迹的另一套 boss 房：圆形浅水区 + 正中央的排雷小游戏
 // ---------------------------------------------------------------------------
 
 float Session::shallowMoveMul(float x, float y, bool immune) const {
@@ -4176,12 +4177,13 @@ bool Session::spawnPool() {
         if (dx * dx + dy * dy < 38 * 38) {
             continue;
         }
-        // 棋盘摆在浅水区正右方的一片空地上
-        const int bx = cx + kR + 1;
+        // 棋盘摆在浅水区正中央
+        const int bx = cx - kBoard / 2;
         const int by = cy - kBoard / 2;
         const int m = ShallowPool::kClearMargin;
+        // 棋盘已落在浅水区正中，判重范围只按圆形水面的外接矩形算
         const int x0 = cx - kR - m;
-        const int x1 = bx + kBoard - 1;
+        const int x1 = cx + kR + m;
         const int y0 = cy - kR - m;
         const int y1 = cy + kR + m;
         // 别和迷宫遗迹（含外圈清空带）挤在一起，两套覆盖层互相打架

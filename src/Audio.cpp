@@ -16,6 +16,8 @@
 
 namespace {
 constexpr int kVoices = 3;
+// 界面弹出时 BGM 保留的音量比例（压低但不停播）
+constexpr float kBgmDuckScale = 0.35f;
 
 const char* sfxFile(SfxId id) {
     switch (id) {
@@ -272,7 +274,10 @@ void Audio::rebuildSfxVolumes() {
 
 void Audio::rebuildBgmVolume() {
     if (state().bgmOut) {
-        const float vol = bgmEnabled_ ? float(bgmVolumePercent_) / 100.f : 0.f;
+        float vol = bgmEnabled_ ? float(bgmVolumePercent_) / 100.f : 0.f;
+        if (bgmDucked_) {
+            vol *= kBgmDuckScale;
+        }
         state().bgmOut->setVolume(vol);
     }
 }
@@ -358,9 +363,23 @@ void Audio::playBgm(BgmId id, bool loop) {
     if (file.isEmpty()) {
         return;
     }
+    const QUrl url = Platform::mediaUrl(file);
+    // 同一首已经在放（或只是被暂停）就不重头再来：保留进度，只补上与本次请求一致的循环设置
+    if (currentBgm_ == id && state().bgm->source() == url) {
+        const QMediaPlayer::PlaybackState bgmState = state().bgm->playbackState();
+        if (bgmState == QMediaPlayer::PlayingState || bgmState == QMediaPlayer::PausedState) {
+            oneshotPlaying_ = !loop;
+            state().bgm->setLoops(loop ? QMediaPlayer::Infinite : 1);
+            rebuildBgmVolume();
+            if (bgmState == QMediaPlayer::PausedState) {
+                state().bgm->play();
+            }
+            return;
+        }
+    }
     currentBgm_ = id;
     oneshotPlaying_ = !loop;
-    state().bgm->setSource(Platform::mediaUrl(file));
+    state().bgm->setSource(url);
     state().bgm->setLoops(loop ? QMediaPlayer::Infinite : 1);
     rebuildBgmVolume();
     state().bgm->play();
@@ -464,6 +483,14 @@ void Audio::setBgmPaused(bool paused) {
         return;
     }
     ensureBgmLoop();
+}
+
+void Audio::setBgmDucked(bool ducked) {
+    if (bgmDucked_ == ducked) {
+        return;
+    }
+    bgmDucked_ = ducked;
+    rebuildBgmVolume();
 }
 
 void Audio::notifyBgmEnded() {

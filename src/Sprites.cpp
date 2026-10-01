@@ -20,7 +20,7 @@ bool SpriteAnim::load(const QString& path, int size) {
     return true;
 }
 
-void SpriteAnim::draw(QPainter& painter, int frame, float x, float y, bool flip, float scale, float lift, const QColor& tint, int dir) const {
+void SpriteAnim::draw(QPainter& painter, int frame, float x, float y, bool flip, float scale, float lift, const QColor& tint, int dir, bool recolor) const {
     if (!ok()) {
         return;
     }
@@ -29,8 +29,9 @@ void SpriteAnim::draw(QPainter& painter, int frame, float x, float y, bool flip,
     const QImage* sourceImage = &image_;
     if (tint.isValid()) {
         const QRgb key = tint.rgba();
-        auto it = tinted_.find(key);
-        if (it == tinted_.end()) {
+        QHash<QRgb, QImage>& cache = recolor ? recolored_ : tinted_;
+        auto it = cache.find(key);
+        if (it == cache.end()) {
             QImage tinted = image_.convertToFormat(QImage::Format_ARGB32);
             for (int py = 0; py < tinted.height(); ++py) {
                 auto* line = reinterpret_cast<QRgb*>(tinted.scanLine(py));
@@ -39,10 +40,25 @@ void SpriteAnim::draw(QPainter& painter, int frame, float x, float y, bool flip,
                     if (alpha == 0) {
                         continue;
                     }
-                    line[px] = qRgba((qRed(line[px]) + tint.red()) / 2, (qGreen(line[px]) + tint.green()) / 2, (qBlue(line[px]) + tint.blue()) / 2, alpha);
+                    int r = 0;
+                    int g = 0;
+                    int b = 0;
+                    if (recolor) {
+                        // 重上色：按原像素明度铺目标色，暗部保留轮廓，亮部就是目标色
+                        const int lum = (qRed(line[px]) * 299 + qGreen(line[px]) * 587 + qBlue(line[px]) * 114) / 1000;
+                        const int k = 90 + lum * 165 / 255;
+                        r = tint.red() * k / 255;
+                        g = tint.green() * k / 255;
+                        b = tint.blue() * k / 255;
+                    } else {
+                        r = (qRed(line[px]) + tint.red()) / 2;
+                        g = (qGreen(line[px]) + tint.green()) / 2;
+                        b = (qBlue(line[px]) + tint.blue()) / 2;
+                    }
+                    line[px] = qRgba(std::clamp(r, 0, 255), std::clamp(g, 0, 255), std::clamp(b, 0, 255), alpha);
                 }
             }
-            it = tinted_.insert(key, tinted.convertToFormat(QImage::Format_ARGB32_Premultiplied));
+            it = cache.insert(key, tinted.convertToFormat(QImage::Format_ARGB32_Premultiplied));
         }
         sourceImage = &it.value();
     }

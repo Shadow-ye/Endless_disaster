@@ -197,7 +197,7 @@ inline MimicText mimicText(MimicForm form) {
     case MimicForm::Slime:
         return {"史莱姆", "腐蚀喷吐",
             "腐蚀喷吐（左 Ctrl，冷却 4 秒）：朝鼠标吐出腐蚀黏液弹，命中造成伤害并在地面留下腐蚀粘液。",
-            "最大生命 +25%。"};
+            "最大生命 +25%，回蓝速度 +100%。"};
     case MimicForm::Skeleton:
         return {"骷髅", "骨刺突进",
             "骨刺突进（左 Ctrl，冷却 4 秒）：朝鼠标突进一段，并伤害身前扇形内的敌人。",

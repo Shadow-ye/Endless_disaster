@@ -5,7 +5,7 @@
 #include <cstdint>
 
 // 浅水 boss 房：一块圆形浅水区（通行与平地一样，只对生物略微减速），
-// 旁边地面上刷新一局扫雷棋盘。玩家跳跃揭示方块，排完雷后「巨型腐化史莱姆」从水中浮出。
+// 正中央摆一局扫雷棋盘。玩家跳跃揭示方块，排完雷后「巨型腐化史莱姆」从水中浮出。
 class ShallowPool {
 public:
     static constexpr int kBoardSize = 5;

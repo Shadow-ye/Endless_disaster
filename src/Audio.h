@@ -67,6 +67,8 @@ public:
     void playFinaleBgm();
     void stopBgm();
     void setBgmPaused(bool paused);
+    // 弹出界面时把 BGM 压低而不是停播，界面关掉后回到原音量
+    void setBgmDucked(bool ducked);
     void notifyBgmEnded();
     void applyFromSettings();
 
@@ -87,6 +89,8 @@ private:
     BgmId currentBgm_ = BgmId::Explore;
     // 正在播放一次性曲目（2 号 / 3 号 / 4 号），放完由 notifyBgmEnded 接回循环曲
     bool oneshotPlaying_ = false;
+    // 有界面弹出：BGM 照放，音量按 kBgmDuckScale 压低
+    bool bgmDucked_ = false;
     // 本局已结算：循环曲从 1 号换成 5 号，直到下一局开始
     bool finaleMode_ = false;
     QString assetDir_;

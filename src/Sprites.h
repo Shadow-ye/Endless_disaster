@@ -15,7 +15,8 @@ public:
     int frames() const { return frames_; }
     int dirs() const { return dirs_; }
     int size() const { return size_; }
-    void draw(QPainter& painter, int frame, float x, float y, bool flip, float scale = 1.f, float lift = 0.f, const QColor& tint = QColor(), int dir = 0) const;
+    // tint 非空时染色：recolor=false 与原色取平均，recolor=true 按原像素明度重上色（保留明暗）
+    void draw(QPainter& painter, int frame, float x, float y, bool flip, float scale = 1.f, float lift = 0.f, const QColor& tint = QColor(), int dir = 0, bool recolor = false) const;
 
 private:
     QImage image_;
@@ -23,6 +24,7 @@ private:
     int frames_ = 0;
     int dirs_ = 1;
     mutable QHash<QRgb, QImage> tinted_;
+    mutable QHash<QRgb, QImage> recolored_;
 };
 
 class SpriteSet {
