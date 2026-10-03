@@ -1105,20 +1105,21 @@ const SKILLS = {
   medkit: ['战术医疗包', '3 秒内持续回复 24% 最大生命。消耗 16 MP，冷却 16 秒。'],
   jetpack: ['喷气背包', '开关喷气背包，离地飞行，可越过岩石和灌木。每秒消耗 22，优先扣 STA，再扣 MP，耗尽后落地；飞行中 STA 不回复。'],
   melee: ['肘击', '按下技能键用肘部撞击一次：身前 34 距离扇形内基础伤害 11，能劈掉敌方飞弹，击败克苏鲁之眼后还能劈开迷宫墙。消耗 8 STA，冷却 0.9 秒。不占用普攻，点按左键仍是点射。'],
+  atomic: ['I am atomic', '核级引爆：倾泻当前全部 MP，抹除画面内所有怪物，包括克苏鲁之眼。至少 30 MP 才能释放；烧掉的 MP 越多冷却越短——满 MP 时 12 秒，只够门槛时 30 秒。蓄力 4 秒，配 5 秒英文吟唱配音与逐词字幕。'],
 };
 
 const HEROES = [
   {
     key: 'warrior', name: '战士', role: 'WARRIOR · 近战', accent: '#ff6b4a', portrait: 'img/warrior.png',
-    desc: '血量与护甲最高的前排。轻击近战劈砍，还能劈掉敌方飞弹；按住左键放出小剑气（距离 56，基础伤害 24）。',
-    stats: { HP: 120, ARM: 14, MP: 60, CRT: 12 }, pool: '技能四选三 · 装配到 R / F / C',
-    skills: ['spin', 'qi', 'thrust', 'berserk'],
+    desc: '血量与护甲最高的前排。轻击近战劈砍，还能劈掉敌方飞弹；按住左键放出小剑气（距离 56，基础伤害 24）。技能里带上「突刺」后，长按闪避 0.5 秒起手判定，10 秒内打完 3 突刺 + 3 普攻 + 1 跳跃，即可在 20 秒内用下一次普攻或重击打出隐藏连招「次元斩」。',
+    stats: { HP: 120, ARM: 14, MP: 60, CRT: 12 }, pool: '技能五选三 · 装配到 R / F / C',
+    skills: ['spin', 'qi', 'thrust', 'berserk', 'atomic'],
   },
   {
     key: 'sword', name: '女剑客', role: 'SWORDSWOMAN · 近战', accent: '#8fb8ff', portrait: 'img/sword.png',
     desc: '以速度与暴击见长：移速 +16，暴击率 22%。同样能劈砍飞弹、重击放小剑气，靠身法在怪潮中穿梭。',
-    stats: { HP: 95, ARM: 8, MP: 85, CRT: 22 }, pool: '技能四选三 · 装配到 R / F / C',
-    skills: ['spin', 'qi', 'thrust', 'berserk'],
+    stats: { HP: 95, ARM: 8, MP: 85, CRT: 22 }, pool: '技能五选三 · 装配到 R / F / C',
+    skills: ['spin', 'qi', 'thrust', 'berserk', 'atomic'],
   },
   {
     key: 'mage', name: '女魔法师', role: 'MAGE · 远程', accent: '#b98cff', portrait: 'img/mage.png',
@@ -1314,6 +1315,7 @@ const MONSTER_CARDS = [
   { key: 'flyer', sheet: 'flyer', name: '飞行怪', tag: '空中', desc: '在低空盘旋，被击退时能越过障碍。', loop: 'fly', acts: ['attack', 'hurt', 'death'], scale: 3 },
   { key: 'caster', sheet: 'mushroom', name: '施法怪', tag: '20 秒后 · 带护盾', desc: '紫色的蘑菇术士，保持距离放出法弹。', loop: 'idle', acts: ['jump', 'death'], scale: 4, tint: 'rgb(88,42,112)' },
   { key: 'killbot', sheet: 'killbot', name: '机器人小兵', tag: '30 秒后', desc: '8 方向行动，绕着你转圈并点射。', loop: 'walk', acts: ['attack', 'death'], scale: 4, dirs: true },
+  { key: 'slimeBoss', sheet: 'slime', name: '巨型腐化史莱姆', tag: '浅水区 boss', desc: '排完雷从水中浮出的 420 血 boss：冲撞 / 弹跳砸击 / 腐蚀水弹三招都会先在地上画出真正的判定范围，经过处留下的腐蚀粘液持续掉血。', loop: 'walk', acts: ['death'], scale: 5, tint: 'rgb(96,168,58)' },
   { key: 'elite', sheet: 'skeleton', name: '精英怪物', tag: '被诅咒后', desc: '诅咒「存在被克苏鲁余光注意！」召来的精英，种类随机：血量翻倍、韧性更高，击杀积分也是双倍。', loop: 'walk', acts: ['attack', 'hurt', 'death'], scale: 3, tint: 'rgb(132,62,196)' },
 ];
 
@@ -1610,6 +1612,183 @@ function createMaze(canvas) {
   addTicker(canvas, tick);
 }
 
+/* ================= 浅水区 ================= */
+
+// 第二处 boss 房：水中央 5×5、5 颗雷的扫雷棋盘，跳着揭开格子，排完雷 boss 浮出
+function createShallowPool(canvas) {
+  const ctx = canvas.getContext('2d');
+  const caption = $('#poolCaption');
+  const S = canvas.width;
+  const N = 5, MINES = 5, cell = 54;
+  const bx = (S - N * cell) / 2, by = (S - N * cell) / 2;
+  const ground = grassCanvas(7, 7, 4, 11);
+  let cells, order, step, phase, phaseT, hop = { t: 1, from: 0, to: 0 };
+
+  const at = (i) => ({ x: bx + (i % N) * cell + cell / 2, y: by + ((i / N) | 0) * cell + cell / 2 });
+
+  function neighbours(i) {
+    const x = i % N, y = (i / N) | 0, out = [];
+    for (const [ox, oy] of [[1, 0], [-1, 0], [0, 1], [0, -1]]) {
+      const nx = x + ox, ny = y + oy;
+      if (nx >= 0 && ny >= 0 && nx < N && ny < N) out.push(ny * N + nx);
+    }
+    return out;
+  }
+
+  function build() {
+    cells = Array.from({ length: N * N }, () => ({ mine: false, near: 0, open: false }));
+    const idx = [...cells.keys()];
+    for (let i = idx.length - 1; i > 0; i--) {
+      const j = (Math.random() * (i + 1)) | 0;
+      [idx[i], idx[j]] = [idx[j], idx[i]];
+    }
+    for (let m = 0; m < MINES; m++) cells[idx[m]].mine = true;
+    cells.forEach((c, i) => { c.near = neighbours(i).filter((n) => cells[n].mine).length; });
+    // 从一块安全格开始广度优先铺开顺序：第一下必定安全，雷留到最后
+    const start = idx.find((i) => !cells[i].mine);
+    const seen = new Set([start]), queue = [start];
+    order = [];
+    while (queue.length) {
+      const i = queue.shift();
+      order.push(i);
+      for (const n of neighbours(i)) {
+        if (seen.has(n) || cells[n].mine) continue;
+        seen.add(n);
+        queue.push(n);
+      }
+    }
+    cells.forEach((c, i) => { if (c.mine) order.push(i); });
+    step = 0;
+    phase = 'mine';
+    phaseT = 0;
+    hop = { t: 1, from: order[0], to: order[0] };
+    caption.textContent = '跳跃的起跳与落地各揭示一次脚下格';
+  }
+
+  const NEAR_COLOR = ['', '#3f6fd8', '#2f8f4e', '#c0642a', '#a03060'];
+
+  function tick(dt, t) {
+    phaseT += dt;
+    if (phase === 'mine') {
+      if (hop.t < 1) {
+        hop.t = Math.min(1, hop.t + dt / 0.24);
+      } else if (step < order.length) {
+        const i = order[step++];
+        cells[i].open = true;
+        hop = { t: 0, from: hop.to, to: i };
+        if (step % 5 === 0 || step === order.length) {
+          caption.textContent = `跳跃的起跳与落地各揭示一次脚下格　${step} / ${order.length}`;
+        }
+      } else if (phaseT > 0.9) {
+        phase = 'rise';
+        phaseT = 0;
+        caption.innerHTML = '安全格排完，<b class="red">巨型腐化史莱姆</b> 从水中浮出';
+      }
+    } else if (phase === 'rise' && phaseT > 2.6) {
+      phase = 'fight';
+      phaseT = 0;
+      caption.innerHTML = '冲撞 / 弹跳砸击 / 腐蚀水弹：三招都先在地上画出判定范围';
+    } else if (phase === 'fight' && phaseT > 3.4) {
+      phase = 'fade';
+      phaseT = 0;
+    } else if (phase === 'fade' && phaseT > 0.7) {
+      build();
+    }
+
+    const cx = S / 2, cy = S / 2;
+    ctx.imageSmoothingEnabled = false;
+    ctx.globalAlpha = 1;
+    ctx.drawImage(ground, 0, 0);
+    // 圆形浅水区：通行同平地，只是对生物略微减速
+    const water = ctx.createRadialGradient(cx, cy, cell, cx, cy, S * 0.5);
+    water.addColorStop(0, 'rgba(104,186,202,.70)');
+    water.addColorStop(1, 'rgba(32,72,104,.88)');
+    ctx.fillStyle = water;
+    ctx.beginPath();
+    ctx.arc(cx, cy, S * 0.47, 0, TAU);
+    ctx.fill();
+    ctx.lineWidth = 2;
+    ctx.strokeStyle = 'rgba(196,238,248,.4)';
+    for (let k = 0; k < 3; k++) {
+      const p = ((t * 20 + k * 34) % 46) / 46;
+      ctx.globalAlpha = 0.3 * (1 - p);
+      ctx.beginPath();
+      ctx.arc(cx, cy, S * 0.2 + p * S * 0.26, 0, TAU);
+      ctx.stroke();
+    }
+    ctx.globalAlpha = 1;
+    // 棋盘：水中央的干地格子
+    for (let i = 0; i < cells.length; i++) {
+      const c = cells[i];
+      const px = bx + (i % N) * cell, py = by + ((i / N) | 0) * cell;
+      const w = cell - 2;
+      if (!c.open) {
+        ctx.fillStyle = '#8d7a52';
+        ctx.fillRect(px, py, w, w);
+        ctx.fillStyle = '#b39b6a';
+        ctx.fillRect(px, py, w, 6);
+        ctx.fillStyle = 'rgba(56,42,26,.45)';
+        ctx.fillRect(px, py + w - 6, w, 6);
+      } else {
+        ctx.fillStyle = c.mine ? '#5f2b26' : '#d9c489';
+        ctx.fillRect(px, py, w, w);
+        ctx.strokeStyle = 'rgba(70,52,32,.45)';
+        ctx.lineWidth = 1;
+        ctx.strokeRect(px + 0.5, py + 0.5, w - 1, w - 1);
+        if (c.mine) {
+          ctx.fillStyle = '#ffd9d2';
+          ctx.beginPath();
+          ctx.arc(px + w / 2, py + w / 2, 7, 0, TAU);
+          ctx.fill();
+          ctx.strokeStyle = '#7a1f18';
+          ctx.lineWidth = 2.5;
+          for (let k = 0; k < 4; k++) {
+            const a = (k / 4) * Math.PI;
+            ctx.beginPath();
+            ctx.moveTo(px + w / 2 - Math.cos(a) * 11, py + w / 2 - Math.sin(a) * 11);
+            ctx.lineTo(px + w / 2 + Math.cos(a) * 11, py + w / 2 + Math.sin(a) * 11);
+            ctx.stroke();
+          }
+        } else if (c.near > 0) {
+          ctx.fillStyle = NEAR_COLOR[c.near];
+          ctx.font = '700 26px ' + FONT;
+          ctx.textAlign = 'center';
+          ctx.textBaseline = 'middle';
+          ctx.fillText(String(c.near), px + w / 2, py + w / 2 + 1);
+        }
+      }
+    }
+    // 跳着排雷的史莱姆
+    if (phase === 'mine') {
+      const p = hop.t;
+      const a = at(hop.from), b = at(hop.to);
+      const x = a.x + (b.x - a.x) * p, y = a.y + (b.y - a.y) * p;
+      const lift = Math.sin(p * Math.PI) * 13;
+      drawSprite(ctx, SPR.slime.walk, frameAt(SPR.slime.walk, t, 10, true), x, y + cell * 0.38, { scale: 1.25, lift });
+    }
+    // boss 浮出：从水里顶起来，身上挂着腐蚀粘液
+    if (phase === 'rise' || phase === 'fight' || phase === 'fade') {
+      const rise = phase === 'rise' ? clamp(phaseT / 1.5, 0, 1) : 1;
+      const bob = Math.sin(t * 3) * 3;
+      ctx.fillStyle = 'rgba(96,168,58,.32)';
+      ctx.beginPath();
+      ctx.ellipse(cx, cy + 70, 54 * rise, 15 * rise, 0, 0, TAU);
+      ctx.fill();
+      ctx.globalAlpha = 0.2 + 0.8 * rise;
+      drawSprite(ctx, SPR.slime.idle, frameAt(SPR.slime.idle, t, 7, true), cx, cy + 62 - rise * 74 + bob,
+        { scale: 1.5 + 2.6 * rise, tint: 'rgb(96,168,58)' });
+      ctx.globalAlpha = 1;
+    }
+    if (phase === 'fade') {
+      ctx.fillStyle = `rgba(11,10,16,${Math.min(1, phaseT / 0.7)})`;
+      ctx.fillRect(0, 0, S, S);
+    }
+  }
+
+  build();
+  addTicker(canvas, tick);
+}
+
 /* ================= 天赋 ================= */
 
 const TALENTS = [
@@ -1619,6 +1798,7 @@ const TALENTS = [
   { name: '熟练', icon: '熟', c: '#ffd166', detail: '战斗熟练度：技能冷却 -25%，攻击速度 +25%。', req: '累计释放技能', goal: 12 },
   { name: '世界指引', icon: '引', c: '#5eead4', detail: '获得额外技能「寻路」，按 G 开关，指向迷宫遗迹并画出通路。', req: '击杀入侵世界的怪物', goal: 20 },
   { name: '以小博大', icon: '博', c: '#b98cff', detail: '对等级高于自己的敌人，造成的伤害变为 1.3 倍。', req: '击杀等级超过自己的怪物', goal: 10 },
+  { name: '暴食', icon: '食', c: '#7ee07e', detail: '经验获取翻倍。', req: '史莱姆之躯下吞噬怪物', goal: 100 },
 ];
 
 function createTalents() {
@@ -1658,21 +1838,24 @@ function createTalents() {
 
 const KB_ROWS = [
   { o: 0, keys: ['Esc'] },
-  { o: 0, keys: ['Tab', 'Q', 'W', 'E', 'R'] },
+  { o: 0, keys: ['Tab', 'Q', 'W', 'E', 'R', 'T'] },
   { o: 0, keys: ['Shift', 'A', 'S', 'D', 'F', 'G'] },
   { o: 2.2, keys: ['C', 'V'] },
-  { o: 1.2, keys: ['Space'] },
+  { o: 0.2, keys: ['Ctrl', 'Space'] },
 ];
 const ACTIONS = [
   { keys: ['W', 'A', 'S', 'D'], seq: true, label: '移动', dt: 'W A S D' },
   { keys: ['LMB'], label: '轻击（点按；机甲人每发耗 1 发弹药）', dt: '左键' },
   { keys: ['LMB'], hold: true, label: '重击（按住约 0.42 秒）/ 机甲人换弹', dt: '按住左键' },
   { keys: ['Shift', 'RMB'], label: '闪避 / 法师闪现', dt: 'Shift / 右键' },
+  { keys: ['Shift'], hold: true, label: '隐藏连招「次元斩」：带突刺的战士长按闪避', dt: '长按 Shift / 右键' },
   { keys: ['Space'], label: '跳跃', dt: 'Space' },
   { keys: ['Q'], label: '防御', dt: 'Q' },
   { keys: ['E'], label: '恢复', dt: 'E' },
   { keys: ['R', 'F', 'C', 'V'], seq: true, label: '技能栏（V 仅法师）', dt: 'R F C V' },
   { keys: ['G'], label: '寻路（天赋「世界指引」）', dt: 'G' },
+  { keys: ['T'], label: '拟态图鉴（史莱姆之躯，打开时时停）', dt: 'T' },
+  { keys: ['Ctrl'], label: '形态技（史莱姆之躯当前形态的技能）', dt: '左 Ctrl' },
   { keys: ['Tab'], label: '技能与天赋说明', dt: 'Tab' },
   { keys: ['Esc'], label: '暂停', dt: 'Esc' },
 ];
@@ -1822,6 +2005,7 @@ function setupPage() {
   createHeroShowcase();
   createBestiary();
   createMaze($('#mazeCanvas'));
+  createShallowPool($('#poolCanvas'));
   createTalents();
   createControls();
   document.querySelectorAll('.monster.reveal, .talent.reveal').forEach((el) => {
