@@ -5,9 +5,11 @@
 #include <QCoreApplication>
 #include <QDir>
 #include <QDateTime>
+#include <QElapsedTimer>
 #include <QFileInfo>
 #include <QMediaPlayer>
 #include <QSoundEffect>
+#include <QTimer>
 #include <QUrl>
 
 #include <algorithm>
@@ -18,6 +20,12 @@ namespace {
 constexpr int kVoices = 3;
 // 界面弹出时 BGM 保留的音量比例（压低但不停播）
 constexpr float kBgmDuckScale = 0.35f;
+// 次元斩打完：配音停下后先空这么久，再让 BGM 渐渐回来
+constexpr float kBgmRestoreDelay = 1.f;
+// BGM 从这个音量渐入到原音量用多久
+constexpr float kBgmRestoreFade = 1.4f;
+// 渐入由这个定时器推进；步长按真实经过的时间算，不受节流影响
+constexpr int kBgmRestoreIntervalMs = 33;
 
 const char* sfxFile(SfxId id) {
     switch (id) {
@@ -49,6 +57,10 @@ const char* sfxFile(SfxId id) {
 }
 
 struct AudioState {
+    // BGM 渐入的驱动：定时器 + 计时器，配音收掉后隔一拍再按时间把音量推上来
+    QTimer* bgmRestoreTimer = nullptr;
+    QElapsedTimer bgmRestoreClock;
+    float bgmRestoreDelay = 0.f;
     std::array<std::vector<QSoundEffect*>, int(SfxId::Count)> pools{};
     std::array<int, int(SfxId::Count)> cursor{};
     QMediaPlayer* bgm = nullptr;
@@ -59,6 +71,8 @@ struct AudioState {
     QAudioOutput* atomicOut = nullptr;
     QMediaPlayer* continueVoice = nullptr;
     QAudioOutput* continueOut = nullptr;
+    QMediaPlayer* dimensionVoice = nullptr;
+    QAudioOutput* dimensionOut = nullptr;
     // 「继续前进」男女两版配音，按角色性别选一条
     QUrl continueMale;
     QUrl continueFemale;
@@ -189,6 +203,22 @@ void Audio::load(const QString& assetDir) {
         if (!continueFemale.isEmpty()) {
             state().continueFemale = Platform::mediaUrl(continueFemale);
         }
+        state().dimensionOut = new QAudioOutput(QCoreApplication::instance());
+        state().dimensionVoice = new QMediaPlayer(QCoreApplication::instance());
+        state().dimensionVoice->setAudioOutput(state().dimensionOut);
+        state().dimensionVoice->setLoops(1);
+        // 文件叫「战士连招配音_次元斩.mp3」，取 "次元斩" 这一段，改名换扩展名都还能对上
+        const QString dimension = findClip(assetDir, QStringLiteral("次元斩"));
+        if (!dimension.isEmpty()) {
+            state().dimensionVoice->setSource(Platform::mediaUrl(dimension));
+        }
+        QObject::connect(state().dimensionVoice, &QMediaPlayer::mediaStatusChanged, state().dimensionVoice,
+            [](QMediaPlayer::MediaStatus status) {
+                if (status == QMediaPlayer::EndOfMedia) {
+                    // 配音自己播完了：与「打完收配音」走同一条路——空一拍再把 BGM 渐入
+                    Audio::instance().finishDimensionVoice();
+                }
+            });
         loaded_ = true;
     }
     rebuildSfxVolumes();
@@ -270,6 +300,9 @@ void Audio::rebuildSfxVolumes() {
     if (state().atomicOut) {
         state().atomicOut->setVolume(vol);
     }
+    if (state().dimensionOut) {
+        state().dimensionOut->setVolume(vol);
+    }
 }
 
 void Audio::rebuildBgmVolume() {
@@ -278,7 +311,11 @@ void Audio::rebuildBgmVolume() {
         if (bgmDucked_) {
             vol *= kBgmDuckScale;
         }
-        state().bgmOut->setVolume(vol);
+        // 配音接管时 BGM 完全静音；收尾阶段按渐入倍率慢慢推上来
+        if (bgmSilenced_) {
+            vol = 0.f;
+        }
+        state().bgmOut->setVolume(vol * std::clamp(bgmFade_, 0.f, 1.f));
     }
 }
 
@@ -350,6 +387,95 @@ void Audio::playContinueVoice(bool female) {
     voice->play();
 }
 
+// 战士隐藏连招「次元斩」：起配音，BGM 让位（静音不停播）
+void Audio::playDimensionVoice() {
+    QMediaPlayer* voice = state().dimensionVoice;
+    if (!loaded_ || !sfxEnabled_ || sfxVolumePercent_ <= 0 || !voice || voice->source().isEmpty()) {
+        return;
+    }
+    if (state().dimensionOut) {
+        state().dimensionOut->setVolume(float(sfxVolumePercent_) / 100.f);
+    }
+    // 上一次收尾的渐入还没走完就又被起手：直接作废，重新压住 BGM
+    if (state().bgmRestoreTimer) {
+        state().bgmRestoreTimer->stop();
+    }
+    state().bgmRestoreDelay = 0.f;
+    bgmFade_ = 0.f;
+    setBgmSilenced(true);
+    voice->stop();
+    voice->setPosition(0);
+    voice->play();
+}
+
+// 次元斩打完：配音到此为止，BGM 先空一拍，再渐渐推回原音量
+void Audio::finishDimensionVoice() {
+    if (!state().dimensionVoice) {
+        return;
+    }
+    if (state().dimensionVoice->playbackState() != QMediaPlayer::StoppedState) {
+        state().dimensionVoice->stop();
+    }
+    if (!bgmSilenced_ && bgmFade_ >= 1.f) {
+        return;  // 本来就没压住 BGM
+    }
+    // 空转这一拍里音量靠 bgmFade_ 压成 0（bgmSilenced_ 让位给渐入倍率）
+    bgmSilenced_ = false;
+    bgmFade_ = 0.f;
+    rebuildBgmVolume();
+    startBgmRestore();
+}
+
+// 判定失败 / 换曲 / 回菜单 / 本局收尾：停配音并把 BGM 立刻放回来（不渐入）
+void Audio::stopDimensionVoice() {
+    if (state().dimensionVoice && state().dimensionVoice->playbackState() != QMediaPlayer::StoppedState) {
+        state().dimensionVoice->stop();
+    }
+    if (state().bgmRestoreTimer) {
+        state().bgmRestoreTimer->stop();
+    }
+    state().bgmRestoreDelay = 0.f;
+    bgmFade_ = 1.f;
+    setBgmSilenced(false);
+}
+
+void Audio::setBgmSilenced(bool silenced) {
+    if (bgmSilenced_ == silenced) {
+        return;
+    }
+    bgmSilenced_ = silenced;
+    rebuildBgmVolume();
+}
+
+void Audio::startBgmRestore() {
+    AudioState& s = state();
+    if (!s.bgmRestoreTimer) {
+        s.bgmRestoreTimer = new QTimer(QCoreApplication::instance());
+        s.bgmRestoreTimer->setTimerType(Qt::PreciseTimer);
+        s.bgmRestoreTimer->setInterval(kBgmRestoreIntervalMs);
+        QObject::connect(s.bgmRestoreTimer, &QTimer::timeout, [] { Audio::instance().stepBgmRestore(); });
+    }
+    s.bgmRestoreDelay = kBgmRestoreDelay;
+    s.bgmRestoreClock.start();
+    s.bgmRestoreTimer->start();
+}
+
+void Audio::stepBgmRestore() {
+    AudioState& s = state();
+    const float dt = std::min(0.25f, float(s.bgmRestoreClock.restart()) / 1000.f);
+    if (s.bgmRestoreDelay > 0.f) {
+        s.bgmRestoreDelay -= dt;
+        if (s.bgmRestoreDelay > 0.f) {
+            return;
+        }
+    }
+    bgmFade_ = std::min(1.f, bgmFade_ + dt / kBgmRestoreFade);
+    rebuildBgmVolume();
+    if (bgmFade_ >= 1.f) {
+        s.bgmRestoreTimer->stop();
+    }
+}
+
 void Audio::playBgm(BgmId id, bool loop) {
     if (!loaded_ || !state().bgm) {
         return;
@@ -387,6 +513,7 @@ void Audio::playBgm(BgmId id, bool loop) {
 
 // 新的一局：退出结算后的终曲状态，回到 1 号循环
 void Audio::beginRun() {
+    stopDimensionVoice();
     finaleMode_ = false;
     playBgm(BgmId::Explore, true);
 }
@@ -456,6 +583,7 @@ void Audio::playReviveBgm() {
 
 // 本局结算：切到 5 号曲循环，回主菜单不断，下一局由 beginRun() 换回 1 号
 void Audio::playFinaleBgm() {
+    stopDimensionVoice();
     finaleMode_ = true;
     if (!loaded_ || !bgmEnabled_) {
         return;
@@ -464,6 +592,7 @@ void Audio::playFinaleBgm() {
 }
 
 void Audio::stopBgm() {
+    stopDimensionVoice();
     oneshotPlaying_ = false;
     if (state().bgm) {
         state().bgm->stop();

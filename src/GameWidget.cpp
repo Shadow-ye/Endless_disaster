@@ -48,6 +48,8 @@ constexpr float kPi = 3.14159265f;
 constexpr size_t kMaxParticles = 560;
 // 右上角雷达盘的边长，以及靠它定位的迷宫地图边长
 constexpr int kRadarSide = 112;
+// 次元斩：每一道刃把画面沿刃线错开的最大像素
+constexpr float kDimCutOffset = 8.f;
 // I am atomic 的白闪：比 Session 里的闪白那一拍长得多，让爆炸在强光没消时就涌出来
 constexpr float kAtomicFlashFade = 0.64f;
 constexpr int kMazeMapSide = 132;
@@ -105,21 +107,7 @@ QString formatTime(float t) {
 }
 
 QString findAssets() {
-    for (const QString& root : Platform::dataRoots()) {
-        if (QFile::exists(root + "/assets/hero_warrior/idle.png")) {
-            return root + "/assets";
-        }
-    }
-    QDir dir(QCoreApplication::applicationDirPath());
-    for (int i = 0; i < 6; ++i) {
-        if (QFile::exists(dir.filePath("assets/hero_warrior/idle.png"))) {
-            return dir.filePath("assets");
-        }
-        if (!dir.cdUp()) {
-            break;
-        }
-    }
-    return QCoreApplication::applicationDirPath() + "/assets";
+    return Platform::assetDir();
 }
 
 float skillCooldownMax(int skill, float mul) {
@@ -306,6 +294,9 @@ GameWidget::GameWidget(QWidget* parent) : QWidget(parent) {
     setFocusPolicy(Qt::StrongFocus);
     setContextMenuPolicy(Qt::PreventContextMenu);
     setAttribute(Qt::WA_AcceptTouchEvents, true);
+    // 安卓外接鼠标时朝向要跟着指针：既要无按键的移动事件（鼠标追踪），也要悬停事件
+    setMouseTracking(true);
+    setAttribute(Qt::WA_Hover, true);
     // paintEvent 会铺满整个控件；不声明的话每帧都要先重画父窗口背景
     setAttribute(Qt::WA_OpaquePaintEvent, true);
     touchUi_ = Platform::touchUi();
@@ -636,6 +627,8 @@ GameWidget::GameWidget(QWidget* parent) : QWidget(parent) {
 void GameWidget::leaveToMenu() {
     running_ = false;
     session_.setPaused(false);
+    // 回主菜单：次元斩的配音收掉，BGM 归位
+    Audio::instance().stopDimensionVoice();
     Audio::instance().ensureBgmLoop();
     pausePanel_->hide();
     resultPanel_->hide();
@@ -722,6 +715,26 @@ void GameWidget::refreshGuide() {
     if (player.talentGuide) {
         html += block(touch ? "技能" : "G", skillText(kSkillSeek), skillExtra(kSkillSeek, 0.f));
     }
+    // 隐藏技能「次元斩」：只有带突刺的战士才有这套连招
+    const bool dimensionHero = player.hero == HeroClass::Warrior
+        && (player.skillD == kSkillThrust || player.skillF == kSkillThrust || player.skillC == kSkillThrust);
+    if (dimensionHero) {
+        html += "<p style='color:#e4d4c4; margin:12px 0 4px 0;'><b>隐藏连招　次元斩</b></p>";
+        html += QString("<p style='margin:8px 0 10px 0;'><span style='color:#a89888;'>"
+                        "带突刺的战士，长按闪避 %1 秒起手判定（配音接管，BGM 让位）："
+                        "%2 次突刺 + %3 次普攻 + %4 次跳跃，要在 %5 秒内打完。"
+                        "判定成功后，从长按闪避那一刻起算 %6 秒内，下一次普攻或重击打出次元斩——"
+                        "除自己外全场进入时缓，蓝滤镜由中心铺开；角色沿六芒星边跑边斩，六个顶点各一斩，"
+                        "每一斩都把自己那一片画面切开错位且不消失，回到原位顿一下后六斩一起结算，最后光刃与滤镜一起收掉。"
+                        "只消耗 %7 体力。判定失败或超时会中止，配音停下、BGM 交还。</span></p>")
+                    .arg(kDimHoldTime, 0, 'f', 1)
+                    .arg(kDimThrustNeed)
+                    .arg(kDimLightNeed)
+                    .arg(kDimJumpNeed)
+                    .arg(kDimComboWindow, 0, 'f', 0)
+                    .arg(kDimDeadline, 0, 'f', 0)
+                    .arg(int(kDimStaminaCost));
+    }
     html += "<p style='color:#e4d4c4; margin:12px 0 4px 0;'><b>天赋</b></p>";
     html += progress("重手", player.damageDealt, 250.f, player.talentMight, talentMightDetail());
     html += progress("远行", player.distanceMoved, 900.f, player.talentStride, talentStrideDetail());
@@ -779,38 +792,92 @@ void GameWidget::refreshGuide() {
 }
 
 void GameWidget::startNew(HeroClass hero, int skillD, int skillF, int skillC, int skillV) {
-    running_ = true;
-    const uint32_t seed = uint32_t(QRandomGenerator::global()->generate());
-    const uint32_t runId = uint32_t(QRandomGenerator::global()->generate());
-    const AppSettings settings = Storage::loadSettings();
-    session_.newGame(seed == 0 ? 1u : seed, runId == 0 ? 1u : runId, hero, skillD, skillF, skillC, skillV,
-        settings.guideAtStart);
-    particles_.clear();
-    endCommitted_ = false;
-    clock_.restart();
-    releaseAllTouches();
-    pausePanel_->hide();
-    resultPanel_->hide();
-    confirmPanel_->hide();
-    voidPanel_->hide();
-    revivePanel_->hide();
-    mimicPanel_->hide();
-    mimicOpen_ = false;
-    updateBgmDuck();
-    // 新的一局：结算后一直放的 5 号曲到此为止，换回 1 号循环
-    Audio::instance().beginRun();
-    setFocus();
+    prepareNew(hero, skillD, skillF, skillC, skillV);
+    prepareNewStepReset();
+    prepareNewStepSpawns();
+    prepareNewStepRuin();
+    prepareFinish();
+    startRun();
 }
 
 void GameWidget::startContinue(const QJsonObject& game) {
-    running_ = true;
-    session_.loadFrom(game);
-    session_.drainVfx();
-    // 新的一局：结算后一直放的 5 号曲到此为止，换回 1 号循环
+    prepareContinue(game);
+    prepareFinish();
+    startRun();
+}
+
+// 加载页一露头就调用：tick 立刻停摆，之后各路准备步骤再慢慢填 session_
+void GameWidget::beginPrepare() {
+    preparing_ = true;
+    running_ = false;
+    releaseAllTouches();
+    resetOverlays();
+}
+
+// 开局准备第一步：界面与音乐收尾。本局的参数先记下来，交给后续几步使用
+void GameWidget::prepareNew(HeroClass hero, int skillD, int skillF, int skillC, int skillV) {
+    beginPrepare();
+    pendingHero_ = hero;
+    pendingSkillD_ = skillD;
+    pendingSkillF_ = skillF;
+    pendingSkillC_ = skillC;
+    pendingSkillV_ = skillV;
+    const uint32_t seed = uint32_t(QRandomGenerator::global()->generate());
+    const uint32_t runId = uint32_t(QRandomGenerator::global()->generate());
+    pendingSeed_ = seed == 0 ? 1u : seed;
+    pendingRunId_ = runId == 0 ? 1u : runId;
     particles_.clear();
     endCommitted_ = false;
+    updateBgmDuck();
+    // 新的一局：结算后一直放的 5 号曲到此为止，换回 1 号循环。
+    // 切曲的 setSource 开销落在加载页这段，玩家看不到卡顿。
+    Audio::instance().beginRun();
+}
+
+// 开局准备第二步：世界与玩家状态重置
+void GameWidget::prepareNewStepReset() {
+    const AppSettings settings = Storage::loadSettings();
+    session_.newGameStepReset(pendingSeed_, pendingRunId_, pendingHero_, pendingSkillD_, pendingSkillF_,
+        pendingSkillC_, pendingSkillV_, settings.guideAtStart);
+}
+
+// 开局准备第三步：初始怪物与寻路场
+void GameWidget::prepareNewStepSpawns() {
+    session_.newGameStepSpawns();
+}
+
+// 开局准备第四步：迷宫遗迹与克苏鲁之眼（最重的一步）
+void GameWidget::prepareNewStepRuin() {
+    session_.newGameStepRuin();
+}
+
+// 继续存档：读档本身是一整块，作为一个原子的准备步骤
+void GameWidget::prepareContinue(const QJsonObject& game) {
+    beginPrepare();
+    particles_.clear();
+    endCommitted_ = false;
+    updateBgmDuck();
+    // 新的一局：结算后一直放的 5 号曲到此为止，换回 1 号循环
+    Audio::instance().beginRun();
+    session_.loadFrom(game);
+    session_.drainVfx();
+}
+
+// 准备收尾：预热首帧与 HUD 字形缓存（此时还不跑模拟，加载页可能还要停留一会儿）
+void GameWidget::prepareFinish() {
+    renderFrameToCanvas();
+    warmUpHud();
+}
+
+// 真正开始本局：由切到游戏画面的那一刻调用，保证计时与模拟都从 0 起
+void GameWidget::startRun() {
     clock_.restart();
-    releaseAllTouches();
+    preparing_ = false;
+    running_ = true;
+    setFocus();
+}
+
+void GameWidget::resetOverlays() {
     pausePanel_->hide();
     resultPanel_->hide();
     confirmPanel_->hide();
@@ -818,9 +885,9 @@ void GameWidget::startContinue(const QJsonObject& game) {
     revivePanel_->hide();
     mimicPanel_->hide();
     mimicOpen_ = false;
-    updateBgmDuck();
-    Audio::instance().beginRun();
-    setFocus();
+    // 新的一局天赋面板回到折叠态
+    talentHudOpen_ = false;
+    talentHudRect_ = QRect();
 }
 
 void GameWidget::setPaused(bool paused) {
@@ -1081,6 +1148,10 @@ void GameWidget::updateBgmDuck() {
 }
 
 void GameWidget::tick() {
+    // 加载页准备期间：不跑模拟，也不去碰只初始化了一半的 session_
+    if (preparing_) {
+        return;
+    }
     const qint64 elapsedNs = clock_.nsecsElapsed();
     clock_.restart();
     const float frame = std::min(0.05f, float(elapsedNs) / 1e9f);
@@ -1102,6 +1173,17 @@ void GameWidget::tick() {
             }
             if (session_.consumeRecoverBgm()) {
                 Audio::instance().playRecoverBgm();
+            }
+            // 次元斩：判定起手即起配音并压掉 BGM；打完收配音（BGM 隔一拍渐入），
+            // 判定失败则立刻把 BGM 交回来
+            if (session_.consumeDimensionVoiceStart()) {
+                Audio::instance().playDimensionVoice();
+            }
+            if (session_.consumeDimensionVoiceStop()) {
+                Audio::instance().stopDimensionVoice();
+            }
+            if (session_.consumeDimensionVoiceFinish()) {
+                Audio::instance().finishDimensionVoice();
             }
             input_.clearEdges();
         }
@@ -1307,22 +1389,70 @@ QRect GameWidget::viewRect() const {
     return QRect((width() - viewW) / 2, (height() - viewH) / 2, viewW, viewH);
 }
 
+QPointF GameWidget::cameraOrigin() const {
+    const Player& player = session_.player();
+    float focusX = player.x;
+    float focusY = player.y;
+    // 次元斩期间角色要贴着画面跑六芒星：相机改成锁在起手点
+    if (session_.dimensionSlashing()) {
+        session_.dimensionCameraAnchor(focusX, focusY);
+    }
+    float shakeX = 0.f;
+    float shakeY = 0.f;
+    session_.cameraShake(shakeX, shakeY);
+    return QPointF(focusX - kViewW * 0.5f + shakeX, focusY - kViewH * 0.5f + shakeY);
+}
+
+void GameWidget::notePointer(const QPoint& local) {
+    mousePos_ = local;
+#if defined(Q_OS_ANDROID)
+    // 第一次收到真实鼠标事件：朝向从摇杆改跟指针，提示一次
+    if (touchUi_ && !mouseAim_ && !mouseAimToasted_) {
+        mouseAimToasted_ = true;
+        toast_ = QStringLiteral("检测到鼠标：朝向跟随指针");
+        toastTime_ = 2.f;
+    }
+#endif
+    mouseAim_ = true;
+}
+
+bool GameWidget::pointerAim() const {
+    if (!touchUi_) {
+        return true;
+    }
+#if defined(Q_OS_ANDROID)
+    // 安卓接上鼠标（收到过真实鼠标事件）后改跟指针
+    return mouseAim_;
+#else
+    // 桌面的触屏预览模式：鼠标当手指用，朝向仍旧取摇杆
+    return false;
+#endif
+}
+
 QPointF GameWidget::mouseWorld() const {
     const Player& player = session_.player();
     if (const Monster* target = aimTarget()) {
         return QPointF(target->x, target->y);
     }
-    if (touchUi_) {
+    if (!pointerAim()) {
         // 只决定朝向（攻击 / 技能方向）；闪避方向仍取摇杆的移动方向
         return QPointF(player.x + aimDir_.x() * 48.0, player.y + aimDir_.y() * 48.0);
     }
     const QRect view = viewRect();
+#if defined(Q_OS_ANDROID)
+    // 安卓拿不到可靠的光标位置，用鼠标事件里记下的坐标
+    const QPoint local = mouseAim_ ? mousePos_ : mapFromGlobal(QCursor::pos());
+#else
     const QPoint local = mapFromGlobal(QCursor::pos());
+#endif
     const float canvasX = (local.x() - view.x()) * float(kViewW) / float(view.width());
     const float canvasY = (local.y() - view.y()) * float(kViewH) / float(view.height());
-    const float cameraX = player.x - kViewW * 0.5f;
-    const float cameraY = player.y - kViewH * 0.5f;
-    return QPointF(cameraX + canvasX, cameraY + canvasY);
+    float focusX = player.x;
+    float focusY = player.y;
+    if (session_.dimensionSlashing()) {
+        session_.dimensionCameraAnchor(focusX, focusY);
+    }
+    return QPointF(focusX - kViewW * 0.5f + canvasX, focusY - kViewH * 0.5f + canvasY);
 }
 
 void GameWidget::syncKey(int key, bool down) {
@@ -1434,6 +1564,8 @@ void GameWidget::mousePressEvent(QMouseEvent* event) {
     if (event->pointingDevice() && event->pointingDevice()->type() == QInputDevice::DeviceType::TouchScreen) {
         return;
     }
+    // 真实鼠标：记下指针位置（安卓外接鼠标时朝向跟它走）
+    notePointer(event->position().toPoint());
 #ifndef Q_OS_ANDROID
     if (touchUi_ && !Platform::touchUi()) {
         touchUi_ = false;
@@ -1441,6 +1573,14 @@ void GameWidget::mousePressEvent(QMouseEvent* event) {
     }
 #endif
     if (event->button() == Qt::LeftButton) {
+        // 点天赋标题行只做展开 / 收起，不算一次攻击
+        if (running_ && !session_.ended() && !session_.paused() && talentHudRect_.isValid()
+            && talentHudRect_.contains(event->position().toPoint())) {
+            talentHudOpen_ = !talentHudOpen_;
+            talentClick_ = true;
+            event->accept();
+            return;
+        }
         input_.lmb = true;
         input_.lmbEdge = true;
     } else if (event->button() == Qt::RightButton) {
@@ -1459,6 +1599,11 @@ void GameWidget::mouseReleaseEvent(QMouseEvent* event) {
         return;
     }
     if (event->button() == Qt::LeftButton) {
+        // 按下时被天赋面板吃掉的这一下，抬起也不产生攻击输入
+        if (talentClick_) {
+            talentClick_ = false;
+            return;
+        }
         input_.lmb = false;
         input_.lmbUp = true;
     } else if (event->button() == Qt::RightButton) {
@@ -1479,6 +1624,8 @@ bool GameWidget::event(QEvent* event) {
             return false;
         }
         touchUi_ = true;
+        // 手指落回屏幕：朝向交还给摇杆（也是「鼠标没在用了」的信号）
+        mouseAim_ = false;
         handleTouch(touch);
         event->accept();
         return true;
@@ -1487,9 +1634,21 @@ bool GameWidget::event(QEvent* event) {
         releaseAllTouches();
         event->accept();
         return true;
+    case QEvent::HoverEnter:
+    case QEvent::HoverMove:
+        // 悬停（无按键）也要更新指针位置：安卓的鼠标移动走的是悬停事件
+        notePointer(static_cast<QHoverEvent*>(event)->position().toPoint());
+        return QWidget::event(event);
     default:
         return QWidget::event(event);
     }
+}
+
+void GameWidget::mouseMoveEvent(QMouseEvent* event) {
+    if (event->pointingDevice() && event->pointingDevice()->type() == QInputDevice::DeviceType::TouchScreen) {
+        return;
+    }
+    notePointer(event->position().toPoint());
 }
 
 qreal GameWidget::touchUnit() const {
@@ -1582,6 +1741,11 @@ void GameWidget::handleTouch(QTouchEvent* event) {
                 break;
             }
             if (!playing) {
+                break;
+            }
+            // 天赋标题行：点按展开 / 收起，不占摇杆也不触发攻击
+            if (!session_.paused() && talentHudRect_.isValid() && talentHudRect_.contains(pos.toPoint())) {
+                talentHudOpen_ = !talentHudOpen_;
                 break;
             }
             // 左半屏只归摇杆，右半屏只归按键：两只手的触点互不抢占
@@ -2135,11 +2299,9 @@ QIcon GameWidget::mimicIcon(MimicForm form) {
 
 void GameWidget::drawWorld(QPainter& painter) {
     const Player& player = session_.player();
-    float shakeX = 0.f;
-    float shakeY = 0.f;
-    session_.cameraShake(shakeX, shakeY);
-    const float cameraX = player.x - kViewW * 0.5f + shakeX;
-    const float cameraY = player.y - kViewH * 0.5f + shakeY;
+    const QPointF camera = cameraOrigin();
+    const float cameraX = float(camera.x());
+    const float cameraY = float(camera.y());
     painter.translate(-cameraX, -cameraY);
 
     const int x0 = tileOf(cameraX) - 1;
@@ -2632,7 +2794,9 @@ void GameWidget::drawWorld(QPainter& painter) {
                     player.facingX, player.facingY);
                 drawSlimeBodyMark(player.x, player.y - lift - 28.f);
             } else if (anim->ok()) {
-                const bool loop = player.state != ActorState::Attack && player.state != ActorState::Hurt && player.state != ActorState::Dead;
+                // 次元斩的六芒星冲刺里攻击动作循环播：不然贴着画面跑，人却定格在最后一帧
+                const bool loop = session_.dimensionSlashing()
+                    || (player.state != ActorState::Attack && player.state != ActorState::Hurt && player.state != ActorState::Dead);
                 const float fps = player.state == ActorState::Attack ? 18.f : 12.f;
                 const int dir = anim->dirs() >= 4 ? facingDir(player.facingX, player.facingY, anim->dirs()) : 0;
                 const bool flip = anim->dirs() < 4 && player.facingX < 0.f;
@@ -4107,6 +4271,175 @@ void GameWidget::drawSlimeBossBar(QPainter& painter, const QRect& view, const Mo
     }
 }
 
+// 世界画面的渲染：paintEvent 每帧调，加载页也会先调一次做首帧预热
+void GameWidget::renderFrameToCanvas() {
+    canvas_.fill(QColor(16, 14, 12));
+    QPainter world(&canvas_);
+    world.setRenderHint(QPainter::SmoothPixmapTransform, false);
+    drawWorld(world);
+    world.resetTransform();
+    world.setCompositionMode(QPainter::CompositionMode_Multiply);
+    world.fillRect(canvas_.rect(), QColor(128, 112, 98));
+    world.setCompositionMode(QPainter::CompositionMode_SourceOver);
+    world.drawImage(0, 0, vignette_);
+    const float plazaRed = session_.plazaRed();
+    if (plazaRed > 0.01f) {
+        QRadialGradient red(kViewW * 0.5, kViewH * 0.5, kViewW * 0.72);
+        red.setColorAt(0.28, QColor(120, 0, 0, 0));
+        red.setColorAt(1.0, QColor(150, 0, 0, int(190.f * plazaRed)));
+        world.setPen(Qt::NoPen);
+        world.setBrush(red);
+        world.drawRect(canvas_.rect());
+    }
+    // I am atomic 的紫色滤镜：蓄力时整块画面往紫里压，越靠边缘越浓
+    const float violet = session_.atomicViolet();
+    if (violet > 0.01f) {
+        QRadialGradient purple(kViewW * 0.5, kViewH * 0.5, kViewW * 0.75);
+        purple.setColorAt(0.0, QColor(124, 44, 206, int(96.f * violet)));
+        purple.setColorAt(0.55, QColor(98, 26, 184, int(132.f * violet)));
+        purple.setColorAt(1.0, QColor(56, 12, 118, int(215.f * violet)));
+        world.setPen(Qt::NoPen);
+        world.setBrush(purple);
+        world.drawRect(canvas_.rect());
+    }
+    drawDimensionCuts(world);
+}
+
+// 次元斩的画面层：蓝滤镜由中心铺开 / 回收 → 每一斩把自己的半边画面切开错位 → 刃压在错位之上
+void GameWidget::drawDimensionCuts(QPainter& painter) {
+    const float reveal = session_.dimensionFilterReveal();
+    const float fade = session_.dimensionBladeFade();
+    const auto& blades = session_.dimensionBlades();
+    if (reveal <= 0.005f && blades.empty()) {
+        return;
+    }
+    const QPointF camera = cameraOrigin();
+    // 相机锁在起手点，起手点就落在画面正中（只差一次震屏）
+    float shakeX = 0.f;
+    float shakeY = 0.f;
+    session_.cameraShake(shakeX, shakeY);
+    const QPointF center(kViewW * 0.5f - shakeX, kViewH * 0.5f - shakeY);
+
+    if (reveal > 0.005f) {
+        // 浅蓝滤镜：一团由中心向外展开的蓝，末尾半径收回到 0，就成了「从四周回收」
+        const float radius = std::max(4.f, float(kViewW) * 0.78f * reveal);
+        QRadialGradient blue(center, radius);
+        blue.setColorAt(0.0, QColor(150, 216, 255, int(64.f * reveal)));
+        blue.setColorAt(0.55, QColor(96, 178, 246, int(112.f * reveal)));
+        blue.setColorAt(0.85, QColor(48, 126, 214, int(150.f * reveal)));
+        blue.setColorAt(1.0, QColor(38, 104, 196, 0));
+        painter.setPen(Qt::NoPen);
+        painter.setBrush(blue);
+        painter.drawRect(canvas_.rect());
+    }
+    if (blades.empty() || fade <= 0.005f) {
+        return;
+    }
+    // 每一斩的错位：把画面沿这条刃线切成两半，半边顺着法向推出去；斩出来的错位一直留着，
+    // 直到整场结束一起滑回原位
+    struct Cut {
+        QPointF center;
+        float dx = 1.f;
+        float dy = 0.f;
+        float appear = 1.f;
+    };
+    QVector<Cut> cuts;
+    cuts.reserve(int(blades.size()));
+    for (const DimBlade& blade : blades) {
+        Cut cut;
+        cut.center = QPointF(blade.x - camera.x(), blade.y - camera.y());
+        const float len = std::sqrt(blade.dx * blade.dx + blade.dy * blade.dy);
+        if (len < 0.001f) {
+            continue;
+        }
+        cut.dx = blade.dx / len;
+        cut.dy = blade.dy / len;
+        cut.appear = std::min(1.f, blade.age / std::max(0.01f, session_.dimensionBladeAppear()));
+        cuts.push_back(cut);
+    }
+    for (const Cut& cut : cuts) {
+        const float strength = cut.appear * fade;
+        if (strength <= 0.02f) {
+            continue;
+        }
+        const float nx = -cut.dy;
+        const float ny = cut.dx;
+        const float offset = kDimCutOffset * strength;
+        const QImage base = canvas_.copy();
+        constexpr float kBig = 900.f;
+        const QPointF along(cut.dx * kBig, cut.dy * kBig);
+        const QPointF normal(nx * kBig * 2.f, ny * kBig * 2.f);
+        QPainterPath half;
+        half.moveTo(cut.center + along);
+        half.lineTo(cut.center - along);
+        half.lineTo(cut.center - along + normal);
+        half.lineTo(cut.center + along + normal);
+        half.closeSubpath();
+        painter.save();
+        painter.setClipPath(half);
+        painter.drawImage(QPointF(nx * offset, ny * offset), base);
+        painter.restore();
+    }
+    // 六芒星的轨迹：淡淡一条蓝线，让人看清角色是怎么跑完这一圈的
+    if (fade > 0.02f) {
+        float px = 0.f;
+        float py = 0.f;
+        QPainterPath star;
+        session_.dimensionNodeAt(0, px, py);
+        star.moveTo(px - camera.x(), py - camera.y());
+        for (int i = 1; i <= kDimBladeCount; ++i) {
+            session_.dimensionNodeAt(i, px, py);
+            star.lineTo(px - camera.x(), py - camera.y());
+        }
+        session_.dimensionNodeAt(0, px, py);
+        star.lineTo(px - camera.x(), py - camera.y());
+        strokeGlow(painter, QColor(126, 198, 255, int(96.f * fade)), 1.3f, [&] { painter.drawPath(star); });
+        painter.setPen(Qt::NoPen);
+    }
+    // 刃：贯穿画面的一道细长蓝光，从落点往两头推开
+    for (const Cut& cut : cuts) {
+        const float strength = cut.appear * fade;
+        if (strength <= 0.02f) {
+            continue;
+        }
+        const float len = 460.f * cut.appear;
+        const float nx = -cut.dy;
+        const float ny = cut.dx;
+        const QPointF a(cut.center.x() - cut.dx * len, cut.center.y() - cut.dy * len);
+        const QPointF b(cut.center.x() + cut.dx * len, cut.center.y() + cut.dy * len);
+        // 刃身：一片细长的光叶，中间最宽、两头收尖
+        const float wid = 9.f * strength;
+        QPainterPath body;
+        body.moveTo(a);
+        body.quadTo(QPointF(cut.center.x() + nx * wid, cut.center.y() + ny * wid), b);
+        body.quadTo(QPointF(cut.center.x() - nx * wid, cut.center.y() - ny * wid), a);
+        painter.setPen(Qt::NoPen);
+        painter.setBrush(QColor(118, 188, 255, int(86 * strength)));
+        painter.drawPath(body);
+        // 芯线 + 辉光：真正「切开画面」的那一道
+        painter.setBrush(Qt::NoBrush);
+        painter.setPen(QPen(withAlpha(QColor(178, 226, 255), int(150 * strength)), 5.f * strength + 1.5f,
+            Qt::SolidLine, Qt::RoundCap));
+        painter.drawLine(a, b);
+        strokeGlow(painter, withAlpha(QColor(224, 246, 255), int(235 * strength)), 2.2f * strength + 0.7f,
+            [&] { painter.drawLine(a, b); });
+    }
+    painter.setPen(Qt::NoPen);
+}
+
+// 在离屏图上把 HUD 常用文字先画一遍，预热字形光栅化缓存
+void GameWidget::warmUpHud() {
+    QImage scratch(kViewW, kViewH, QImage::Format_ARGB32_Premultiplied);
+    scratch.fill(Qt::transparent);
+    QPainter painter(&scratch);
+    painter.setPen(Qt::white);
+    painter.setFont(QFont(Platform::uiFontFamily(), 11));
+    painter.drawText(scratch.rect(), Qt::AlignLeft | Qt::AlignTop, QStringLiteral(
+        "玩家 0123456789 HP MP 护盾 体力 魔力 等级 经验 护甲 暴击 技能 天赋 已解锁 秒 分 精英 迷宫遗迹 史莱姆 克苏鲁之眼 ▸ ▾"));
+    painter.setFont(QFont(Platform::uiFontFamily(), 7, QFont::Bold));
+    painter.drawText(scratch.rect(), Qt::AlignRight | Qt::AlignBottom, QStringLiteral("韧性崩溃"));
+}
+
 void GameWidget::paintEvent(QPaintEvent* event) {
     Q_UNUSED(event);
     QPainter painter(this);
@@ -4119,37 +4452,7 @@ void GameWidget::paintEvent(QPaintEvent* event) {
     const int viewW = view.width();
     const int viewH = view.height();
 
-    canvas_.fill(QColor(16, 14, 12));
-    {
-        QPainter world(&canvas_);
-        world.setRenderHint(QPainter::SmoothPixmapTransform, false);
-        drawWorld(world);
-        world.resetTransform();
-        world.setCompositionMode(QPainter::CompositionMode_Multiply);
-        world.fillRect(canvas_.rect(), QColor(128, 112, 98));
-        world.setCompositionMode(QPainter::CompositionMode_SourceOver);
-        world.drawImage(0, 0, vignette_);
-        const float plazaRed = session_.plazaRed();
-        if (plazaRed > 0.01f) {
-            QRadialGradient red(kViewW * 0.5, kViewH * 0.5, kViewW * 0.72);
-            red.setColorAt(0.28, QColor(120, 0, 0, 0));
-            red.setColorAt(1.0, QColor(150, 0, 0, int(190.f * plazaRed)));
-            world.setPen(Qt::NoPen);
-            world.setBrush(red);
-            world.drawRect(canvas_.rect());
-        }
-        // I am atomic 的紫色滤镜：蓄力时整块画面往紫里压，越靠边缘越浓
-        const float violet = session_.atomicViolet();
-        if (violet > 0.01f) {
-            QRadialGradient purple(kViewW * 0.5, kViewH * 0.5, kViewW * 0.75);
-            purple.setColorAt(0.0, QColor(124, 44, 206, int(96.f * violet)));
-            purple.setColorAt(0.55, QColor(98, 26, 184, int(132.f * violet)));
-            purple.setColorAt(1.0, QColor(56, 12, 118, int(215.f * violet)));
-            world.setPen(Qt::NoPen);
-            world.setBrush(purple);
-            world.drawRect(canvas_.rect());
-        }
-    }
+    renderFrameToCanvas();
     painter.setRenderHint(QPainter::SmoothPixmapTransform, false);
     painter.drawImage(view, canvas_);
     if (flashT_ > 0.f && flashMax_ > 0.f) {
@@ -4184,25 +4487,46 @@ void GameWidget::paintEvent(QPaintEvent* event) {
         QString("LV %1    XP %2 / %3").arg(player.level).arg(shown(player.xp)).arg(session_.xpToNext()));
     painter.drawText(QRect(meta.x() + 6, meta.y() + 18, 198, 16), Qt::AlignVCenter | Qt::AlignLeft,
         QString("ARM %1    CRT %2%").arg(int(std::lround(player.armor))).arg(12 + player.critBonus));
-    auto talentLine = [&](int index, const QString& name, float current, float need) {
-        painter.drawText(QRect(originX + 20, originY + 138 + index * 13, 200, 14), Qt::AlignLeft | Qt::AlignVCenter,
-            QString("%1  %2 / %3").arg(name).arg(int(std::min(current, need))).arg(int(need)));
-    };
-    // 史莱姆之躯多一行「暴食」进度，面板跟着长高
+    // 天赋进度：平时折叠成一行标题，点标题行才展开明细（桌面左键 / 触屏点按）
+    // 史莱姆之躯多一行「暴食」进度，展开时面板跟着长高
     const bool showGluttony = session_.slimeBody();
     const int talentRows = showGluttony ? 7 : 6;
-    painter.fillRect(QRect(originX + 14, originY + 136, 210, 8 + talentRows * 13), QColor(12, 10, 9, 190));
+    const int talentX = originX + 14;
+    const int talentY = originY + 136;
+    const int talentW = 210;
+    const int talentHeaderH = 18;
+    const int talentPanelH = talentHudOpen_ ? talentHeaderH + 4 + talentRows * 13 : talentHeaderH;
+    talentHudRect_ = QRect(talentX, talentY, talentW, talentPanelH);
+    painter.fillRect(talentHudRect_, QColor(12, 10, 9, 190));
+    const int talentOwned = int(player.talentMight) + int(player.talentStride) + int(player.talentLight)
+        + int(player.talentMastery) + int(player.talentGuide) + int(player.talentUnderdog)
+        + int(player.talentGluttony);
+    painter.setFont(QFont(Platform::uiFontFamily(), 11, QFont::Bold));
     painter.setPen(QColor(168, 148, 128));
-    talentLine(0, "重手", player.damageDealt, 250.f);
-    talentLine(1, "远行", player.distanceMoved, 900.f);
-    talentLine(2, "轻身", float(player.dodgeCount), 6.f);
-    talentLine(3, "熟练", float(player.skillCasts), 12.f);
-    talentLine(4, "指引", float(player.worldKills), 20.f);
-    talentLine(5, "以小博大", float(player.underdogKills), 10.f);
-    if (showGluttony) {
-        talentLine(6, "暴食", float(session_.devourCount()), float(kGluttonyDevours));
+    painter.drawText(QRect(talentX + 6, talentY, talentW - 30, talentHeaderH), Qt::AlignLeft | Qt::AlignVCenter,
+        QString("天赋　已解锁 %1 / %2").arg(talentOwned).arg(talentRows));
+    painter.setPen(QColor(210, 190, 150));
+    painter.drawText(QRect(talentX + talentW - 22, talentY, 16, talentHeaderH), Qt::AlignRight | Qt::AlignVCenter,
+        talentHudOpen_ ? QStringLiteral("▾") : QStringLiteral("▸"));
+    painter.setFont(QFont(Platform::uiFontFamily(), 11));
+    if (talentHudOpen_) {
+        auto talentLine = [&](int index, const QString& name, float current, float need) {
+            painter.drawText(QRect(talentX + 6, talentY + talentHeaderH + 4 + index * 13, talentW - 12, 13),
+                Qt::AlignLeft | Qt::AlignVCenter,
+                QString("%1  %2 / %3").arg(name).arg(int(std::min(current, need))).arg(int(need)));
+        };
+        painter.setPen(QColor(168, 148, 128));
+        talentLine(0, "重手", player.damageDealt, 250.f);
+        talentLine(1, "远行", player.distanceMoved, 900.f);
+        talentLine(2, "轻身", float(player.dodgeCount), 6.f);
+        talentLine(3, "熟练", float(player.skillCasts), 12.f);
+        talentLine(4, "指引", float(player.worldKills), 20.f);
+        talentLine(5, "以小博大", float(player.underdogKills), 10.f);
+        if (showGluttony) {
+            talentLine(6, "暴食", float(session_.devourCount()), float(kGluttonyDevours));
+        }
     }
-    int hudY = originY + 136 + 8 + talentRows * 13 + 2;
+    int hudY = talentHudRect_.bottom() + 3;
     // 史莱姆之躯的形态面板：当前外形、加成与拟态技能冷却
     if (session_.slimeBody()) {
         const MimicText text = mimicText(session_.mimicForm());
@@ -4277,6 +4601,43 @@ void GameWidget::paintEvent(QPaintEvent* event) {
                     .arg(pool.triggeredCount())
                     .arg(ShallowPool::kMines));
         }
+    }
+    // 隐藏强化普攻「次元斩」：判定中的连招进度与成功后的可用时限
+    if (session_.dimensionJudging() || session_.dimensionReady()) {
+        const int panelX = originX + 14;
+        const int panelY = hudY;
+        const int panelW = 210;
+        const int panelH = 44;
+        if (panelY + panelH <= originY + viewH - 56) {
+            const bool ready = session_.dimensionReady();
+            painter.setPen(Qt::NoPen);
+            painter.setBrush(QColor(8, 20, 32, 205));
+            painter.drawRect(QRect(panelX, panelY, panelW, panelH));
+            painter.setBrush(Qt::NoBrush);
+            painter.setPen(QPen(QColor(96, 176, 232), 1));
+            painter.drawRect(QRect(panelX, panelY, panelW - 1, panelH - 1));
+            painter.setFont(QFont(Platform::uiFontFamily(), 9, QFont::Bold));
+            painter.setPen(QColor(190, 236, 255));
+            painter.drawText(QRect(panelX + 6, panelY + 2, panelW - 12, 14), Qt::AlignLeft | Qt::AlignVCenter,
+                ready ? QStringLiteral("次元斩 · 就绪") : QStringLiteral("次元斩 · 判定中"));
+            painter.setFont(QFont(Platform::uiFontFamily(), 7));
+            painter.setPen(QColor(150, 194, 224));
+            painter.drawText(QRect(panelX + 6, panelY + 17, panelW - 12, 12), Qt::AlignLeft | Qt::AlignVCenter,
+                QString("突刺 %1/%2　普攻 %3/%4　跳跃 %5/%6")
+                    .arg(session_.dimensionThrustCount())
+                    .arg(kDimThrustNeed)
+                    .arg(session_.dimensionLightCount())
+                    .arg(kDimLightNeed)
+                    .arg(session_.dimensionJumpCount())
+                    .arg(kDimJumpNeed));
+            painter.setPen(QColor(210, 232, 246));
+            painter.drawText(QRect(panelX + 6, panelY + 29, panelW - 12, 12), Qt::AlignLeft | Qt::AlignVCenter,
+                ready ? QString("普攻 / 重击打出　剩余 %1s").arg(session_.dimensionDeadlineLeft(), 0, 'f', 1)
+                      : QString("剩余 %1s　长按闪避 %2s 起手")
+                            .arg(session_.dimensionWindowLeft(), 0, 'f', 1)
+                            .arg(kDimHoldTime, 0, 'f', 1));
+        }
+        hudY += panelH + 4;
     }
     painter.setPen(QColor(228, 212, 188));
     // 意识回归符咒按获取个数挂在 SCORE 旁边

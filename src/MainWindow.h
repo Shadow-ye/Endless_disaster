@@ -9,6 +9,7 @@
 #include <functional>
 
 class GameWidget;
+class LoadingWidget;
 class QCheckBox;
 class QComboBox;
 class QGraphicsOpacityEffect;
@@ -18,6 +19,7 @@ class QPushButton;
 class QSlider;
 class QStackedWidget;
 class QTextBrowser;
+class QTimer;
 class QWidget;
 
 class MainWindow : public QWidget {
@@ -37,6 +39,14 @@ private:
     void showSettings();
     void startPrepared();
     void continueGame();
+    // 开局加载页：把准备步骤摊到多帧执行，参数先记在这里
+    void startLoadingNewRun(HeroClass hero, const std::array<int, 4>& skills);
+    void startLoadingContinue(const QJsonObject& game);
+    void beginLoading();
+    void advanceLoading();
+    void runLoadingStep(int step);
+    void finishLoading();
+    int loadingStepCount() const;
     void refreshMenu();
     void refreshPrepareSkills();
     void loadSettingsUi();
@@ -55,6 +65,16 @@ private:
     void layoutPrepareArt();
     void updatePrepareArtHighlight();
     void selectHeroClass(HeroClass hero);
+
+    // 进入本局前的加载页：新开一局与继续存档都要先过它
+    enum class LoadingKind { NewRun, Continue };
+    LoadingWidget* loading_ = nullptr;
+    QTimer* loadingTimeout_ = nullptr;
+    LoadingKind loadingKind_ = LoadingKind::NewRun;
+    HeroClass loadingHero_ = HeroClass::Warrior;
+    std::array<int, 4> loadingSkills_{0, 1, 2, -1};
+    QJsonObject loadingSave_;
+    int loadingStep_ = 0;
 
     QStackedWidget* stack_ = nullptr;
     QWidget* menu_ = nullptr;

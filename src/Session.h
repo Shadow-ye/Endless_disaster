@@ -112,6 +112,50 @@ inline constexpr float kAtomicChantWord = 1.f;
 inline constexpr float kAtomicChantGap = 1.f;
 inline constexpr float kAtomicChantFinal = 2.f;
 
+// 战士隐藏强化普攻「次元斩」：带上突刺后，长按闪避 0.5 秒开始判定（配音起、BGM 让位）；
+// 10 秒内打完 3 次突刺 + 3 次普攻 + 1 次跳跃算判定成功，此后从长按闪避那一刻起算 20 秒内，
+// 下一次普攻或重击打出次元斩。超时 / 差一招都算判定失败。
+inline constexpr float kDimHoldTime = 0.5f;
+inline constexpr float kDimComboWindow = 10.f;
+inline constexpr float kDimDeadline = 20.f;
+inline constexpr int kDimThrustNeed = 3;
+inline constexpr int kDimLightNeed = 3;
+inline constexpr int kDimJumpNeed = 1;
+// 次元斩只吃体力
+inline constexpr float kDimStaminaCost = 30.f;
+// 次元斩本体：角色沿六芒星边移动边斩，六芒星六个顶点各一斩（每斩中心都不同），
+// 斩完回原位停顿一拍，再一起结算伤害，最后光刃与滤镜一起收掉。
+inline constexpr int kDimBladeCount = 6;          // 六芒星六斩
+inline constexpr float kDimGap = 0.55f;           // 每一斩的间隔（要慢）
+inline constexpr float kDimStarRadius = 44.f;     // 六芒星半径
+inline constexpr float kDimDashTime = float(kDimBladeCount) * kDimGap;  // 移动覆盖整个斩击阶段
+inline constexpr float kDimReturnTime = 0.3f;     // 斩完回原位
+inline constexpr float kDimPauseTime = 0.6f;      // 回原位后停顿（停顿结束才结算伤害）
+inline constexpr float kDimFadeTime = 0.5f;       // 光刃一起消失 / 滤镜从四周回收
+inline constexpr float kDimSettleTime = kDimDashTime + kDimReturnTime + kDimPauseTime;
+inline constexpr float kDimSlashLife = kDimSettleTime + kDimFadeTime;
+inline constexpr float kDimFilterExpand = 0.35f;  // 蓝滤镜由中心铺开用多久
+inline constexpr float kDimBladeAppear = 0.14f;   // 单道刃「斩出去」用多久
+// 斩完之后配音再多留一秒（界面那边收掉配音后，还要再空一拍才把 BGM 渐入回来）
+inline constexpr float kDimVoiceTail = 1.f;
+// 单道刃的判定：以刃线为中心的细长条，长度足够横贯整屏
+inline constexpr float kDimBladeRange = 260.f;
+inline constexpr float kDimBladeWidth = 26.f;
+inline constexpr float kDimBladeDamage = 26.f;
+inline constexpr float kDimBladePoise = 16.f;
+// 时缓强度（其余单位的时间缩放）与尾段回正常速的时长
+inline constexpr float kDimSlowScale = 0.22f;
+inline constexpr float kDimSlowTail = 0.45f;
+
+// 次元斩的一斩：中心落在六芒星顶点上（每斩各不相同），刃线方向自成一路
+struct DimBlade {
+    float x = 0.f;
+    float y = 0.f;
+    float dx = 1.f;
+    float dy = 0.f;
+    float age = 0.f;  // 出现后过了多久，用来画「这一斩推开」的展开
+};
+
 struct Item {
     int slot = 0;
     int kind = 0;
@@ -360,6 +404,13 @@ class Session {
 public:
     void newGame(uint32_t seed, uint32_t runId, HeroClass hero = HeroClass::Warrior,
         int skillD = 0, int skillF = 1, int skillC = 2, int skillV = -1, bool guideAtStart = false);
+    // 开局准备的分步入口：按 reset → spawns → ruin 依次调用与 newGame() 完全等价。
+    // 加载页借此把开局的重活摊到多帧执行，避免进入游戏时整帧卡顿。
+    void newGameStepReset(uint32_t seed, uint32_t runId, HeroClass hero = HeroClass::Warrior,
+        int skillD = 0, int skillF = 1, int skillC = 2, int skillV = -1, bool guideAtStart = false);
+    void newGameStepSpawns();
+    // 生成迷宫遗迹；找不到合适位置时返回 false（本局地图上没有遗迹）
+    bool newGameStepRuin();
     bool loadFrom(const QJsonObject& game);
     QJsonObject toJson() const;
 
@@ -393,6 +444,35 @@ public:
     float plazaRed() const { return plazaRed_; }
     // I am atomic 的画面紫色滤镜：蓄力时涨起来，余波里退掉
     float atomicViolet() const { return atomicViolet_; }
+    // —— 战士隐藏强化普攻「次元斩」
+    // 判定进行中（长按闪避已触发，正在 10 秒连招窗口里）
+    bool dimensionJudging() const { return dimOpen_; }
+    // 连招已完成，等着用普攻 / 重击打出次元斩
+    bool dimensionReady() const { return dimReady_; }
+    float dimensionWindowLeft() const { return dimWindowT_; }
+    float dimensionDeadlineLeft() const { return kDimDeadline - dimSinceDodge_ > 0.f ? kDimDeadline - dimSinceDodge_ : 0.f; }
+    int dimensionThrustCount() const { return dimThrust_; }
+    int dimensionLightCount() const { return dimLight_; }
+    int dimensionJumpCount() const { return dimJump_; }
+    // 次元斩的浅蓝滤镜圈：由中心向外展开，最后从四周回收
+    float dimensionFilterReveal() const { return dimFilterR_; }
+    // 次元斩正在斩（画面要沿刃线错位、除玩家外都时缓、相机锁在起手点）
+    bool dimensionSlashing() const { return dimSlashT_ > 0.f; }
+    // 当前还留在画面上的每一斩：中心各不相同，直到整场结束时一起消失
+    const std::vector<DimBlade>& dimensionBlades() const { return dimBlades_; }
+    // 一斩「推开」用多久；以及全场的整体强度（末尾一起消失）
+    float dimensionBladeAppear() const { return kDimBladeAppear; }
+    float dimensionBladeFade() const { return dimBladeFade_; }
+    // 次元斩期间相机锁在起手处，角色才能在画面里沿六芒星跑
+    void dimensionCameraAnchor(float& x, float& y) const { x = dimCamX_; y = dimCamY_; }
+    // 六芒星上的第 index 个落点：0 是起手点，1..6 是六个顶点（界面用它画出跑动轨迹）
+    void dimensionNodeAt(int index, float& x, float& y) const { dimensionNode(index, x, y); }
+    // 长按闪避触发了有效判定（界面据此起配音、压掉 BGM）
+    bool consumeDimensionVoiceStart();
+    // 判定失败 / 死亡 / 超时：界面据此停配音、立刻恢复 BGM
+    bool consumeDimensionVoiceStop();
+    // 次元斩正常打完（再留一秒）：界面据此停配音，隔一拍后让 BGM 渐入
+    bool consumeDimensionVoiceFinish();
     // 角色头顶的吟唱字幕，一个词一个词往外蹦；空串表示这会儿不显示
     QString atomicChant() const;
     void cameraShake(float& sx, float& sy) const;
@@ -511,6 +591,26 @@ private:
     void castAtomic(float& cooldown);
     void atomicBlast();
     void updateAtomic(float dt);
+    // —— 战士隐藏强化普攻「次元斩」
+    // 战士且技能槽里带了突刺才解锁（隐藏技能的前提）
+    bool dimensionUnlocked() const;
+    // 判定与出招：长按闪避计时、10 秒连招窗口、20 秒期限、沿六芒星逐斩
+    void updateDimension(float dt, const InputState& input);
+    // 次元斩的时间线：六芒星位移 + 逐斩展开 + 回位停顿 + 一起结算 + 滤镜回收
+    void updateDimensionSlash(float elapsed, float dt);
+    void startDimensionJudge();
+    void failDimensionJudge();
+    void clearDimension();
+    bool dimensionComboReady() const;
+    void castDimensionSlash();
+    // 六芒星第 index 个落点（0 是起手点，1..6 是六个顶点）
+    void dimensionNode(int index, float& x, float& y) const;
+    // 一斩：落在六芒星第 index 段末尾的顶点上
+    void dimensionSlash(int index);
+    // 六斩一起结算伤害
+    void dimensionSettle();
+    // 除玩家外的世界时间缩放（次元斩期间 <1）
+    float dimensionSlowScale() const;
     void castMirrorShield(float& cooldown);
     void castMageHeal(float& cooldown);
     void castBerserk(float& cooldown, const QString& name);
@@ -620,6 +720,31 @@ private:
     float plazaRed_ = 0.f;
     float atomicViolet_ = 0.f;
     float atomicChantT_ = 0.f;
+    // —— 战士隐藏强化普攻「次元斩」
+    bool dimHoldArmed_ = false;  // 这次按住闪避是不是由一次成功闪避起头的
+    float dimHoldT_ = 0.f;       // 闪避键已经按住多久
+    bool dimOpen_ = false;       // 判定中：10 秒连招窗口
+    bool dimReady_ = false;      // 连招已完成，等下一次普攻 / 重击
+    float dimWindowT_ = 0.f;     // 连招窗口剩余
+    float dimSinceDodge_ = 0.f;  // 距长按闪避触发过了多久（20 秒上限）
+    int dimThrust_ = 0;
+    int dimLight_ = 0;
+    int dimJump_ = 0;
+    int dimBladeOut_ = 0;        // 已经斩出的刃数
+    bool dimSettled_ = false;    // 这一场是否已经结算过伤害
+    float dimSlashT_ = 0.f;      // 次元斩剩余时间
+    float dimSlashLife_ = 0.f;
+    float dimFilterR_ = 0.f;     // 蓝滤镜圈的展开度（0 中心 → 1 铺满）
+    float dimBladeFade_ = 1.f;   // 全场的整体强度，末尾一起消失
+    float dimCamX_ = 0.f;        // 起手点：次元斩期间相机锁在这里
+    float dimCamY_ = 0.f;
+    std::vector<DimBlade> dimBlades_;
+    // 配音开关：判定开始时起配音，失败时叫停，打完再留一秒后交给界面收尾
+    bool dimVoiceOn_ = false;
+    bool dimVoiceStart_ = false;
+    bool dimVoiceStop_ = false;
+    bool dimVoiceFinish_ = false;
+    float dimVoiceTail_ = 0.f;
     bool voidPrompt_ = false;
     int eyeDefeats_ = 0;
     // 玩家理论理智上限（不含踩雷削减）；effective 上限是 player_.maxSan

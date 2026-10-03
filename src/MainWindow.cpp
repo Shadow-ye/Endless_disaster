@@ -3,6 +3,7 @@
 #include "Audio.h"
 #include "Codex.h"
 #include "GameWidget.h"
+#include "LoadingWidget.h"
 #include "Platform.h"
 #include "Storage.h"
 
@@ -10,8 +11,10 @@
 #include <QCheckBox>
 #include <QComboBox>
 #include <QCoreApplication>
+#include <QDebug>
 #include <QDesktopServices>
 #include <QDir>
+#include <QElapsedTimer>
 #include <QEvent>
 #include <QFile>
 #include <QFontMetrics>
@@ -34,6 +37,7 @@
 #include <QSlider>
 #include <QStackedWidget>
 #include <QTextBrowser>
+#include <QTimer>
 #include <QUrl>
 #include <QVBoxLayout>
 
@@ -467,6 +471,7 @@ MainWindow::MainWindow(QWidget* parent) : QWidget(parent) {
     updatePrepareArtHighlight();
 
     game_ = new GameWidget(stack_);
+    loading_ = new LoadingWidget(stack_);
 
     settings_ = new QWidget(stack_);
     auto* settingsOuter = new QVBoxLayout(settings_);
@@ -524,6 +529,13 @@ MainWindow::MainWindow(QWidget* parent) : QWidget(parent) {
     stack_->addWidget(prepare_);
     stack_->addWidget(settings_);
     stack_->addWidget(game_);
+    stack_->addWidget(loading_);
+
+    // 加载页进度走满后由它自己发信号收尾；超时兜底保证不会困在加载页
+    loadingTimeout_ = new QTimer(this);
+    loadingTimeout_->setSingleShot(true);
+    connect(loadingTimeout_, &QTimer::timeout, this, [this] { finishLoading(); });
+    connect(loading_, &LoadingWidget::finished, this, [this] { finishLoading(); });
 
     auto* root = new QVBoxLayout(this);
     root->setContentsMargins(0, 0, 0, 0);
@@ -996,25 +1008,25 @@ void MainWindow::saveSettingsUi() {
 }
 
 void MainWindow::startPrepared() {
-    const HeroClass hero = hero_;
-    if (hero == HeroClass::Mage) {
-        game_->startNew(hero,
-            mageSkillBoxes_[0]->currentData().toInt(),
+    // 出发界面选好的技能先记成加载参数，真正开局交给加载页分步完成
+    std::array<int, 4> skills{0, 1, 2, -1};
+    if (hero_ == HeroClass::Mage) {
+        skills = {mageSkillBoxes_[0]->currentData().toInt(),
             mageSkillBoxes_[1]->currentData().toInt(),
             mageSkillBoxes_[2]->currentData().toInt(),
-            mageSkillBoxes_[3]->currentData().toInt());
-    } else if (hero == HeroClass::Robot) {
-        game_->startNew(hero,
-            robotSkillBoxes_[0]->currentData().toInt(),
+            mageSkillBoxes_[3]->currentData().toInt()};
+    } else if (hero_ == HeroClass::Robot) {
+        skills = {robotSkillBoxes_[0]->currentData().toInt(),
             robotSkillBoxes_[1]->currentData().toInt(),
-            robotSkillBoxes_[2]->currentData().toInt());
+            robotSkillBoxes_[2]->currentData().toInt(),
+            -1};
     } else {
-        game_->startNew(hero,
-            warriorSkillBoxes_[0]->currentData().toInt(),
+        skills = {warriorSkillBoxes_[0]->currentData().toInt(),
             warriorSkillBoxes_[1]->currentData().toInt(),
-            warriorSkillBoxes_[2]->currentData().toInt());
+            warriorSkillBoxes_[2]->currentData().toInt(),
+            -1};
     }
-    stack_->setCurrentWidget(game_);
+    startLoadingNewRun(hero_, skills);
 }
 
 void MainWindow::continueGame() {
@@ -1023,6 +1035,104 @@ void MainWindow::continueGame() {
         QMessageBox::warning(this, "继续", "没有可用存档。");
         return;
     }
-    game_->startContinue(game);
+    startLoadingContinue(game);
+}
+
+void MainWindow::startLoadingNewRun(HeroClass hero, const std::array<int, 4>& skills) {
+    loadingKind_ = LoadingKind::NewRun;
+    loadingHero_ = hero;
+    loadingSkills_ = skills;
+    loadingSave_ = QJsonObject();
+    beginLoading();
+}
+
+void MainWindow::startLoadingContinue(const QJsonObject& game) {
+    loadingKind_ = LoadingKind::Continue;
+    loadingSave_ = game;
+    beginLoading();
+}
+
+int MainWindow::loadingStepCount() const {
+    return loadingKind_ == LoadingKind::NewRun ? 5 : 2;
+}
+
+// 切到加载页并启动分步推进：每步之间让出事件循环，进度条动画不会卡住
+void MainWindow::beginLoading() {
+    loadingStep_ = 0;
+    // 先让游戏侧停下：加载页露头的第一帧起就不再跑上一局的模拟
+    game_->beginPrepare();
+    stack_->setCurrentWidget(loading_);
+    loading_->start();
+    loading_->setProgress(0.f);
+    loading_->setStageText(QStringLiteral("意识降临中，正在转译画面信息..."));
+    loadingTimeout_->start(8000);
+    QTimer::singleShot(0, this, &MainWindow::advanceLoading);
+}
+
+void MainWindow::advanceLoading() {
+    const int count = loadingStepCount();
+    if (loadingStep_ >= count) {
+        // 步骤全做完：把进度交给加载页推到 100%，等它播完脉冲发 finished
+        loading_->setProgress(1.f);
+        return;
+    }
+    const int step = loadingStep_;
+    loading_->setProgress(float(step) / float(count));
+    runLoadingStep(step);
+    ++loadingStep_;
+    // 让出事件循环：加载页在这一帧刷新动画，下一步留到下一帧
+    QTimer::singleShot(0, this, &MainWindow::advanceLoading);
+}
+
+void MainWindow::runLoadingStep(int step) {
+    // 记录单步耗时：开局卡顿排查时直接看这条日志就能定位是哪一段重
+    QElapsedTimer stepClock;
+    stepClock.start();
+    if (loadingKind_ == LoadingKind::Continue) {
+        if (step == 0) {
+            game_->prepareContinue(loadingSave_);
+        } else {
+            game_->prepareFinish();
+        }
+        qDebug("loading continue step %d: %lld ms", step, stepClock.elapsed());
+        return;
+    }
+    switch (step) {
+    case 0:
+        game_->prepareNew(loadingHero_, loadingSkills_[0], loadingSkills_[1], loadingSkills_[2], loadingSkills_[3]);
+        break;
+    case 1:
+        game_->prepareNewStepReset();
+        break;
+    case 2:
+        game_->prepareNewStepSpawns();
+        break;
+    case 3:
+        game_->prepareNewStepRuin();
+        break;
+    default:
+        game_->prepareFinish();
+        break;
+    }
+    qDebug("loading new-run step %d: %lld ms", step, stepClock.elapsed());
+}
+
+void MainWindow::finishLoading() {
+    loadingTimeout_->stop();
+    if (stack_->currentWidget() != loading_) {
+        return;
+    }
+    // 兜底：超时或某一步出问题时，把没跑完的步骤在这里一次补齐，绝不把玩家困在加载页
+    while (loadingStep_ < loadingStepCount()) {
+        runLoadingStep(loadingStep_);
+        ++loadingStep_;
+    }
+    loading_->stop();
+    loading_->setProgress(1.f);
+    loadingStep_ = 0;
+    loadingSave_ = QJsonObject();
+    // 切页的同时才真正开始本局，保证加载页停留的时间不计入游戏时长
+    game_->startRun();
     stack_->setCurrentWidget(game_);
+    game_->setFocus();
 }

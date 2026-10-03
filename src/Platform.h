@@ -23,4 +23,8 @@ void configureDisplay();
 
 // 多媒体后端可直接播放的地址；qrc 内的文件会先解到缓存目录。
 QUrl mediaUrl(const QString& path);
+
+// 找到含贴图的 assets 目录（Windows / Linux 安装包 / Android 的 qrc ":"）。
+// 以 hero_warrior/idle.png 是否存在作为判定标志。
+QString assetDir();
 }  // namespace Platform

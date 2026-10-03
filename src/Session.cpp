@@ -7,6 +7,8 @@
 #include <cmath>
 
 namespace {
+constexpr float kPi = 3.14159265f;
+
 constexpr float kPlayerRadius = 7.f;
 constexpr float kMonsterRadius = 7.f;
 
@@ -228,6 +230,30 @@ bool Session::consumeRecoverBgm() {
     return true;
 }
 
+bool Session::consumeDimensionVoiceStart() {
+    if (!dimVoiceStart_) {
+        return false;
+    }
+    dimVoiceStart_ = false;
+    return true;
+}
+
+bool Session::consumeDimensionVoiceStop() {
+    if (!dimVoiceStop_) {
+        return false;
+    }
+    dimVoiceStop_ = false;
+    return true;
+}
+
+bool Session::consumeDimensionVoiceFinish() {
+    if (!dimVoiceFinish_) {
+        return false;
+    }
+    dimVoiceFinish_ = false;
+    return true;
+}
+
 bool Session::consumeVoidPrompt() {
     if (!voidPrompt_) {
         return false;
@@ -258,6 +284,15 @@ void Session::trackHpForBgm() {
 
 void Session::newGame(uint32_t seed, uint32_t runId, HeroClass hero, int skillD, int skillF, int skillC, int skillV,
     bool guideAtStart) {
+    newGameStepReset(seed, runId, hero, skillD, skillF, skillC, skillV, guideAtStart);
+    newGameStepSpawns();
+    newGameStepRuin();
+}
+
+// 开局第一步：地图与玩家状态的纯重置（不含怪物与迷宫）。
+// 三步按顺序调用与原来的 newGame() 完全等价：字段初始化顺序与 rng_ 消耗顺序都没变。
+void Session::newGameStepReset(uint32_t seed, uint32_t runId, HeroClass hero, int skillD, int skillF, int skillC,
+    int skillV, bool guideAtStart) {
     map_ = TileMap(seed);
     player_ = Player{};
     player_.x = 8.f;
@@ -353,6 +388,7 @@ void Session::newGame(uint32_t seed, uint32_t runId, HeroClass hero, int skillD,
     bgmRecoverArmed_ = false;
     recoverBgmPending_ = false;
     hpTrack_ = player_.maxHp;
+    clearDimension();
     monsters_.clear();
     bolts_.clear();
     drones_.clear();
@@ -373,6 +409,14 @@ void Session::newGame(uint32_t seed, uint32_t runId, HeroClass hero, int skillD,
     reason_ = EndReason::None;
     notice_.clear();
     rng_ = seed ^ runId ^ 0xA5A5u;
+    // 开局赠送的世界指引提示：本步不产生其它提示，放这里与拆分前的最终提示一致
+    if (guideAtStart) {
+        note("天赋：世界指引（开局赠送）");
+    }
+}
+
+// 开局第二步：初始怪物与寻路场
+void Session::newGameStepSpawns() {
     for (int i = 0; i < 3; ++i) {
         float x = 0.f;
         float y = 0.f;
@@ -383,6 +427,10 @@ void Session::newGame(uint32_t seed, uint32_t runId, HeroClass hero, int skillD,
     paths_.rebuild(map_, tileOf(player_.x), tileOf(player_.y));
     pathTileX_ = tileOf(player_.x);
     pathTileY_ = tileOf(player_.y);
+}
+
+// 开局第三步：迷宫遗迹与克苏鲁之眼（最重的一步：最多尝试 40 次生成 33×33 的迷宫）
+bool Session::newGameStepRuin() {
     ruin_.clear();
     pool_.clear();
     slime_.clear();
@@ -400,10 +448,7 @@ void Session::newGame(uint32_t seed, uint32_t runId, HeroClass hero, int skillD,
     reviveState_ = ReviveState::None;
     revivePrompt_ = false;
     talismanBonus_ = 0;
-    if (guideAtStart) {
-        note("天赋：世界指引（开局赠送）");
-    }
-    spawnRuin();
+    return spawnRuin();
 }
 
 bool Session::loadFrom(const QJsonObject& game) {
@@ -508,6 +553,7 @@ bool Session::loadFrom(const QJsonObject& game) {
     bgmRecoverArmed_ = false;
     recoverBgmPending_ = false;
     hpTrack_ = player_.hp;
+    clearDimension();
     const QJsonArray list = game.value("monsters").toArray();
     for (const QJsonValue& value : list) {
         const QJsonObject m = value.toObject();
@@ -762,6 +808,8 @@ void Session::finishRun(EndReason reason) {
         return;
     }
     convertTalismansToScore();
+    // 本局收尾：次元斩的判定 / 配音一并收干净
+    clearDimension();
     reason_ = reason;
     paused_ = false;
 }
@@ -1280,7 +1328,10 @@ void Session::updateFloats(float dt) {
 }
 
 void Session::hurtPlayer(float damage, Monster* source) {
-    if (player_.state == ActorState::Dead || player_.state == ActorState::Dodge || player_.invuln > 0.f) {
+    // 次元斩期间角色是在斩击的隙间穿行：直接免伤。这里不走 invuln，
+    // 否则整场都会被无敌闪烁的绘制逻辑闪成半透明。
+    if (player_.state == ActorState::Dead || player_.state == ActorState::Dodge || player_.invuln > 0.f
+        || dimSlashT_ > 0.f) {
         return;
     }
     if (player_.mirrorT > 0.f) {
@@ -2276,6 +2327,10 @@ void Session::castThrustStack() {
         player_.cdThrustStack = 1.0f * cdMul();
     }
     player_.skillCasts += 1;
+    // 次元斩连招：突刺一次算一招
+    if (dimOpen_) {
+        dimThrust_ = std::min(kDimThrustNeed, dimThrust_ + 1);
+    }
     player_.state = ActorState::Dodge;
     player_.dodgeT = 0.3f;  // 位移 +50%（原 0.2）
     player_.dodgeX = player_.facingX;
@@ -2481,6 +2536,331 @@ void Session::updateAtomic(float dt) {
     player_.atomicStage = 0;
     player_.atomicT = 0.f;
     player_.atomicNext = 0.f;
+}
+
+// —— 战士隐藏强化普攻「次元斩」 ——
+// 带上突刺的战士长按闪避 1.5 秒开始判定：10 秒内打完 3 突刺 + 3 普攻 + 1 跳跃即为成功，
+// 成功后再从长按闪避那一刻起算 20 秒内，用普攻 / 重击打出次元斩。
+bool Session::dimensionUnlocked() const {
+    return player_.hero == HeroClass::Warrior
+        && (player_.skillD == kSkillThrust || player_.skillF == kSkillThrust || player_.skillC == kSkillThrust);
+}
+
+// 次元斩期间除玩家外全体时缓；收尾这一小段把速度拉回来，免得斩完「啪」地恢复
+float Session::dimensionSlowScale() const {
+    if (dimSlashT_ <= 0.f) {
+        return 1.f;
+    }
+    const float tail = std::min(1.f, dimSlashT_ / kDimSlowTail);
+    return 1.f - (1.f - kDimSlowScale) * tail;
+}
+
+bool Session::dimensionComboReady() const {
+    return dimThrust_ >= kDimThrustNeed && dimLight_ >= kDimLightNeed && dimJump_ >= kDimJumpNeed;
+}
+
+// 六芒星上的第 index 个落点：0 是起手点（六芒星中心），1..6 是六个顶点，
+// 顺序按 上 → 右下 → 左下 → 右上 → 下 → 左上，正好把两个三角形都走一遍
+void Session::dimensionNode(int index, float& x, float& y) const {
+    if (index <= 0 || index > kDimBladeCount) {
+        x = dimCamX_;
+        y = dimCamY_;
+        return;
+    }
+    static const int kOrder[kDimBladeCount] = {0, 2, 4, 1, 3, 5};
+    const float angle = -kPi * 0.5f + kPi / 3.f * float(kOrder[index - 1]);
+    x = dimCamX_ + std::cos(angle) * kDimStarRadius;
+    y = dimCamY_ + std::sin(angle) * kDimStarRadius;
+}
+
+// 把次元斩的一切收干净：判定作废、光刃停下，必要时叫停配音
+void Session::clearDimension() {
+    if (dimVoiceOn_) {
+        dimVoiceOn_ = false;
+        dimVoiceStop_ = true;
+    }
+    dimHoldArmed_ = false;
+    dimHoldT_ = 0.f;
+    dimOpen_ = false;
+    dimReady_ = false;
+    dimWindowT_ = 0.f;
+    dimSinceDodge_ = 0.f;
+    dimThrust_ = 0;
+    dimLight_ = 0;
+    dimJump_ = 0;
+    dimBladeOut_ = 0;
+    dimSettled_ = false;
+    dimSlashT_ = 0.f;
+    dimSlashLife_ = 0.f;
+    dimFilterR_ = 0.f;
+    dimBladeFade_ = 1.f;
+    dimBlades_.clear();
+    dimVoiceTail_ = 0.f;
+    dimVoiceFinish_ = false;
+}
+
+// 长按闪避满 1.5 秒：判定开始，配音起、BGM 让位
+void Session::startDimensionJudge() {
+    dimOpen_ = true;
+    dimReady_ = false;
+    dimWindowT_ = kDimComboWindow;
+    dimSinceDodge_ = 0.f;
+    dimThrust_ = 0;
+    dimLight_ = 0;
+    dimJump_ = 0;
+    dimVoiceOn_ = true;
+    dimVoiceStart_ = true;
+    // 上一场打完留下的尾音作废：配音这次从头起
+    dimVoiceTail_ = 0.f;
+    dimVoiceFinish_ = false;
+    note("次元斩判定开始");
+    queueSfx(SfxId::Skill);
+}
+
+// 10 秒内没凑齐连招，或 20 秒内没打出次元斩：判定失败，配音停、BGM 回来
+void Session::failDimensionJudge() {
+    if (dimVoiceOn_) {
+        dimVoiceOn_ = false;
+        dimVoiceStop_ = true;
+    }
+    dimOpen_ = false;
+    dimReady_ = false;
+    dimWindowT_ = 0.f;
+    dimSinceDodge_ = 0.f;
+    dimThrust_ = 0;
+    dimLight_ = 0;
+    dimJump_ = 0;
+    note("次元斩判定失败");
+}
+
+void Session::updateDimension(float dt, const InputState& input) {
+    // 打完的配音尾音：斩完再留一秒，到点交给界面收掉（界面那边再空一拍渐入 BGM）
+    if (dimVoiceTail_ > 0.f) {
+        dimVoiceTail_ = std::max(0.f, dimVoiceTail_ - dt);
+        if (dimVoiceTail_ <= 0.f && dimVoiceOn_) {
+            dimVoiceOn_ = false;
+            dimVoiceFinish_ = true;
+        }
+    }
+
+    // 长按闪避：这次闪避起头后按住不放，满 0.5 秒触发判定
+    const bool dodgeHeld = input.shift || input.rmb;
+    if (!dodgeHeld) {
+        dimHoldArmed_ = false;
+        dimHoldT_ = 0.f;
+    } else if (dimHoldArmed_ && !dimOpen_ && !dimReady_ && dimSlashT_ <= 0.f) {
+        dimHoldT_ += dt;
+        if (dimHoldT_ >= kDimHoldTime) {
+            dimHoldArmed_ = false;
+            startDimensionJudge();
+        }
+    }
+
+    if (dimOpen_) {
+        dimWindowT_ -= dt;
+        dimSinceDodge_ += dt;
+        if (dimensionComboReady()) {
+            dimOpen_ = false;
+            dimWindowT_ = 0.f;
+            dimReady_ = true;
+            note("次元斩 · 就绪");
+            queueSfx(SfxId::Level);
+        } else if (dimWindowT_ <= 0.f) {
+            failDimensionJudge();
+        }
+    } else if (dimReady_) {
+        // 判定已经成功，但从长按闪避那一刻起算累计超过 20 秒仍然作废
+        dimSinceDodge_ += dt;
+        if (dimSinceDodge_ >= kDimDeadline) {
+            failDimensionJudge();
+        }
+    }
+
+    if (dimSlashT_ <= 0.f) {
+        return;
+    }
+    dimSlashT_ = std::max(0.f, dimSlashT_ - dt);
+    updateDimensionSlash(dimSlashLife_ - dimSlashT_, dt);
+    if (dimSlashT_ > 0.f) {
+        return;
+    }
+    // 打完：整场的光刃一起消失，滤镜收干净；配音再多留一秒（见上面的尾音计时）
+    dimBlades_.clear();
+    dimBladeFade_ = 0.f;
+    dimFilterR_ = 0.f;
+    dimSettled_ = false;
+    player_.attackT = 0.f;
+    player_.heavy = false;
+    if (player_.state == ActorState::Attack) {
+        player_.state = ActorState::Idle;
+    }
+    if (dimVoiceOn_) {
+        dimVoiceTail_ = kDimVoiceTail;
+    }
+}
+
+// 次元斩的时间线：沿六芒星边移动边斩（每段末一斩，六斩中心各不相同），
+// 斩完回原位停顿一拍，停顿结束六斩一起结算伤害，最后光刃与滤镜一起收掉。
+void Session::updateDimensionSlash(float elapsed, float dt) {
+    const float ox = dimCamX_;
+    const float oy = dimCamY_;
+    // 滤镜圈：开场由中心铺满，末尾再从四周回收
+    dimFilterR_ = std::min(std::min(1.f, elapsed / kDimFilterExpand), std::min(1.f, (kDimSlashLife - elapsed) / kDimFadeTime));
+    // 全场的整体强度：只留最后这一段，让六斩一起消失
+    dimBladeFade_ = std::min(1.f, (kDimSlashLife - elapsed) / kDimFadeTime);
+    for (DimBlade& blade : dimBlades_) {
+        blade.age += dt;
+    }
+
+    float x = ox;
+    float y = oy;
+    if (elapsed < kDimDashTime) {
+        // 在六芒星的边上一段一段走，平滑进出：每一斩落点前都减速
+        const int seg = std::min(kDimBladeCount - 1, int(elapsed / kDimGap));
+        const float u = std::clamp((elapsed - float(seg) * kDimGap) / kDimGap, 0.f, 1.f);
+        const float ease = u * u * (3.f - 2.f * u);
+        float ax = ox;
+        float ay = oy;
+        float bx = ox;
+        float by = oy;
+        dimensionNode(seg, ax, ay);
+        dimensionNode(seg + 1, bx, by);
+        x = ax + (bx - ax) * ease;
+        y = ay + (by - ay) * ease;
+        faceToward(player_.facingX, player_.facingY, player_.flip, bx - ax, by - ay);
+    } else if (elapsed < kDimDashTime + kDimReturnTime) {
+        // 收招：从最后一个顶点滑回起手点
+        const float u = std::clamp((elapsed - kDimDashTime) / kDimReturnTime, 0.f, 1.f);
+        const float ease = u * u * (3.f - 2.f * u);
+        float ax = ox;
+        float ay = oy;
+        dimensionNode(kDimBladeCount, ax, ay);
+        x = ax + (ox - ax) * ease;
+        y = ay + (oy - ay) * ease;
+        faceToward(player_.facingX, player_.facingY, player_.flip, ox - ax, oy - ay);
+    }
+    player_.x = x;
+    player_.y = y;
+
+    // 一斩一斩斩出去：每段走到头就是一刀
+    while (dimBladeOut_ < kDimBladeCount && elapsed >= float(dimBladeOut_ + 1) * kDimGap) {
+        dimensionSlash(dimBladeOut_);
+        dimBladeOut_ += 1;
+    }
+    // 停顿结束，六斩一起结算
+    if (!dimSettled_ && elapsed >= kDimSettleTime) {
+        dimSettled_ = true;
+        dimensionSettle();
+    }
+}
+
+// 判定成功后打出次元斩：只吃体力，入场即让除玩家外的世界进入时缓
+void Session::castDimensionSlash() {
+    player_.stamina = std::max(0.f, player_.stamina - kDimStaminaCost);
+    dimOpen_ = false;
+    dimReady_ = false;
+    dimWindowT_ = 0.f;
+    dimSinceDodge_ = 0.f;
+    dimThrust_ = 0;
+    dimLight_ = 0;
+    dimJump_ = 0;
+    dimBladeOut_ = 0;
+    dimSettled_ = false;
+    dimSlashT_ = kDimSlashLife;
+    dimSlashLife_ = kDimSlashLife;
+    dimFilterR_ = 0.f;
+    dimBladeFade_ = 1.f;
+    dimBlades_.clear();
+    // 又一场开打：上一场留下的配音尾音作废
+    dimVoiceTail_ = 0.f;
+    dimVoiceFinish_ = false;
+    // 相机从这里起锁死在起手点，角色才能贴着画面跑完六芒星
+    dimCamX_ = player_.x;
+    dimCamY_ = player_.y;
+    player_.state = ActorState::Attack;
+    player_.attackT = 0.f;
+    player_.heavy = true;
+    player_.meleeSwing = false;
+    player_.animT = 0.f;
+    player_.attackId += 1;
+    player_.skillCasts += 1;
+    queueSfx(SfxId::Skill);
+    triggerShake();
+    note("次元斩");
+    checkTalents();
+}
+
+// 一斩：中心落在六芒星的顶点上，刃线取那一刀的走向（各斩中心、角度都不同）
+void Session::dimensionSlash(int index) {
+    // 六斩各自再偏一点角度，免得刃线看着像复读
+    static const float kTilt[kDimBladeCount] = {0.0f, 0.55f, -0.55f, 0.95f, -0.95f, 0.3f};
+    float ax = dimCamX_;
+    float ay = dimCamY_;
+    float bx = dimCamX_;
+    float by = dimCamY_;
+    dimensionNode(index, ax, ay);      // 这一段从哪起
+    dimensionNode(index + 1, bx, by);  // 这一斩落在哪个顶点上
+    float dx = bx - ax;
+    float dy = by - ay;
+    const float len = lengthOf(dx, dy);
+    if (len > 0.001f) {
+        dx /= len;
+        dy /= len;
+    } else {
+        dx = 1.f;
+        dy = 0.f;
+    }
+    // 刃线取走向的法线再偏一点：斜着切过自己刚跑过的那一段
+    const float ca = std::cos(kTilt[index % kDimBladeCount]);
+    const float sa = std::sin(kTilt[index % kDimBladeCount]);
+    const float nx = -dy;
+    const float ny = dx;
+    DimBlade blade;
+    blade.x = bx;
+    blade.y = by - 8.f;
+    blade.dx = nx * ca - ny * sa;
+    blade.dy = nx * sa + ny * ca;
+    dimBlades_.push_back(blade);
+    queueSfx(SfxId::Crit);
+    triggerShake();
+}
+
+// 六斩一起结算：每道刃只打画面内落在这条刃线附近的怪
+void Session::dimensionSettle() {
+    player_.attackId += 1;
+    for (const DimBlade& blade : dimBlades_) {
+        const float nx = -blade.dy;
+        const float ny = blade.dx;
+        for (Monster& monster : monsters_) {
+            if (monster.state == ActorState::Dead) {
+                continue;
+            }
+            const float dx = monster.x - blade.x;
+            const float dy = monster.y - blade.y;
+            // 到刃线的垂距决定吃不吃这一斩；沿线超出半屏的不算
+            if (std::abs(dx * blade.dx + dy * blade.dy) > kDimBladeRange) {
+                continue;
+            }
+            if (std::abs(dx * nx + dy * ny) > reachWithRadius(kDimBladeWidth, monster)) {
+                continue;
+            }
+            // 画面外的怪不斩（相机锁在起手点，画面就是起手点周围那一片）
+            const float extra = monsterHitRadius(monster) - kMonsterHitRadius;
+            if (std::abs(monster.x - dimCamX_) > kAtomicHalfW + extra
+                || std::abs(monster.y - dimCamY_) > kAtomicHalfH + extra) {
+                continue;
+            }
+            // 还没排完雷的腐化史莱姆整只沉在水下，画面里根本没有它
+            if (monster.kind == MonsterKind::SlimeBoss && !pool_.cleared) {
+                continue;
+            }
+            bool crit = false;
+            hurtMonster(monster, rollDamage(kDimBladeDamage, &crit), kDimBladePoise, crit, 0.f);
+        }
+    }
+    breakMazeWallsBeam(kDimBladeRange, kDimBladeWidth);
+    pushFx(AttackFxKind::Ring, 120.f, 0.f, 0.4f, 0x7FDCFF);
+    triggerShake();
 }
 
 QString Session::atomicChant() const {
@@ -2704,16 +3084,20 @@ void Session::update(float dt, const InputState& input, float mouseX, float mous
         pathTileX_ = tx;
         pathTileY_ = ty;
     }
-    updateMonsters(dt);
-    updateDrones(dt);
-    updateBolts(dt);
+    // 次元斩：除玩家外的活物进时缓。玩家自己的计时（上面 updatePlayer 里）照原速走，
+    // 这里只把怪物 / 弹幕 / 无人机 / 刷怪按缩放后的 dt 推。震屏、广场红雾、地面腐蚀
+    // 这些场景层仍走原速，免得一次时缓把震屏拖成好几秒。
+    const float worldDt = dt * dimensionSlowScale();
+    updateMonsters(worldDt);
+    updateDrones(worldDt);
+    updateBolts(worldDt);
     updateFloats(dt);
     updateAttackFx(dt);
     updateRuin(dt);
     updatePool(dt);
     updateSan(dt);
     if (player_.state != ActorState::Dead) {
-        spawn(dt);
+        spawn(worldDt);
     } else if (player_.animT > 0.85f) {
         // 理智崩溃致死不可复活：直接结算，跳过意识回归符咒
         if (sanKill_) {
@@ -2764,6 +3148,19 @@ void Session::updatePlayer(float dt, const InputState& input, float mouseX, floa
     player_.mp = std::min(player_.maxMp, player_.mp + 10.f * mimicBonus().manaRegen * dt);
     player_.shield = std::min(player_.maxShield, player_.shield + 3.f * dt);
     if (player_.state == ActorState::Dead) {
+        // 死亡瞬间把次元斩的一切收干净：判定作废、配音叫停（界面据此恢复 BGM）
+        clearDimension();
+        return;
+    }
+    // 隐藏强化普攻「次元斩」：长按闪避计时、连招窗口与光刃推进都挂在这里
+    updateDimension(dt, input);
+    if (dimSlashT_ > 0.f) {
+        // 斩击中：动作由脚本接管（沿六芒星边跑边斩），这段时间不接受常规输入。
+        // 免伤在 hurtPlayer 里直接判（不走 invuln，免得全程无敌闪烁）
+        player_.state = ActorState::Attack;
+        player_.heavy = true;
+        player_.meleeSwing = false;
+        checkTalents();
         return;
     }
 
@@ -2870,6 +3267,11 @@ void Session::updatePlayer(float dt, const InputState& input, float mouseX, floa
     if ((input.rmbEdge || input.shiftEdge) && player_.stamina >= dodgeCost) {
         player_.stamina -= dodgeCost;
         player_.dodgeCount += 1;
+        // 隐藏技能「次元斩」：这次闪避起头后按住不放，就是长按闪避
+        if (dimensionUnlocked()) {
+            dimHoldArmed_ = true;
+            dimHoldT_ = 0.f;
+        }
         float dodgeX = 0.f;
         float dodgeY = 0.f;
         if (input.a) {
@@ -2942,6 +3344,10 @@ void Session::updatePlayer(float dt, const InputState& input, float mouseX, floa
     if (input.spaceEdge && player_.jumpT <= 0.f && player_.stamina >= 12.f) {
         player_.stamina -= 12.f;
         player_.jumpT = 0.34f;
+        // 次元斩连招：跳一次算一招
+        if (dimOpen_) {
+            dimJump_ = std::min(kDimJumpNeed, dimJump_ + 1);
+        }
         // 起跳即揭示脚下这一格：排雷小游戏的主要操作
         revealBoardTile(tileOf(player_.x), tileOf(player_.y));
         if (player_.state == ActorState::Dead) {
@@ -3025,13 +3431,21 @@ void Session::updatePlayer(float dt, const InputState& input, float mouseX, floa
         }
     } else if (input.lmb) {
         player_.heavyCharge += dt * as;
-        if (player_.heavyCharge >= 0.42f && player_.stamina >= 30.f) {
-            player_.stamina -= 30.f;
-            player_.heavyCharge = 0.f;
-            if (player_.hero == HeroClass::Mage) {
-                fireMageLaser();
-            } else {
-                castHeavySwordQi();
+        if (player_.heavyCharge >= 0.42f) {
+            if (dimReady_) {
+                // 判定成功后的第一次重击直接变成次元斩（只吃体力，等体力回够再放）
+                if (player_.stamina >= kDimStaminaCost) {
+                    player_.heavyCharge = 0.f;
+                    castDimensionSlash();
+                }
+            } else if (player_.stamina >= 30.f) {
+                player_.stamina -= 30.f;
+                player_.heavyCharge = 0.f;
+                if (player_.hero == HeroClass::Mage) {
+                    fireMageLaser();
+                } else {
+                    castHeavySwordQi();
+                }
             }
         }
     }
@@ -3045,6 +3459,13 @@ void Session::updatePlayer(float dt, const InputState& input, float mouseX, floa
         // 机甲人普攻永远是点射（耗弹），「肘击」只由技能键挥出
         if (robot && player_.ammo <= 0) {
             note("弹匣已空，长按左键换弹");
+        } else if (dimReady_) {
+            // 判定成功后的第一次普攻直接变成次元斩
+            if (player_.stamina >= kDimStaminaCost) {
+                castDimensionSlash();
+            } else {
+                note("体力不足，次元斩蓄势待发");
+            }
         } else {
             player_.state = ActorState::Attack;
             player_.attackT = (robot ? kRobotShotGap : 0.36f) / as;
@@ -3063,6 +3484,10 @@ void Session::updatePlayer(float dt, const InputState& input, float mouseX, floa
                 player_.meleeSwing = true;
                 pushSlashFx();
                 queueSfx(SfxId::Swing);
+                // 次元斩连招：近战普攻一次算一招
+                if (dimOpen_) {
+                    dimLight_ = std::min(kDimLightNeed, dimLight_ + 1);
+                }
             }
         }
     }

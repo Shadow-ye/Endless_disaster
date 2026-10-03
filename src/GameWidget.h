@@ -34,6 +34,22 @@ public:
     void startNew(HeroClass hero, int skillD, int skillF, int skillC, int skillV = -1);
     void startContinue(const QJsonObject& game);
 
+    // 开局准备的分步接口：MainWindow 的加载页逐步调用，把开局重活摊到多帧执行。
+    // prepareNew / prepareContinue 做环境准备（含切回 1 号 BGM），随后按
+    // prepareNewStepReset → prepareNewStepSpawns → prepareNewStepRuin 推进，
+    // 最后 prepareFinish 预热首帧并正式开始。startNew / startContinue 内部就是这一套。
+    // 加载页一露头就调用：竖起准备守卫并复位界面，避免准备步骤执行前的那几帧
+    // 还在跑上一局的模拟
+    void beginPrepare();
+    void prepareNew(HeroClass hero, int skillD, int skillF, int skillC, int skillV = -1);
+    void prepareNewStepReset();
+    void prepareNewStepSpawns();
+    void prepareNewStepRuin();
+    void prepareContinue(const QJsonObject& game);
+    void prepareFinish();
+    // 真正开始本局：切到游戏画面的那一刻调用，计时与模拟都从这里起
+    void startRun();
+
 signals:
     void returnedToMenu();
 
@@ -44,6 +60,7 @@ protected:
     void keyReleaseEvent(QKeyEvent* event) override;
     void mousePressEvent(QMouseEvent* event) override;
     void mouseReleaseEvent(QMouseEvent* event) override;
+    void mouseMoveEvent(QMouseEvent* event) override;
     void focusOutEvent(QFocusEvent* event) override;
     void resizeEvent(QResizeEvent* event) override;
 
@@ -75,6 +92,12 @@ private:
     };
 
     void tick();
+    // 隐藏全部叠加面板并复位相关标志（暂停 / 结算 / 确认 / 虚空 / 回归 / 拟态）
+    void resetOverlays();
+    // paintEvent 里的世界渲染段：抽出来供加载页做首帧预热，把冷启动开销提前付掉
+    void renderFrameToCanvas();
+    // 预热 HUD 文字的字形光栅化缓存，避免进入游戏后第一帧掉一下
+    void warmUpHud();
     void setPaused(bool paused);
     void togglePause();
     void refreshGuide();
@@ -93,8 +116,16 @@ private:
     void updateBgmDuck();
     void syncKey(int key, bool down);
     QRect viewRect() const;
+    // 记下指针（鼠标）位置：安卓接上鼠标后，朝向改跟指针走而不是摇杆的移动方向
+    void notePointer(const QPoint& local);
+    // 当前是否用指针方向瞄准（桌面一直是；安卓要收到过真实鼠标事件）
+    bool pointerAim() const;
+    // 相机的世界原点：平时跟着角色，次元斩期间锁在起手点（角色才能在画面里跑六芒星）
+    QPointF cameraOrigin() const;
     QPointF mouseWorld() const;
     void drawWorld(QPainter& painter);
+    // 次元斩的画面层：浅蓝滤镜 + 逐道斩出的蓝刃 + 沿刃线把画面切开错位
+    void drawDimensionCuts(QPainter& painter);
     void drawBossBar(QPainter& painter, const QRect& view);
     // 浅水 boss 房的血条：与克苏鲁之眼共用底板几何，配色换成腐蚀绿
     void drawSlimeBossBar(QPainter& painter, const QRect& view, const Monster& boss);
@@ -172,6 +203,15 @@ private:
     InputState input_;
     bool endCommitted_ = false;
     bool running_ = false;
+    // 加载页驱动的开局准备中：tick 直接返回，不跑模拟也不刷新画面
+    bool preparing_ = false;
+    uint32_t pendingSeed_ = 1;
+    uint32_t pendingRunId_ = 1;
+    HeroClass pendingHero_ = HeroClass::Warrior;
+    int pendingSkillD_ = -1;
+    int pendingSkillF_ = -1;
+    int pendingSkillC_ = -1;
+    int pendingSkillV_ = -1;
 
     bool touchUi_ = false;
     QHash<int, TouchControl> touchBindings_;
@@ -180,6 +220,11 @@ private:
     QPointF stickCenter_;
     QPointF stickOffset_;
     QPointF aimDir_{1.0, 0.0};
+    // 安卓外接鼠标：朝向跟随指针。默认关，收到真实鼠标事件后打开，手指落回屏幕则交还摇杆
+    bool mouseAim_ = false;
+    QPoint mousePos_;
+    // 「检测到鼠标」的提示只弹一次
+    bool mouseAimToasted_ = false;
     bool autoAim_ = true;
     int aimTargetId_ = -1;
     QHash<QString, QImage> touchSprites_;
@@ -204,4 +249,10 @@ private:
     QLabel* mimicLabel_ = nullptr;
     QVector<QPushButton*> mimicButtons_;
     bool mimicOpen_ = false;
+    // 天赋进度面板：默认折叠成一行标题，点标题行（桌面左键 / 触屏点按）才展开明细
+    bool talentHudOpen_ = false;
+    // 上一帧画出的面板矩形，作为展开 / 收起的热区
+    QRect talentHudRect_;
+    // 这次点击落在天赋面板上，抬起时也不当作一次攻击
+    bool talentClick_ = false;
 };

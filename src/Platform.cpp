@@ -106,6 +106,24 @@ void Platform::configureDisplay() {
 #endif
 }
 
+QString Platform::assetDir() {
+    for (const QString& root : dataRoots()) {
+        if (QFile::exists(root + QStringLiteral("/assets/hero_warrior/idle.png"))) {
+            return root + QStringLiteral("/assets");
+        }
+    }
+    QDir dir(QCoreApplication::applicationDirPath());
+    for (int i = 0; i < 6; ++i) {
+        if (QFile::exists(dir.filePath(QStringLiteral("assets/hero_warrior/idle.png")))) {
+            return dir.filePath(QStringLiteral("assets"));
+        }
+        if (!dir.cdUp()) {
+            break;
+        }
+    }
+    return QCoreApplication::applicationDirPath() + QStringLiteral("/assets");
+}
+
 QUrl Platform::mediaUrl(const QString& path) {
     if (!path.startsWith(QLatin1String(":/"))) {
         return QUrl::fromLocalFile(path);

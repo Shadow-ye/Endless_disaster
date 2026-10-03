@@ -50,6 +50,13 @@ public:
 
     void play(SfxId id);
     void playBurialVoice();
+    // 战士隐藏连招「次元斩」的配音：起配音时把 BGM 静音（不停播）。
+    // finishDimensionVoice() 用于次元斩正常打完（停配音，隔一拍再让 BGM 渐入），
+    // stopDimensionVoice() 用于判定失败 / 换曲等需要立刻把 BGM 交回来的场合。
+    void playDimensionVoice();
+    void stopDimensionVoice();
+    // 次元斩打完：配音立即停，BGM 等 kBgmRestoreDelay 秒后渐渐恢复
+    void finishDimensionVoice();
     // 战士「I am atomic」的吟唱配音，整段 5 秒：前 4 秒蓄力，最后一秒是引爆
     void playAtomicVoice();
     // 复活 / 拒绝结算本轮时的「继续前进」配音：按角色性别选男声或女声
@@ -76,6 +83,11 @@ private:
     Audio() = default;
     void rebuildSfxVolumes();
     void rebuildBgmVolume();
+    // 配音接管期间 BGM 静音（照常播，只把音量压到 0），配音结束 / 判定失败再放回来
+    void setBgmSilenced(bool silenced);
+    // BGM 恢复的渐入：先等一拍，再按 kBgmRestoreFade 秒把音量推上来
+    void startBgmRestore();
+    void stepBgmRestore();
     void playBgm(BgmId id, bool loop);
     QString bgmPath(BgmId id) const;
     // 当前该循环的曲目：局内是 1 号，结算后是 5 号
@@ -91,6 +103,10 @@ private:
     bool oneshotPlaying_ = false;
     // 有界面弹出：BGM 照放，音量按 kBgmDuckScale 压低
     bool bgmDucked_ = false;
+    // 配音接管：BGM 照放但音量归零，配音一停就放回来
+    bool bgmSilenced_ = false;
+    // BGM 渐入：bgmFade_ 从 0 涨到 1 的这段时间里，音量按它缩放
+    float bgmFade_ = 1.f;
     // 本局已结算：循环曲从 1 号换成 5 号，直到下一局开始
     bool finaleMode_ = false;
     QString assetDir_;

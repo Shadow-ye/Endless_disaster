@@ -13,6 +13,8 @@ qt_add_executable(EndlessDisaster
     src/MainWindow.cpp
     src/GameWidget.h
     src/GameWidget.cpp
+    src/LoadingWidget.h
+    src/LoadingWidget.cpp
     src/Session.h
     src/Session.cpp
     src/TileMap.h
