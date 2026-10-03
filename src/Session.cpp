@@ -2539,7 +2539,7 @@ void Session::updateAtomic(float dt) {
 }
 
 // —— 战士隐藏强化普攻「次元斩」 ——
-// 带上突刺的战士长按闪避 1.5 秒开始判定：10 秒内打完 3 突刺 + 3 普攻 + 1 跳跃即为成功，
+// 带上突刺的战士长按闪避 0.5 秒开始判定：10 秒内打完 3 突刺 + 3 普攻 + 1 跳跃即为成功，
 // 成功后再从长按闪避那一刻起算 20 秒内，用普攻 / 重击打出次元斩。
 bool Session::dimensionUnlocked() const {
     return player_.hero == HeroClass::Warrior
@@ -2599,7 +2599,7 @@ void Session::clearDimension() {
     dimVoiceFinish_ = false;
 }
 
-// 长按闪避满 1.5 秒：判定开始，配音起、BGM 让位
+// 长按闪避满 0.5 秒：判定开始，配音起、BGM 让位
 void Session::startDimensionJudge() {
     dimOpen_ = true;
     dimReady_ = false;

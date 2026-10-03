@@ -11,10 +11,8 @@
 #include <QCheckBox>
 #include <QComboBox>
 #include <QCoreApplication>
-#include <QDebug>
 #include <QDesktopServices>
 #include <QDir>
-#include <QElapsedTimer>
 #include <QEvent>
 #include <QFile>
 #include <QFontMetrics>
@@ -1085,16 +1083,12 @@ void MainWindow::advanceLoading() {
 }
 
 void MainWindow::runLoadingStep(int step) {
-    // 记录单步耗时：开局卡顿排查时直接看这条日志就能定位是哪一段重
-    QElapsedTimer stepClock;
-    stepClock.start();
     if (loadingKind_ == LoadingKind::Continue) {
         if (step == 0) {
             game_->prepareContinue(loadingSave_);
         } else {
             game_->prepareFinish();
         }
-        qDebug("loading continue step %d: %lld ms", step, stepClock.elapsed());
         return;
     }
     switch (step) {
@@ -1114,7 +1108,6 @@ void MainWindow::runLoadingStep(int step) {
         game_->prepareFinish();
         break;
     }
-    qDebug("loading new-run step %d: %lld ms", step, stepClock.elapsed());
 }
 
 void MainWindow::finishLoading() {

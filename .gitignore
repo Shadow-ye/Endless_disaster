@@ -31,4 +31,5 @@ build-windows/
 
 .codegraph/
 .cursor/
+.codebuddy/
 
