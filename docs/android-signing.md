@@ -66,7 +66,8 @@ E:\Tools\gh\bin\gh.exe secret list --repo Shadow-ye/Endless_disaster
 
 ## 4. 本地编译
 
-环境（均在 E 盘）：Qt 6.8.3（`android_arm64_v8a` + `mingw_64`）、Android SDK `E:\Android\android-sdk`、NDK 26.1.10909125、JDK 17 `E:\Android\openjdk\jdk-17.0.12`。
+环境：Qt 6.8.3 的 `android_arm64_v8a` 与主机工具 `mingw_64`（均在 `E:\Qt\6.8.3`）、Android SDK `E:\Android\android-sdk`（含 `build-tools;35.0.0`、`platforms;android-35`、`platform-tools`）、NDK 26.1.10909125、JDK 17 `D:\Java JDK_17`。
+本地模拟器测试用 `-Abi x86_64`（需同目录下的 Qt `android_x86_64`），产物为 `dist\EndlessDisaster-android-x86_64.apk`。
 
 ```powershell
 # 正式签名，产物可与 GitHub Release 的 APK 互相覆盖
@@ -77,7 +78,7 @@ powershell -ExecutionPolicy Bypass -File packaging\android\build-apk.ps1 -DebugS
 ```
 
 - 产物：`dist\EndlessDisaster-android-arm64.apk`，脚本最后会打印证书指纹；
-- 路径不同可用参数覆盖：`-QtRoot`、`-SdkRoot`、`-NdkVersion`、`-JavaHome`、`-Signing`；
+- 路径不同可用参数覆盖：`-Abi`、`-QtRoot`、`-SdkRoot`、`-NdkVersion`、`-JavaHome`、`-Signing`；
 - 脚本把 Gradle 缓存和调试密钥放到 `E:\Android\.gradle`、`E:\Android\.android`，不占用 C 盘。
 
 用 Qt Creator 或自己调 CMake 也可以：先执行 `. E:\Keys\endless-disaster-signing.ps1` 设置 `QT_ANDROID_KEYSTORE_*` 环境变量，`CMakeLists.txt` 检测到后会自动开启签名（配置输出里会显示 `Android APK will be signed with ...`）。

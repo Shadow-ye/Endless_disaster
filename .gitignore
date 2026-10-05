@@ -20,7 +20,7 @@ _char_preview/
 
 dist/
 *.zip
-build-android/
+build-android*/
 build-windows/
 
 # 安卓签名密钥与密码，绝不提交

@@ -1,14 +1,18 @@
-﻿# 在 Windows 本地编译安卓 APK（arm64）。默认加载正式签名，得到的包可以与 GitHub Release 的包互相覆盖安装。
-#   .\packaging\android\build-apk.ps1                 # 正式签名（需先运行 new-keystore.ps1 或拿到交接的密钥）
+﻿# 在 Windows 本地编译安卓 APK。默认加载正式签名，得到的包可以与 GitHub Release 的包互相覆盖安装。
+#   .\packaging\android\build-apk.ps1                 # arm64 正式签名（需先运行 new-keystore.ps1 或拿到交接的密钥）
 #   .\packaging\android\build-apk.ps1 -DebugSignature # 不用正式密钥，只能全新安装，不能覆盖正式包
-# 产物：dist\EndlessDisaster-android-arm64.apk。详见 docs/android-signing.md。
+#   .\packaging\android\build-apk.ps1 -Abi x86_64     # 仅供本地模拟器测试（Windows 模拟器不支持 arm64 镜像）
+# 产物：dist\EndlessDisaster-android-<abi>.apk。详见 docs/android-signing.md。
 param(
+    [ValidateSet("arm64", "x86_64")]
+    [string]$Abi = "arm64",
     [string]$QtRoot = "E:\Qt\6.8.3",
     [string]$SdkRoot = "E:\Android\android-sdk",
     [string]$NdkVersion = "26.1.10909125",
-    [string]$JavaHome = "E:\Android\openjdk\jdk-17.0.12",
+    [string]$JavaHome = "D:\Java JDK_17",
     [string]$Signing = "E:\Keys\endless-disaster-signing.ps1",
-    [string]$BuildDir = "build-android",
+    # 留空时按 ABI 推断：arm64 -> build-android，x86_64 -> build-android-x86_64
+    [string]$BuildDir = "",
     [switch]$DebugSignature
 )
 $ErrorActionPreference = "Stop"
@@ -19,10 +23,14 @@ function Need([string]$path, [string]$what) {
     if (-not (Test-Path $path)) { throw "找不到${what}：$path" }
 }
 
-$qtAndroid = Join-Path $QtRoot "android_arm64_v8a"
+if (-not $BuildDir) {
+    $BuildDir = if ($Abi -eq "arm64") { "build-android" } else { "build-android-$Abi" }
+}
+$qtAbi = if ($Abi -eq "x86_64") { "x86_64" } else { "arm64_v8a" }
+$qtAndroid = Join-Path $QtRoot "android_$qtAbi"
 $qtHost = Join-Path $QtRoot "mingw_64"
 $ndk = Join-Path $SdkRoot "ndk\$NdkVersion"
-Need $qtAndroid "Qt for Android (arm64)"
+Need $qtAndroid "Qt for Android ($Abi)"
 Need $qtHost "Qt 主机工具 (mingw_64)"
 Need $ndk "Android NDK"
 Need (Join-Path $JavaHome "bin\java.exe") "JDK 17"
@@ -74,11 +82,12 @@ $apk = Get-ChildItem (Join-Path $BuildDir "android-build") -Recurse -Filter $pat
 if (-not $apk) { throw "没有找到生成的 APK ($pattern)" }
 
 New-Item -ItemType Directory -Force -Path dist | Out-Null
-$out = Join-Path $repo "dist\EndlessDisaster-android-arm64.apk"
+$out = Join-Path $repo "dist\EndlessDisaster-android-$Abi.apk"
 Copy-Item $apk.FullName $out -Force
 
 $buildTools = Get-ChildItem (Join-Path $SdkRoot "build-tools") -Directory | Sort-Object Name -Descending | Select-Object -First 1
 $cert = & (Join-Path $buildTools.FullName "apksigner.bat") verify --print-certs $out |
     Select-String "SHA-256 digest" | Select-Object -First 1
+Write-Host "ABI:      $Abi"
 Write-Host "APK:      $out"
 Write-Host "证书指纹: $($cert.Line.Split(':')[-1].Trim())"
