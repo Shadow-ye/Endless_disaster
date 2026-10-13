@@ -1,5 +1,5 @@
 cmake_minimum_required(VERSION 3.21)
-project(EndlessDisaster VERSION 0.6.2 LANGUAGES CXX)
+project(EndlessDisaster VERSION 0.6.3 LANGUAGES CXX)
 
 set(CMAKE_CXX_STANDARD 17)
 set(CMAKE_CXX_STANDARD_REQUIRED ON)
@@ -33,6 +33,8 @@ qt_add_executable(EndlessDisaster
     src/Audio.cpp
     src/Platform.h
     src/Platform.cpp
+    src/Cursors.h
+    src/Cursors.cpp
 )
 
 if(UNIX AND NOT APPLE AND NOT ANDROID)
@@ -86,6 +88,7 @@ add_custom_command(TARGET EndlessDisaster POST_BUILD
     COMMAND ${CMAKE_COMMAND} -E copy_directory ${CMAKE_SOURCE_DIR}/assets/flyer $<TARGET_FILE_DIR:EndlessDisaster>/assets/flyer
     COMMAND ${CMAKE_COMMAND} -E copy_directory ${CMAKE_SOURCE_DIR}/assets/tiles $<TARGET_FILE_DIR:EndlessDisaster>/assets/tiles
     COMMAND ${CMAKE_COMMAND} -E copy_directory ${CMAKE_SOURCE_DIR}/assets/sfx $<TARGET_FILE_DIR:EndlessDisaster>/assets/sfx
+    COMMAND ${CMAKE_COMMAND} -E copy_directory ${CMAKE_SOURCE_DIR}/assets/cursor $<TARGET_FILE_DIR:EndlessDisaster>/assets/cursor
     COMMAND ${CMAKE_COMMAND} -E make_directory $<TARGET_FILE_DIR:EndlessDisaster>/assets/ui
     COMMAND ${CMAKE_COMMAND} -E copy_if_different ${CMAKE_SOURCE_DIR}/assets/ui/story_bg.png $<TARGET_FILE_DIR:EndlessDisaster>/assets/ui/story_bg.png
     COMMAND ${CMAKE_COMMAND} -E copy_if_different ${CMAKE_SOURCE_DIR}/assets/ui/story_bg.png $<TARGET_FILE_DIR:EndlessDisaster>/故事背景.png
@@ -175,7 +178,7 @@ if(UNIX AND NOT APPLE AND NOT ANDROID)
     install(DIRECTORY
         assets/hero_mage assets/hero_sword assets/hero_warrior assets/hero_robot
         assets/killbot assets/drone assets/slime assets/skeleton assets/mushroom assets/flyer
-        assets/tiles assets/sfx
+        assets/tiles assets/sfx assets/cursor
         DESTINATION ${ED_DATA_DIR}/assets)
     install(FILES assets/ui/story_bg.png assets/ui/游戏图标.jpg
         DESTINATION ${ED_DATA_DIR}/assets/ui)
@@ -198,7 +201,8 @@ if(UNIX AND NOT APPLE AND NOT ANDROID)
     set(CPACK_DEBIAN_PACKAGE_MAINTAINER "Shadow-ye <cym1569353578@qq.com>")
     set(CPACK_DEBIAN_PACKAGE_SECTION games)
     set(CPACK_DEBIAN_PACKAGE_SHLIBDEPS ON)
-    set(CPACK_DEBIAN_PACKAGE_DEPENDS "qt6-qpa-plugins, gstreamer1.0-plugins-good, gstreamer1.0-libav")
+    # qt6-image-formats-plugins 提供 ico 插件：.cur 光标靠它解码，缺了会静默回退系统光标
+    set(CPACK_DEBIAN_PACKAGE_DEPENDS "qt6-qpa-plugins, qt6-image-formats-plugins, gstreamer1.0-plugins-good, gstreamer1.0-libav")
     set(CPACK_DEBIAN_PACKAGE_RECOMMENDS "fonts-noto-cjk")
     include(CPack)
 endif()

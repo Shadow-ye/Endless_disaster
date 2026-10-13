@@ -105,6 +105,7 @@ private:
     QSlider* bgmSlider_ = nullptr;
     QLabel* bgmVolumeLabel_ = nullptr;
     QCheckBox* guideCheck_ = nullptr;
+    QCheckBox* showFpsCheck_ = nullptr;
     HeroClass hero_ = HeroClass::Warrior;
     QPushButton* heroButton_ = nullptr;
     QLabel* heroStats_ = nullptr;

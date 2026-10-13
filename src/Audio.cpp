@@ -387,7 +387,7 @@ void Audio::playContinueVoice(bool female) {
     voice->play();
 }
 
-// 战士隐藏连招「次元斩」：起配音，BGM 让位（静音不停播）
+// 隐藏连招「次元斩」：起配音，BGM 让位（静音不停播）
 void Audio::playDimensionVoice() {
     QMediaPlayer* voice = state().dimensionVoice;
     if (!loaded_ || !sfxEnabled_ || sfxVolumePercent_ <= 0 || !voice || voice->source().isEmpty()) {

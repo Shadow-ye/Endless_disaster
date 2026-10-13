@@ -15,3 +15,6 @@ https://hormelz.itch.io/8-directional-drone-robot ，CC0。
 https://opengameart.org/content/killbot-8-directional ，CC0。
 两者由 tools/robot_sprites.py 缩放、重排为 8 行（南起顺时针），受击 / 死亡帧由脚本生成。
 蜂群无人机（drone）：本项目原创，由 tools/drone_sprite.py 逐像素绘制。
+
+鼠标指针（assets/cursor）：B站 UP主「路寞」的像素光标主题，取其中 pointer / precision / link / text 四款 .cur，
+光标热点由 src/Cursors.cpp 自行解析并按屏幕 DPI 缩放；原始素材留在仓库 mouse/ 目录备查。

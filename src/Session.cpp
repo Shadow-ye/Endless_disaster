@@ -2538,11 +2538,13 @@ void Session::updateAtomic(float dt) {
     player_.atomicNext = 0.f;
 }
 
-// —— 战士隐藏强化普攻「次元斩」 ——
-// 带上突刺的战士长按闪避 0.5 秒开始判定：10 秒内打完 3 突刺 + 3 普攻 + 1 跳跃即为成功，
+// —— 隐藏强化普攻「次元斩」 ——
+// 带上突刺的战士 / 女剑客长按闪避 0.5 秒开始判定：10 秒内打完 3 突刺 + 3 普攻 + 1 跳跃即为成功，
 // 成功后再从长按闪避那一刻起算 20 秒内，用普攻 / 重击打出次元斩。
 bool Session::dimensionUnlocked() const {
-    return player_.hero == HeroClass::Warrior
+    // 女剑客与战士共用近战技能池（同样能带突刺），这套隐藏连招对两者一起开放
+    const bool meleeHero = player_.hero == HeroClass::Warrior || player_.hero == HeroClass::Sword;
+    return meleeHero
         && (player_.skillD == kSkillThrust || player_.skillF == kSkillThrust || player_.skillC == kSkillThrust);
 }
 

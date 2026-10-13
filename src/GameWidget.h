@@ -195,6 +195,12 @@ private:
     QImage vignette_;
     QTimer* timer_ = nullptr;
     QElapsedTimer clock_;
+    // 帧率显示：开关来自设置页（settings.json），开局时读一次；统计走固定窗口，避免数字逐帧抖动
+    bool showFps_ = false;
+    int fpsFrames_ = 0;        // 当前统计窗口内累计帧数
+    double fpsAccumMs_ = 0.0;  // 当前统计窗口内累计耗时(ms)
+    float fpsValue_ = 0.f;     // 结算后的显示用帧率
+    float frameMs_ = 0.f;      // 结算后的显示用单帧耗时(ms)
     float toastTime_ = 0.f;
     QString toast_;
     // I am atomic 引爆前的全屏白闪：只叠在画面上，不参与任何判定

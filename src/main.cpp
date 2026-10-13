@@ -1,3 +1,4 @@
+#include "Cursors.h"
 #include "MainWindow.h"
 #include "Platform.h"
 
@@ -62,7 +63,11 @@ int main(int argc, char* argv[]) {
         "QComboBox { background: #1a1513; color: #d7c7b4; border: 1px solid #3a2c28; padding: 6px 10px; }"
         "QComboBox QAbstractItemView { background: #14110f; color: #d7c7b4; selection-background-color: #3a2420; }");
 
+    // 光标：先加载资源并装上全局替换规则（按钮手型 / 输入框文本光标）
+    Cursors::init();
     MainWindow window;
+    // 顶层窗口定成游戏默认箭头，未单独设置光标的子控件照此继承
+    window.setCursor(Cursors::arrow());
     if (!iconPath.isEmpty()) {
         window.setWindowIcon(QIcon(iconPath));
     }

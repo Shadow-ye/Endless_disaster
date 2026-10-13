@@ -2,6 +2,7 @@
 
 #include "Audio.h"
 #include "Codex.h"
+#include "Cursors.h"
 #include "GameWidget.h"
 #include "LoadingWidget.h"
 #include "Platform.h"
@@ -304,7 +305,7 @@ MainWindow::MainWindow(QWidget* parent) : QWidget(parent) {
         label->setAlignment(Qt::AlignCenter);
         label->setScaledContents(false);
         label->setStyleSheet(QString("QLabel#%1 { background: transparent; border: none; }").arg(objectName));
-        label->setCursor(Qt::PointingHandCursor);
+        label->setCursor(Cursors::hand());
         label->installEventFilter(this);
         return label;
     };
@@ -519,6 +520,10 @@ MainWindow::MainWindow(QWidget* parent) : QWidget(parent) {
     guideCheck_->setToolTip("开启后新开局直接拥有「世界指引」：按 G（安卓点右上角「寻路」）标出迷宫遗迹方向并画出通路，不必先击杀 20 个入侵怪物。");
     settingsLayout->addWidget(guideCheck_);
 
+    showFpsCheck_ = new QCheckBox("显示帧率", settingsCard);
+    showFpsCheck_->setToolTip("开启后游戏画面顶部计时旁显示 FPS、单帧耗时(ms) 与场上怪物/粒子数量，仅在游戏进行时刷新。");
+    settingsLayout->addWidget(showFpsCheck_);
+
     auto* settingsBack = new QPushButton("返回", settingsCard);
     settingsLayout->addWidget(settingsBack);
     settingsOuter->addWidget(settingsCard, 0, Qt::AlignHCenter);
@@ -588,6 +593,10 @@ MainWindow::MainWindow(QWidget* parent) : QWidget(parent) {
         saveSettingsUi();
     });
     connect(guideCheck_, &QCheckBox::toggled, this, [this](bool on) {
+        (void)on;
+        saveSettingsUi();
+    });
+    connect(showFpsCheck_, &QCheckBox::toggled, this, [this](bool on) {
         (void)on;
         saveSettingsUi();
     });
@@ -727,7 +736,8 @@ void MainWindow::refreshPrepareSkills() {
     html += line("Q", guardSkillText());
     html += line("E", healSkillText());
     const HeroInfo& info = heroInfo(hero_);
-    heroButton_->setText(QString("职业：%1　▸").arg(info.name));
+    // 后缀用 » 而不是 ▸：U+25xx 几何符号在安卓系统字体里常缺字形，会渲染成豆腐块
+    heroButton_->setText(QString("职业：%1　»").arg(info.name));
     heroStats_->setText(info.stats);
     const bool mage = hero_ == HeroClass::Mage;
     const bool robot = hero_ == HeroClass::Robot;
@@ -976,6 +986,7 @@ void MainWindow::loadSettingsUi() {
     QSignalBlocker b3(bgmCheck_);
     QSignalBlocker b4(bgmSlider_);
     QSignalBlocker b5(guideCheck_);
+    QSignalBlocker b6(showFpsCheck_);
     sfxCheck_->setChecked(settings.sfxEnabled);
     sfxSlider_->setValue(settings.sfxVolume);
     sfxSlider_->setEnabled(settings.sfxEnabled);
@@ -985,6 +996,7 @@ void MainWindow::loadSettingsUi() {
     bgmSlider_->setEnabled(settings.bgmEnabled);
     bgmVolumeLabel_->setText(QString("%1%").arg(settings.bgmVolume));
     guideCheck_->setChecked(settings.guideAtStart);
+    showFpsCheck_->setChecked(settings.showFps);
     Audio::instance().setSfxEnabled(settings.sfxEnabled);
     Audio::instance().setSfxVolume(settings.sfxVolume);
     Audio::instance().setBgmEnabled(settings.bgmEnabled);
@@ -998,6 +1010,7 @@ void MainWindow::saveSettingsUi() {
     settings.bgmEnabled = bgmCheck_->isChecked();
     settings.bgmVolume = bgmSlider_->value();
     settings.guideAtStart = guideCheck_->isChecked();
+    settings.showFps = showFpsCheck_->isChecked();
     Audio::instance().setSfxEnabled(settings.sfxEnabled);
     Audio::instance().setSfxVolume(settings.sfxVolume);
     Audio::instance().setBgmEnabled(settings.bgmEnabled);

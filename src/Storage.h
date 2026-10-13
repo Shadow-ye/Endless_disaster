@@ -17,6 +17,8 @@ struct AppSettings {
     bool autoAimDesktop = false;
     // 开局直接拥有天赋「世界指引」，不用先击杀 20 个入侵怪物
     bool guideAtStart = false;
+    // 游戏内 HUD 顶部显示帧率 / 单帧耗时 / 实体数，默认关
+    bool showFps = false;
 };
 
 class Storage {

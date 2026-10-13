@@ -243,11 +243,13 @@ void LoadingWidget::drawProgress(QPainter& painter, qreal scale) {
 
     // 阶段提示：进度条上方一行暗色小字
     if (!stageText_.isEmpty()) {
-        painter.setFont(QFont(Platform::uiFontFamily(), int(14.0 * scale)));
+        // 字号放大一半，位置顺势往下挪：文字底边贴着史莱姆头顶（再低就会压到它）
+        const int fontPx = int(21.0 * scale);
+        painter.setFont(QFont(Platform::uiFontFamily(), fontPx));
         painter.setPen(QColor(0x8A, 0x7B, 0x70));
-        // 文字留在史莱姆头顶之上；史莱姆太大时贴着画面顶部，至少不超出屏幕
-        const qreal textY = std::max(8.0, barY - kSlimeHeight * scale - 34.0 * scale);
-        painter.drawText(QRectF(0.0, textY, viewW, 22.0 * scale), Qt::AlignCenter, stageText_);
+        const qreal textH = fontPx * 1.5;
+        const qreal textY = std::max(8.0, slimeY - kSlimeHeight * scale - textH);
+        painter.drawText(QRectF(0.0, textY, viewW, textH), Qt::AlignCenter, stageText_);
     }
 }
 

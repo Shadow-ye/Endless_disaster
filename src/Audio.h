@@ -50,7 +50,7 @@ public:
 
     void play(SfxId id);
     void playBurialVoice();
-    // 战士隐藏连招「次元斩」的配音：起配音时把 BGM 静音（不停播）。
+    // 隐藏连招「次元斩」的配音：起配音时把 BGM 静音（不停播）。
     // finishDimensionVoice() 用于次元斩正常打完（停配音，隔一拍再让 BGM 渐入），
     // stopDimensionVoice() 用于判定失败 / 换曲等需要立刻把 BGM 交回来的场合。
     void playDimensionVoice();

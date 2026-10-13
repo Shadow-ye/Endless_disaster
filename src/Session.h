@@ -112,7 +112,7 @@ inline constexpr float kAtomicChantWord = 1.f;
 inline constexpr float kAtomicChantGap = 1.f;
 inline constexpr float kAtomicChantFinal = 2.f;
 
-// 战士隐藏强化普攻「次元斩」：带上突刺后，长按闪避 0.5 秒开始判定（配音起、BGM 让位）；
+// 隐藏强化普攻「次元斩」：战士 / 女剑客带上突刺后，长按闪避 0.5 秒开始判定（配音起、BGM 让位）；
 // 10 秒内打完 3 次突刺 + 3 次普攻 + 1 次跳跃算判定成功，此后从长按闪避那一刻起算 20 秒内，
 // 下一次普攻或重击打出次元斩。超时 / 差一招都算判定失败。
 inline constexpr float kDimHoldTime = 0.5f;
@@ -444,7 +444,9 @@ public:
     float plazaRed() const { return plazaRed_; }
     // I am atomic 的画面紫色滤镜：蓄力时涨起来，余波里退掉
     float atomicViolet() const { return atomicViolet_; }
-    // —— 战士隐藏强化普攻「次元斩」
+    // —— 隐藏强化普攻「次元斩」
+    // 战士 / 女剑客且技能槽里带了突刺才解锁（隐藏技能的前提）；界面据此决定要不要写这段连招说明
+    bool dimensionUnlocked() const;
     // 判定进行中（长按闪避已触发，正在 10 秒连招窗口里）
     bool dimensionJudging() const { return dimOpen_; }
     // 连招已完成，等着用普攻 / 重击打出次元斩
@@ -591,9 +593,7 @@ private:
     void castAtomic(float& cooldown);
     void atomicBlast();
     void updateAtomic(float dt);
-    // —— 战士隐藏强化普攻「次元斩」
-    // 战士且技能槽里带了突刺才解锁（隐藏技能的前提）
-    bool dimensionUnlocked() const;
+    // —— 隐藏强化普攻「次元斩」
     // 判定与出招：长按闪避计时、10 秒连招窗口、20 秒期限、沿六芒星逐斩
     void updateDimension(float dt, const InputState& input);
     // 次元斩的时间线：六芒星位移 + 逐斩展开 + 回位停顿 + 一起结算 + 滤镜回收
@@ -720,7 +720,7 @@ private:
     float plazaRed_ = 0.f;
     float atomicViolet_ = 0.f;
     float atomicChantT_ = 0.f;
-    // —— 战士隐藏强化普攻「次元斩」
+    // —— 隐藏强化普攻「次元斩」
     bool dimHoldArmed_ = false;  // 这次按住闪避是不是由一次成功闪避起头的
     float dimHoldT_ = 0.f;       // 闪避键已经按住多久
     bool dimOpen_ = false;       // 判定中：10 秒连招窗口

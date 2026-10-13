@@ -90,6 +90,7 @@ AppSettings Storage::loadSettings() {
     settings.autoAim = obj.value("autoAim").toBool(true);
     settings.autoAimDesktop = obj.value("autoAimDesktop").toBool(false);
     settings.guideAtStart = obj.value("guideAtStart").toBool(false);
+    settings.showFps = obj.value("showFps").toBool(false);
     return settings;
 }
 
@@ -102,6 +103,7 @@ void Storage::saveSettings(const AppSettings& settings) {
     obj.insert("autoAim", settings.autoAim);
     obj.insert("autoAimDesktop", settings.autoAimDesktop);
     obj.insert("guideAtStart", settings.guideAtStart);
+    obj.insert("showFps", settings.showFps);
     QSaveFile file(dir() + "/settings.json");
     if (!file.open(QIODevice::WriteOnly)) {
         return;

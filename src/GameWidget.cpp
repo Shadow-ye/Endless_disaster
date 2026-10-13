@@ -2,6 +2,7 @@
 
 #include "Audio.h"
 #include "Codex.h"
+#include "Cursors.h"
 #include "Platform.h"
 #include "Storage.h"
 #include "TileMap.h"
@@ -302,6 +303,8 @@ GameWidget::GameWidget(QWidget* parent) : QWidget(parent) {
     touchUi_ = Platform::touchUi();
     if (!touchUi_) {
         setMinimumSize(960, 540);
+        // 桌面上鼠标指针就是瞄准方向，游戏画面统一用准星
+        setCursor(Cursors::crosshair());
     }
     spritesOk_ = sprites_.load(findAssets());
     canvas_ = QImage(kViewW, kViewH, QImage::Format_RGB32);
@@ -326,6 +329,7 @@ GameWidget::GameWidget(QWidget* parent) : QWidget(parent) {
 #else
         autoAim_ = settings.autoAim;
 #endif
+        showFps_ = settings.showFps;
     }
 
     pausePanel_ = new QWidget(this);
@@ -715,13 +719,11 @@ void GameWidget::refreshGuide() {
     if (player.talentGuide) {
         html += block(touch ? "技能" : "G", skillText(kSkillSeek), skillExtra(kSkillSeek, 0.f));
     }
-    // 隐藏技能「次元斩」：只有带突刺的战士才有这套连招
-    const bool dimensionHero = player.hero == HeroClass::Warrior
-        && (player.skillD == kSkillThrust || player.skillF == kSkillThrust || player.skillC == kSkillThrust);
-    if (dimensionHero) {
+    // 隐藏技能「次元斩」：带突刺的战士 / 女剑客才有这套连招，判定条件与 Session 同源
+    if (session_.dimensionUnlocked()) {
         html += "<p style='color:#e4d4c4; margin:12px 0 4px 0;'><b>隐藏连招　次元斩</b></p>";
         html += QString("<p style='margin:8px 0 10px 0;'><span style='color:#a89888;'>"
-                        "带突刺的战士，长按闪避 %1 秒起手判定（配音接管，BGM 让位）："
+                        "带突刺的战士 / 女剑客，长按闪避 %1 秒起手判定（配音接管，BGM 让位）："
                         "%2 次突刺 + %3 次普攻 + %4 次跳跃，要在 %5 秒内打完。"
                         "判定成功后，从长按闪避那一刻起算 %6 秒内，下一次普攻或重击打出次元斩——"
                         "除自己外全场进入时缓，蓝滤镜由中心铺开；角色沿六芒星边跑边斩，六个顶点各一斩，"
@@ -759,7 +761,7 @@ void GameWidget::refreshGuide() {
             const bool owned = form == MimicForm::Hero || session_.devoured(form);
             html += QString("<p style='margin:4px 0;'><b>%1</b>　%2<br><span style='color:%3;'>%4　%5</span></p>")
                         .arg(owned ? text.name : QString("%1（未吞噬）").arg(text.name))
-                        .arg(player.mimic == form ? QStringLiteral("◀ 当前") : QString())
+                        .arg(player.mimic == form ? QStringLiteral("« 当前") : QString())
                         .arg(owned ? "#a89888" : "#6a6058")
                         .arg(text.skillName)
                         .arg(text.bonus);
@@ -865,6 +867,8 @@ void GameWidget::prepareContinue(const QJsonObject& game) {
 
 // 准备收尾：预热首帧与 HUD 字形缓存（此时还不跑模拟，加载页可能还要停留一会儿）
 void GameWidget::prepareFinish() {
+    // 新开局与继续存档都从这里收尾：设置页只在主菜单能进，开局前读一次就能即时生效
+    showFps_ = Storage::loadSettings().showFps;
     renderFrameToCanvas();
     warmUpHud();
 }
@@ -1025,7 +1029,7 @@ void GameWidget::refreshMimicPanel() {
         button->setIcon(mimicIcon(form));
         button->setEnabled(slime && owned);
         button->setText(QString("%1%2\n%3")
-                .arg(current ? QStringLiteral("▶ ") : QString())
+                .arg(current ? QStringLiteral("» ") : QString())
                 .arg(text.name)
                 .arg(slime && owned ? text.bonus : QStringLiteral("尚未吞噬")));
         button->setToolTip(owned ? text.skill : QStringLiteral("史莱姆之躯下击杀该类怪物即可吞噬"));
@@ -1157,6 +1161,18 @@ void GameWidget::tick() {
     const float frame = std::min(0.05f, float(elapsedNs) / 1e9f);
     toastTime_ = std::max(0.f, toastTime_ - frame);
     flashT_ = std::max(0.f, flashT_ - frame);
+    // 帧率统计：按 0.5s 窗口结算，逐帧瞬时值跳动太大没法读。
+    // 暂停 / 结束时画面不再推进，这里也不刷新，数字停在最后一帧的真实值上
+    if (showFps_ && running_ && !session_.paused() && !session_.ended()) {
+        fpsFrames_ += 1;
+        fpsAccumMs_ += double(frame) * 1000.0;
+        if (fpsAccumMs_ >= 500.0) {
+            fpsValue_ = float(double(fpsFrames_) * 1000.0 / fpsAccumMs_);
+            frameMs_ = float(fpsAccumMs_ / double(fpsFrames_));
+            fpsFrames_ = 0;
+            fpsAccumMs_ = 0.0;
+        }
+    }
     if (running_ && !session_.paused() && !session_.ended()) {
         updateAimTarget();
         const QPointF world = mouseWorld();
@@ -2093,6 +2109,12 @@ void GameWidget::drawTouchControls(QPainter& painter) {
             break;
         case TouchControl::SkillV:
             slot(player.skillV, player.cdV);
+            break;
+        case TouchControl::MimicSkill:
+            // 冷却数据就在 Session 里（桌面 Chip 行读的是同一份），之前漏了这个分支，
+            // remain/maxCd 恒为 0，触屏按钮既不画冷却饼也不显示剩余秒数
+            remain = session_.mimicSkillCooldown();
+            maxCd = session_.mimicSkillCooldownMax();
             break;
         case TouchControl::Seek:
             sub = player.seekOn ? QStringLiteral("开") : QStringLiteral("关");
@@ -4435,9 +4457,13 @@ void GameWidget::warmUpHud() {
     painter.setPen(Qt::white);
     painter.setFont(QFont(Platform::uiFontFamily(), 11));
     painter.drawText(scratch.rect(), Qt::AlignLeft | Qt::AlignTop, QStringLiteral(
-        "玩家 0123456789 HP MP 护盾 体力 魔力 等级 经验 护甲 暴击 技能 天赋 已解锁 秒 分 精英 迷宫遗迹 史莱姆 克苏鲁之眼 ▸ ▾"));
+        "玩家 0123456789 HP MP 护盾 体力 魔力 等级 经验 护甲 暴击 技能 天赋 已解锁 秒 分 精英 迷宫遗迹 史莱姆 克苏鲁之眼"));
     painter.setFont(QFont(Platform::uiFontFamily(), 7, QFont::Bold));
     painter.drawText(scratch.rect(), Qt::AlignRight | Qt::AlignBottom, QStringLiteral("韧性崩溃"));
+    // 帧率显示用 9 号字，字符要单独预热一遍（字形缓存按字号分开）
+    painter.setFont(QFont(Platform::uiFontFamily(), 9));
+    painter.drawText(scratch.rect(), Qt::AlignLeft | Qt::AlignVCenter, QStringLiteral(
+        "FPS ms 怪 粒 SCORE 核心 符咒 0123456789 : ."));
 }
 
 void GameWidget::paintEvent(QPaintEvent* event) {
@@ -4505,9 +4531,24 @@ void GameWidget::paintEvent(QPaintEvent* event) {
     painter.setPen(QColor(168, 148, 128));
     painter.drawText(QRect(talentX + 6, talentY, talentW - 30, talentHeaderH), Qt::AlignLeft | Qt::AlignVCenter,
         QString("天赋　已解锁 %1 / %2").arg(talentOwned).arg(talentRows));
-    painter.setPen(QColor(210, 190, 150));
-    painter.drawText(QRect(talentX + talentW - 22, talentY, 16, talentHeaderH), Qt::AlignRight | Qt::AlignVCenter,
-        talentHudOpen_ ? QStringLiteral("▾") : QStringLiteral("▸"));
+    // 折叠箭头改成自绘三角：▾ / ▸ 落在 U+25xx 几何符号区，安卓系统字体常缺字形会画成豆腐块
+    {
+        const QBrush savedBrush = painter.brush();
+        painter.setPen(Qt::NoPen);
+        painter.setBrush(QColor(210, 190, 150));
+        const QPointF tip(talentX + talentW - 12.f, talentY + talentHeaderH * 0.5f);
+        if (talentHudOpen_) {
+            const QPointF tri[3] = {QPointF(tip.x() - 4.f, tip.y() - 3.f), QPointF(tip.x() + 4.f, tip.y() - 3.f),
+                QPointF(tip.x(), tip.y() + 3.5f)};
+            painter.drawPolygon(tri, 3);
+        } else {
+            const QPointF tri[3] = {QPointF(tip.x() - 3.f, tip.y() - 4.f), QPointF(tip.x() - 3.f, tip.y() + 4.f),
+                QPointF(tip.x() + 3.5f, tip.y())};
+            painter.drawPolygon(tri, 3);
+        }
+        painter.setBrush(savedBrush);
+        painter.setPen(QColor(210, 190, 150));
+    }
     painter.setFont(QFont(Platform::uiFontFamily(), 11));
     if (talentHudOpen_) {
         auto talentLine = [&](int index, const QString& name, float current, float need) {
@@ -4650,13 +4691,60 @@ void GameWidget::paintEvent(QPaintEvent* event) {
     if (charms > 0) {
         scoreText = QString("符咒 x%1   ").arg(charms) + scoreText;
     }
-    painter.drawText(QRect(originX, originY + 10, viewW, 22), Qt::AlignHCenter | Qt::AlignTop, formatTime(session_.time()));
+    // 顶部一行：计时居中，帧率跟在它右侧。帧率开启时先把这一段的字体钉死，
+    // 上面各面板绘制会改字体，跟着当前字体走会让测量和排版漂移
+    const QString timeText = formatTime(session_.time());
+    QString fpsText;
+    if (showFps_) {
+        fpsText = QString("FPS %1  %2ms  怪%3  粒%4")
+            .arg(int(std::lround(std::max(0.f, fpsValue_))))
+            .arg(double(frameMs_), 0, 'f', 1)
+            .arg(int(session_.monsters().size()))
+            .arg(int(particles_.size()));
+    }
+    const QFont hudFont = painter.font();
+    if (!fpsText.isEmpty()) {
+        painter.setFont(QFont(Platform::uiFontFamily(), 11));
+    }
+    const QFont topFont = painter.font();
+    const int timeW = QFontMetrics(topFont).horizontalAdvance(timeText);
+    painter.drawText(QRect(originX, originY + 10, viewW, 22), Qt::AlignHCenter | Qt::AlignTop, timeText);
+    bool fpsOnTimeRow = false;
+    if (!fpsText.isEmpty()) {
+        painter.setFont(QFont(Platform::uiFontFamily(), 9));
+        const int fpsW = QFontMetrics(painter.font()).horizontalAdvance(fpsText);
+        const int fpsX = originX + (viewW + timeW) / 2 + 10;
+        // 触屏右上角被「索敌 / 说明 / 暂停」按钮占着，同行余量按画面宽度留出来
+        const int safeRight = originX + viewW - (touchUi_ ? int(viewW * 0.34) : 12);
+        fpsOnTimeRow = fpsX + fpsW <= safeRight;
+        if (fpsOnTimeRow) {
+            painter.drawText(QRect(fpsX, originY + 10, fpsW + 2, 22), Qt::AlignLeft | Qt::AlignTop, fpsText);
+        }
+        painter.setFont(topFont);
+    }
+    const bool fpsSharesScoreRow = !fpsText.isEmpty() && !fpsOnTimeRow;
+    if (fpsSharesScoreRow) {
+        // 同行塞不下（手机横屏很常见）：挂到 SCORE 那一行一起排
+        painter.setFont(QFont(Platform::uiFontFamily(), 9));
+        scoreText = fpsText + "  " + scoreText;
+    }
     if (touchUi_) {
-        // 右上角留给「索敌 / 说明 / 暂停」按钮
+        if (fpsSharesScoreRow) {
+            // 从左侧属性面板右缘起排，免得压住 HP 那一列
+            const int rowX = originX + 232;
+            painter.drawText(QRect(rowX, originY + 30, originX + viewW - 12 - rowX, 22),
+                Qt::AlignHCenter | Qt::AlignTop, scoreText);
+        } else {
+            // 右上角留给「索敌 / 说明 / 暂停」按钮
+            painter.drawText(QRect(originX, originY + 30, viewW, 22), Qt::AlignHCenter | Qt::AlignTop, scoreText);
+        }
+    } else if (fpsOnTimeRow) {
+        // 同行右侧让给了帧率，SCORE 下移一行居中
         painter.drawText(QRect(originX, originY + 30, viewW, 22), Qt::AlignHCenter | Qt::AlignTop, scoreText);
     } else {
         painter.drawText(QRect(originX, originY + 10, viewW - 16, 22), Qt::AlignRight | Qt::AlignTop, scoreText);
     }
+    painter.setFont(hudFont);
     if (session_.cursed()) {
         // 屏幕底部居中提示条，避开顶部所有 HUD 与底部技能 Chip 行
         const QString curseText = QStringLiteral("诅咒：存在被克苏鲁余光注意！");
