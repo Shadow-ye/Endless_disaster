@@ -389,17 +389,6 @@ struct Drop {
     Item item;
 };
 
-// 腐蚀粘液：boss 经过处留下的地形，踩上去持续微量掉血（护盾 / 飞行 / 跳跃可免疫）。
-// 只在地面上停留 kLife 秒，到点自行消失。
-struct SlimeSpot {
-    static constexpr float kLife = 3.f;
-    float x = 0.f;
-    float y = 0.f;
-    float radius = 15.f;
-    // 已经存在了多久；绘制时用 age / kLife 做呼吸与渐隐
-    float age = 0.f;
-};
-
 class Session {
 public:
     void newGame(uint32_t seed, uint32_t runId, HeroClass hero = HeroClass::Warrior,
@@ -438,7 +427,6 @@ public:
     const TileMap& map() const { return map_; }
     const MazeRuin& ruin() const { return ruin_; }
     const ShallowPool& pool() const { return pool_; }
-    const std::vector<SlimeSpot>& slimeSpots() const { return slime_; }
     // 本次浅水 boss 战里踩雷累计削减掉的理智上限
     float sanCapCut() const { return pool_.sanCut; }
     float plazaRed() const { return plazaRed_; }
@@ -665,8 +653,11 @@ private:
     // 跳跃揭示棋盘格：安全格点亮数字，踩雷受伤并削减本场理智上限
     void revealBoardTile(int tileX, int tileY);
     void applySlimeBossLevel();
-    // 腐蚀粘液：boss 经过处留痕，对踩上去的玩家持续微量掉血
+    // 腐蚀地面：boss 拖痕 / 拟态冲撞 / 腐蚀弹落点都会把格子改成腐蚀地形，
+    // 踩上去的玩家（史莱姆之躯、滞空、有护盾时除外）与怪物（史莱姆一族、飞行的除外）
+    // 持续微量掉血
     void updateCorrosion(float dt);
+    void hurtPlayerByCorrosion();
     void addCorrosion(float x, float y);
     void slimeBossClampToPool(Monster& monster) const;
     void slimeBossContact(Monster& monster, float dist, float damage);
@@ -689,7 +680,6 @@ private:
     std::vector<Bolt> bolts_;
     std::vector<Drone> drones_;
     std::vector<Drop> drops_;
-    std::vector<SlimeSpot> slime_;
     std::vector<FloatText> floats_;
     std::vector<AttackFx> attackFx_;
     std::vector<Item> bag_;
@@ -749,7 +739,7 @@ private:
     int eyeDefeats_ = 0;
     // 玩家理论理智上限（不含踩雷削减）；effective 上限是 player_.maxSan
     float sanCapBase_ = 100.f;
-    // 腐蚀粘液的持续伤害节流
+    // 腐蚀地面的持续伤害节流
     float corrosionTick_ = 0.f;
     int wallStrikeId_ = -1;
     // 理智系统会话状态：sanActive_ 一旦 boss 激活便锁定为真，击败或死亡才解除

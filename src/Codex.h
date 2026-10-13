@@ -196,7 +196,7 @@ inline MimicText mimicText(MimicForm form) {
         return {"原本的躯体", "无", "把外形换回你原本的角色，不附带额外技能。", "无属性加成。"};
     case MimicForm::Slime:
         return {"史莱姆", "腐蚀喷吐",
-            "腐蚀喷吐（左 Ctrl，冷却 4 秒）：朝鼠标吐出腐蚀黏液弹，命中造成伤害并在地面留下腐蚀粘液。",
+            "腐蚀喷吐（左 Ctrl，冷却 4 秒）：朝鼠标吐出腐蚀黏液弹，命中造成伤害并把落点地面腐蚀成腐蚀地面（约 10 秒后恢复）。",
             "最大生命 +25%，回蓝速度 +100%。"};
     case MimicForm::Skeleton:
         return {"骷髅", "骨刺突进",
@@ -208,7 +208,7 @@ inline MimicText mimicText(MimicForm form) {
             "破韧 +30%。"};
     case MimicForm::Flyer:
         return {"飞虫", "振翅",
-            "振翅（左 Ctrl，冷却 4 秒）：短时滞空飞行约 2.5 秒，可越过岩石与灌木，并免疫腐蚀粘液。",
+            "振翅（左 Ctrl，冷却 4 秒）：短时滞空飞行约 2.5 秒，可越过岩石与灌木，并免疫腐蚀地面。",
             "移速 +25%。"};
     case MimicForm::Caster:
         return {"术士", "奥术符弹",
@@ -224,7 +224,7 @@ inline MimicText mimicText(MimicForm form) {
             "暴击率 +15%。"};
     case MimicForm::SlimeBoss:
         return {"巨型腐化史莱姆", "腐化冲撞",
-            "腐化冲撞（左 Ctrl，冷却 6 秒）：朝鼠标高速冲撞，沿途撞飞敌人并留下腐蚀粘液。",
+            "腐化冲撞（左 Ctrl，冷却 6 秒）：朝鼠标高速冲撞，沿途撞飞敌人并把地面腐蚀成腐蚀地面。",
             "伤害 +40%。"};
     default:
         return {"未知形态", "无", "", ""};

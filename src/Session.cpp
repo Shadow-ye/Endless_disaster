@@ -45,9 +45,8 @@ constexpr float kSlimeLeapDamage = 18.f;
 constexpr float kSlimeLeapRadius = ShallowPool::kLeapRadius;
 constexpr float kSlimeLeapMaxRange = 260.f;
 constexpr float kSlimeShootWarn = ShallowPool::kWarnShoot;
-// 腐蚀粘液落痕间隔（秒）与单滴半径
+// 腐蚀地面落痕间隔（秒）：史莱姆每走一小段就把脚下的格子腐蚀掉
 constexpr float kSlimeTrailGap = 0.2f;
-constexpr float kSlimeTrailRadius = 15.f;
 // 腐蚀粘液对玩家的持续伤害：每 tick 扣这么多，tick 间隔 0.5 秒
 constexpr float kCorrosionTickGap = 0.5f;
 constexpr float kCorrosionTickDamage = 1.5f;
@@ -433,7 +432,7 @@ void Session::newGameStepSpawns() {
 bool Session::newGameStepRuin() {
     ruin_.clear();
     pool_.clear();
-    slime_.clear();
+    map_.clearCorrosion();
     map_.clearShallowPool();
     shakeT_ = 0.f;
     plazaRed_ = 0.f;
@@ -787,14 +786,7 @@ QJsonObject Session::toJson() const {
         }
         game.insert("pool", pool);
     }
-    if (!slime_.empty()) {
-        QJsonArray spots;
-        for (const SlimeSpot& spot : slime_) {
-            spots.append(double(spot.x));
-            spots.append(double(spot.y));
-        }
-        game.insert("slime", spots);
-    }
+    // 腐蚀地形只留 10 秒，属于战场上的临时危险区，不进存档
     return game;
 }
 
@@ -4582,7 +4574,7 @@ void Session::syncPoolMap() {
 void Session::dismissPool() {
     pool_.active = false;
     map_.clearShallowPool();
-    slime_.clear();
+    map_.clearCorrosion();
     monsters_.erase(std::remove_if(monsters_.begin(), monsters_.end(), [](const Monster& monster) {
         return monster.kind == MonsterKind::SlimeBoss;
     }), monsters_.end());
@@ -4711,52 +4703,57 @@ void Session::slimeBossTrail(Monster& monster, float dt) {
 }
 
 void Session::addCorrosion(float x, float y) {
-    if (slime_.size() >= 260) {
-        return;
-    }
-    SlimeSpot spot;
-    spot.x = x;
-    spot.y = y;
-    spot.radius = kSlimeTrailRadius;
-    spot.age = 0.f;
-    slime_.push_back(spot);
+    // 腐蚀现在直接写进地形：同一格反复踩到只刷新计时，不会再像圆点那样越堆越多
+    map_.corrodeAt(tileOf(x), tileOf(y));
 }
 
 void Session::updateCorrosion(float dt) {
-    for (SlimeSpot& spot : slime_) {
-        spot.age += dt;
-    }
-    // 黏液只在地面上留 3 秒，到点自行消失
-    slime_.erase(std::remove_if(slime_.begin(), slime_.end(), [](const SlimeSpot& spot) {
-        return spot.age >= SlimeSpot::kLife;
-    }), slime_.end());
+    // 腐蚀地形自己老化恢复（约 10 秒），这里只负责把计时推下去
+    map_.updateCorrosion(dt);
     corrosionTick_ += dt;
     if (corrosionTick_ < kCorrosionTickGap) {
         return;
     }
     corrosionTick_ = 0.f;
-    if (slime_.empty() || player_.state == ActorState::Dead || player_.state == ActorState::Dodge) {
-        return;
+    // 玩家：护盾 / 逆反之盾 / 磁力场 / 飞行 / 跳跃 / 拟态振翅 免疫；
+    // 史莱姆之躯是腐蚀地形自己人，站上去也不再掉血
+    const bool playerImmune = player_.state == ActorState::Dead || player_.state == ActorState::Dodge
+        || player_.slimeBody || player_.shield > 0.f || player_.mirrorT > 0.f || player_.fieldT > 0.f
+        || player_.flying || player_.jumpT > 0.f || player_.mimicFlyT > 0.f;
+    if (!playerImmune && map_.corroded(tileOf(player_.x), tileOf(player_.y))) {
+        hurtPlayerByCorrosion();
     }
-    // 护盾 / 逆反之盾 / 磁力场 / 飞行 / 跳跃 全部免疫腐蚀粘液。
-    // 粘液只伤害玩家，飞行怪与史莱姆天然不受影响；拟态振翅也算滞空。
-    if (player_.shield > 0.f || player_.mirrorT > 0.f || player_.fieldT > 0.f || player_.flying
-        || player_.jumpT > 0.f || player_.mimicFlyT > 0.f) {
-        return;
-    }
-    bool inside = false;
-    for (const SlimeSpot& spot : slime_) {
-        const float dx = player_.x - spot.x;
-        const float dy = player_.y - spot.y;
-        if (dx * dx + dy * dy <= spot.radius * spot.radius) {
-            inside = true;
-            break;
+    // 怪物：史莱姆一族与飞在天上的不受影响，其余踩进腐蚀地面就持续掉血。
+    // 这里只扣血、不播受击音效（每 0.5 秒一群怪会吵成一片），死亡结算交给 updateMonsters
+    for (Monster& monster : monsters_) {
+        if (monster.state == ActorState::Dead || monster.hp <= 0.f) {
+            continue;
         }
+        if (monster.kind == MonsterKind::Slime || monster.kind == MonsterKind::SlimeBoss
+            || monster.kind == MonsterKind::Flyer) {
+            continue;
+        }
+        if (!map_.corroded(tileOf(monster.x), tileOf(monster.y))) {
+            continue;
+        }
+        float damage = kCorrosionTickDamage;
+        if (monster.shield > 0.f) {
+            const float absorbed = std::min(monster.shield, damage);
+            monster.shield -= absorbed;
+            damage -= absorbed;
+        }
+        if (damage <= 0.f) {
+            continue;
+        }
+        monster.hp -= damage;
+        monster.hurtT = std::max(monster.hurtT, 0.12f);
+        pushFloat(monster.x, monster.y, damage, false);
     }
-    if (!inside) {
-        return;
-    }
-    const float tickDamage = kCorrosionTickDamage * (player_.slimeBody ? kSlimeBodyDamageTaken : 1.f);
+}
+
+// 腐蚀地面打在玩家身上的那一 tick：数值不大，但会打断回血节奏，也可能直接致死
+void Session::hurtPlayerByCorrosion() {
+    const float tickDamage = kCorrosionTickDamage;
     player_.hp -= tickDamage;
     player_.hurtT = std::max(player_.hurtT, 0.1f);
     pushFloat(player_.x, player_.y - 4.f, tickDamage, false);
@@ -5040,7 +5037,7 @@ void Session::onSlimeBossDefeated() {
     pool_.leapWarnT = 0.f;
     pool_.leapT = 0.f;
     pool_.shootWarnT = 0.f;
-    slime_.clear();
+    map_.clearCorrosion();
     triggerShake();
     // 史莱姆 boss 的掉落改成史莱姆核心：这是「史莱姆之躯」流派的门票
     addItem(kItemSlimeCore, 1);
@@ -5101,7 +5098,7 @@ void Session::restorePool(const QJsonObject& game) {
     monsters_.erase(std::remove_if(monsters_.begin(), monsters_.end(), [](const Monster& monster) {
         return monster.kind == MonsterKind::SlimeBoss;
     }), monsters_.end());
-    slime_.clear();
+    map_.clearCorrosion();
     pool_.clear();
     map_.clearShallowPool();
     if (!game.contains("pool")) {
@@ -5147,10 +5144,7 @@ void Session::restorePool(const QJsonObject& game) {
         const int level = obj.value("bossLevel").toInt(-1);
         spawnSlimeBoss(hp, shield, level);
     }
-    const QJsonArray spots = game.value("slime").toArray();
-    for (int i = 0; i + 1 < spots.size(); i += 2) {
-        addCorrosion(float(spots.at(i).toDouble()), float(spots.at(i + 1).toDouble()));
-    }
+    // 旧档里的 "slime" 粘液坐标不再回放：腐蚀是临时地形，读档后由战斗重新产生
     if (pool_.sanCut > 0.f) {
         applySanCut();
     }

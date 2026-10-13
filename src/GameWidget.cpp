@@ -184,6 +184,8 @@ QColor tileColor(Tile tile) {
         return QColor(92, 42, 40);
     case Tile::Shallow:
         return QColor(96, 156, 150);
+    case Tile::Corroded:
+        return QColor(78, 126, 46);
     }
     return QColor(86, 158, 62);
 }
@@ -214,6 +216,25 @@ void drawGround(QPainter& painter, const QImage& tiles, bool hasTiles, Tile tile
         painter.setPen(QColor(158, 214, 228, 70));
         if (map.at(x, y - 1) != Tile::Shallow) {
             painter.drawLine(QPointF(dest.left(), dest.top() + 0.5), QPointF(dest.right(), dest.top() + 0.5));
+        }
+        return;
+    }
+    if (tile == Tile::Corroded) {
+        // 腐蚀地面：沙地打底再压一层腐绿，只在挨着非腐蚀格的那一侧描深绿边
+        painter.fillRect(dest, QColor(48, 56, 30));
+        if (hasTiles) {
+            painter.drawImage(dest, tiles, QRect(128, 16, 16, 16));
+        }
+        // 最后 2 秒开始变淡，玩家能看出这一格快要复原了
+        const float left = map.corrosionLeft(x, y);
+        const float fade = left < 2.f ? std::max(0.25f, left * 0.5f) : 1.f;
+        painter.fillRect(dest, QColor(78, 126, 46, int(155.f * fade)));
+        painter.setPen(QColor(30, 46, 20));
+        if (map.at(x - 1, y) != Tile::Corroded) {
+            painter.drawLine(dest.topLeft(), dest.bottomLeft());
+        }
+        if (map.at(x, y - 1) != Tile::Corroded) {
+            painter.drawLine(dest.topLeft(), dest.topRight());
         }
         return;
     }
@@ -538,6 +559,13 @@ GameWidget::GameWidget(QWidget* parent) : QWidget(parent) {
     reviveRow->addWidget(reviveYes);
     reviveRow->addWidget(reviveNo);
     reviveLayout->addLayout(reviveRow);
+    // 转化不可逆，选项上方先给一行楷体警告（样式在下面 revivePanel_ 的 QSS 里）
+    reviveWarn_ = new QLabel(revivePanel_);
+    reviveWarn_->setObjectName("reviveWarn");
+    reviveWarn_->setWordWrap(true);
+    reviveWarn_->setAlignment(Qt::AlignCenter);
+    reviveWarn_->setText(QStringLiteral("化为史莱姆之躯将失去人类躯体，请慎重考虑"));
+    reviveLayout->addWidget(reviveWarn_);
     // 同时持有符咒与史莱姆核心时才出现的第三个选项
     reviveCore_ = new QPushButton(QStringLiteral("使用史莱姆核心回归（转化为史莱姆之躯）"), revivePanel_);
     reviveLayout->addWidget(reviveCore_);
@@ -569,7 +597,11 @@ GameWidget::GameWidget(QWidget* parent) : QWidget(parent) {
         setFocus();
     });
     revivePanel_->setObjectName("panel");
-    revivePanel_->setStyleSheet("QWidget#panel { background: #14110f; border: 1px solid #5c3a32; } QLabel { background: transparent; color: #d7c7b4; border: none; }");
+    revivePanel_->setStyleSheet(QString("QWidget#panel { background: #14110f; border: 1px solid #5c3a32; }"
+                                        "QLabel { background: transparent; color: #d7c7b4; border: none; }"
+                                        // 转化不可逆的警告：换成楷体 + 警示色，和面板正文拉开区别
+                                        "QLabel#reviveWarn { color: #e8a45c; font-family: '%1'; font-size: 21px; font-weight: bold; }")
+                                    .arg(Platform::titleFontFamily()));
     revivePanel_->hide();
 
     // 拟态图鉴：史莱姆之躯按 T 打开，打开期间时停
@@ -751,7 +783,7 @@ void GameWidget::refreshGuide() {
     if (player.slimeBody) {
         html += "<p style='color:#e4d4c4; margin:12px 0 4px 0;'><b>玩法　史莱姆之躯</b></p>";
         html += "<p style='margin:8px 0 10px 0;'><span style='color:#a89888;'>"
-                "受到的伤害 -10%，「恢复」改为回复 20% 最大生命与体力。<br>"
+                "受到的伤害 -10%，「恢复」改为回复 20% 最大生命与体力；腐蚀地面也不再伤到你（同类相认）。<br>"
                 "按 T 打开拟态图鉴（打开时时停）选择外形：只能选已吞噬的怪物——史莱姆之躯下击杀即吞噬；"
                 "自己原本的躯体与史莱姆本体会默认解锁。<br>"
                 "每个外形附带一个左 Ctrl 技能与一项属性加成，换形态立即生效。</span></p>";
@@ -774,8 +806,8 @@ void GameWidget::refreshGuide() {
                 "在棋盘格上跳跃即可揭示方块（起跳与落地各算一次）：数字＝相邻地雷数，0 格会自动连锁翻开。"
                 "踩中地雷（腐蚀史莱姆）受到一次腐蚀伤害，并使本场理智上限 -10。"
                 "揭开全部安全格、或踩完全部地雷，巨型腐化史莱姆就会从水中浮出。"
-                "它靠冲撞、弹跳砸击与腐蚀水弹进攻，途经处留下腐蚀粘液（约 3 秒后自行消失），踩上持续掉血——"
-                "护盾、飞行或跳跃时可免疫粘液。</span></p>";
+                "它靠冲撞、弹跳砸击与腐蚀水弹进攻，途经处的地面会被腐蚀（约 10 秒后自行恢复），踩上去的玩家与怪物都持续掉血——"
+                "护盾、飞行、跳跃、史莱姆一族与史莱姆之躯都能免疫腐蚀地面。</span></p>";
     }
     if (const int charms = session_.talismanCount()) {
         html += QString("<p style='color:#e4d4c4; margin:12px 0 4px 0;'><b>物品</b></p>");
@@ -1006,6 +1038,8 @@ void GameWidget::showRevivePrompt() {
     }
     reviveText_->setText(text);
     reviveCore_->setVisible(session_.canUseSlimeCore());
+    // 警告只在真的能选「史莱姆核心回归」时出现
+    reviveWarn_->setVisible(session_.canUseSlimeCore());
     revivePanel_->show();
     revivePanel_->raise();
     layoutOverlays();
@@ -1335,7 +1369,7 @@ void GameWidget::spawnVfx(const VfxEvent& event) {
         break;
     }
     case VfxKind::Corrosion: {
-        // 踩雷 / 踩到粘液：溅起一圈绿色腐蚀液
+        // 踩雷 / 踩进腐蚀地面：溅起一圈绿色腐蚀液
         static const QColor acid[] = {QColor(126, 196, 62), QColor(196, 240, 120), QColor(62, 96, 34)};
         const float r = std::max(6.f, event.radius);
         spray(6 + int(r / 3.f), r * 1.2f, r * 2.6f, 20.f, 70.f, 210.f, 0.3f, 0.6f, 2.f, 3.5f, 6.f, r * 0.35f, acid, 3, true);
@@ -2355,22 +2389,6 @@ void GameWidget::drawWorld(QPainter& painter) {
                 drawGround(painter, sprites_.tiles, spritesOk_, tile, x, y, session_.map());
             }
         }
-    }
-
-    // 腐蚀粘液：boss 拖在地面的黏液，压在实体之下；3 秒到点前渐隐收缩
-    for (const SlimeSpot& spot : session_.slimeSpots()) {
-        const float left = std::clamp(1.f - spot.age / SlimeSpot::kLife, 0.f, 1.f);
-        // 最后 0.8 秒淡出并收小，消失前能看出「快没了」
-        const float fade = std::min(1.f, left * 3.75f);
-        const float breathe = 1.f + std::sin(spot.age * 3.f) * 0.06f;
-        const float r = spot.radius * breathe * (0.72f + 0.28f * fade);
-        painter.setPen(Qt::NoPen);
-        painter.setBrush(QColor(58, 92, 34, int(150 * fade)));
-        painter.drawEllipse(QRectF(spot.x - r, spot.y - r * 0.55f, r * 2.f, r * 1.1f));
-        painter.setBrush(QColor(126, 196, 62, int(130 * fade)));
-        painter.drawEllipse(QRectF(spot.x - r * 0.6f, spot.y - r * 0.34f, r * 1.2f, r * 0.68f));
-        painter.setBrush(QColor(196, 236, 120, int(110 * fade)));
-        painter.drawEllipse(QRectF(spot.x - r * 0.22f, spot.y - r * 0.14f, r * 0.44f, r * 0.26f));
     }
 
     // 排雷棋盘：地面上的方格、数字与已被踩过的雷

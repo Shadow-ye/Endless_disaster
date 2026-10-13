@@ -250,6 +250,7 @@ private:
     QWidget* voidPanel_ = nullptr;
     QWidget* revivePanel_ = nullptr;
     QLabel* reviveText_ = nullptr;
+    QLabel* reviveWarn_ = nullptr;
     QPushButton* reviveCore_ = nullptr;
     QWidget* mimicPanel_ = nullptr;
     QLabel* mimicLabel_ = nullptr;

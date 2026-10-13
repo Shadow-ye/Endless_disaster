@@ -120,7 +120,57 @@ void TileMap::decodeKey(int64_t key, int& x, int& y) {
     y = int32_t(uint32_t(key & 0xffffffffLL));
 }
 
+void TileMap::corrodeAt(int x, int y) {
+    // 同一格反复踩到只把计时清零，不叠加
+    corrode_[tileKey(x, y)] = 0.f;
+}
+
+bool TileMap::corroded(int x, int y) const {
+    return corrode_.find(tileKey(x, y)) != corrode_.end();
+}
+
+float TileMap::corrosionLeft(int x, int y) const {
+    const auto it = corrode_.find(tileKey(x, y));
+    if (it == corrode_.end()) {
+        return 0.f;
+    }
+    const float left = kCorrosionLife - it->second;
+    return left > 0.f ? left : 0.f;
+}
+
+void TileMap::updateCorrosion(float dt) {
+    if (corrode_.empty()) {
+        return;
+    }
+    for (auto& entry : corrode_) {
+        entry.second += dt;
+    }
+    for (auto it = corrode_.begin(); it != corrode_.end();) {
+        if (it->second >= kCorrosionLife) {
+            it = corrode_.erase(it);
+        } else {
+            ++it;
+        }
+    }
+}
+
+void TileMap::clearCorrosion() {
+    corrode_.clear();
+}
+
 Tile TileMap::at(int x, int y) const {
+    const Tile ground = surfaceTile(x, y);
+    // 腐蚀只盖在可走地面上：岩石 / 灌木 / 水塘 / 迷宫墙保持原样，
+    // 否则史莱姆一路走过去就把障碍物腐蚀成通道了
+    if (corroded(x, y) && ground != Tile::Rock && ground != Tile::Bush && ground != Tile::Water
+        && ground != Tile::MazeWall) {
+        return Tile::Corroded;
+    }
+    return ground;
+}
+
+// 地表：迷宫与浅水房的覆盖层都算完之后、还没叠腐蚀的地形
+Tile TileMap::surfaceTile(int x, int y) const {
     if (inRuin(x, y)) {
         const int lx = x - ruinX_;
         const int ly = y - ruinY_;
@@ -200,6 +250,10 @@ bool TileMap::blocks(int x, int y, int pass) const {
     }
     // 浅水与平地通行完全一致，只靠 Session 侧的速度系数略微减速
     if (tile == Tile::Shallow) {
+        return false;
+    }
+    // 腐蚀地面同样可以走，惩罚交给 Session 侧的持续掉血
+    if (tile == Tile::Corroded) {
         return false;
     }
     if (pass >= 2) {
