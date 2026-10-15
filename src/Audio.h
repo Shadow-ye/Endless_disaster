@@ -35,6 +35,8 @@ public:
     void load(const QString& assetDir);
     void setSfxEnabled(bool enabled);
     void setSfxVolume(int percent);
+    // BGM 开关：关=静音不停播（规避 stop/重播的后端竞态），开=恢复原音量原地续上；
+    // 重新打开时的曲目对齐由调用方调 ensureBgmLoop 完成
     void setBgmEnabled(bool enabled);
     void setBgmVolume(int percent);
     bool sfxEnabled() const { return sfxEnabled_; }

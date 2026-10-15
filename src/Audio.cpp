@@ -269,15 +269,15 @@ void Audio::setSfxVolume(int percent) {
     rebuildSfxVolumes();
 }
 
+// BGM 开关走「静音」方案：关=音量压到 0 但不停播，开=恢复原音量原地续上。
+// 之前用 stop / 重播，Windows 后端在 stop 与 setSource 之间存在竞态：
+// 关闭时音频未必立刻停（表现为关不掉），紧接着重播会新旧两段叠着放（重奏）。
 void Audio::setBgmEnabled(bool enabled) {
+    if (bgmEnabled_ == enabled) {
+        return;
+    }
     bgmEnabled_ = enabled;
     rebuildBgmVolume();
-    if (!bgmEnabled_) {
-        if (state().bgm) {
-            state().bgm->stop();
-        }
-        oneshotPlaying_ = false;
-    }
 }
 
 void Audio::setBgmVolume(int percent) {
@@ -480,9 +480,14 @@ void Audio::playBgm(BgmId id, bool loop) {
     if (!loaded_ || !state().bgm) {
         return;
     }
-    if (!bgmEnabled_ || bgmVolumePercent_ <= 0) {
+    if (bgmVolumePercent_ <= 0) {
         state().bgm->stop();
         oneshotPlaying_ = false;
+        return;
+    }
+    if (!bgmEnabled_) {
+        // 开关关闭只静音：不碰播放器（不停播、不换曲），曲目对齐留到
+        // 重新打开时由调用方的 ensureBgmLoop 收口
         return;
     }
     const QString file = bgmPath(id);
