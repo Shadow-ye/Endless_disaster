@@ -10,6 +10,7 @@
 
 #include <QJsonObject>
 #include <QString>
+#include <array>
 #include <vector>
 
 enum class ActorState { Idle, Run, Attack, Dodge, Hurt, Dead };
@@ -91,6 +92,11 @@ inline constexpr float kBurialStage1Life = 0.75f;
 inline constexpr float kBurialStage1Hit = 0.25f;
 inline constexpr float kBurialStage2Life = 0.65f;
 inline constexpr float kBurialStage2Hit = 0.2f;
+
+// 抹杀法阵：第 i 个（0 起）的半径 = kEraseRingBase × (i + 1)，最后一个刚好铺满整屏。
+// squash 是俯视透视的竖向压扁率，绘制层据此把圆盘画成带立体感的地面法阵
+inline constexpr float kEraseRingBase = 62.f;
+inline constexpr float kEraseRingSquash = 0.42f;
 
 // I am atomic 三段节奏：蓄力 → 闪白 → 引爆；引爆一开始就抹除画面内的怪
 // 蓄力 4 秒是对着配音来的：整段 5 秒，前 4 秒吟唱，最后一秒是引爆
@@ -226,6 +232,8 @@ struct Player {
     float cdThrustStack = 0.f;
     bool flying = false;
     bool seekOn = false;
+    // 法师「雷罚」：开启期间锁在雷雨天、落雷加密、每秒扣蓝
+    bool thunderPunish = false;
     // 万葬：1 = 第一段法阵，2 = 第二段六芒星；burialNext 是本段出伤的剩余时间
     float burialT = 0.f;
     float burialR = 96.f;
@@ -237,6 +245,9 @@ struct Player {
     float atomicNext = 0.f;
     // 这一发 I am atomic 实际定下的冷却时长，只给 UI 画冷却环当分母用
     float atomicCd = 0.f;
+    // 抹杀：1 = 前摇中；eraseT 是剩余前摇时间（绘制层据此逐个铺开法阵）
+    int eraseStage = 0;
+    float eraseT = 0.f;
     float mirrorT = 0.f;
     float mirrorAbsorbed = 0.f;
     float mirrorCap = 40.f;
@@ -261,8 +272,8 @@ struct Player {
     bool slimeBody = false;
     // 当前幻化的外形；史莱姆之躯默认是自己的史莱姆形象
     MimicForm mimic = MimicForm::Slime;
-    // 已吞噬的形态（位掩码，见 mimicBit）；自己的尸体默认已吞噬，所以开局就带 Hero 位
-    uint32_t devouredMask = mimicBit(MimicForm::Hero);
+    // 已吞噬的形态（位掩码，见 mimicBit）；自己的尸体与史莱姆本体默认已吞噬，开局就带 Hero 与 Slime 位
+    uint32_t devouredMask = mimicBit(MimicForm::Hero) | mimicBit(MimicForm::Slime);
     // 史莱姆之躯下累计吞噬的怪物数，达到 kGluttonyDevours 进化出天赋【暴食】
     int devourCount = 0;
     bool talentGluttony = false;
@@ -334,7 +345,94 @@ struct AttackFx {
 };
 
 // 只给绘制层生成粒子用，不参与任何判定
-enum class VfxKind { Hit, Kill, Explode, Heal, LevelUp, Rage, AtomicCharge, AtomicFlash, AtomicBlast, Corrosion, Rise };
+enum class VfxKind { Hit, Kill, Explode, Heal, LevelUp, Rage, AtomicCharge, AtomicFlash, AtomicBlast, Corrosion, Rise, Hail, Thunder };
+
+// 天气系统：局内周期性轮换的六种天灾，退场后有一段平静期。
+// Clear 是平静期（也是「天气系统」关掉后的状态），粒子和滤镜都不画。
+enum class WeatherKind { Clear = 0, Rain, Thunder, Blizzard, Hail, Sandstorm, Typhoon };
+
+inline QString weatherName(WeatherKind kind) {
+    switch (kind) {
+    case WeatherKind::Rain:
+        return QStringLiteral("雨天");
+    case WeatherKind::Thunder:
+        return QStringLiteral("雷雨天");
+    case WeatherKind::Blizzard:
+        return QStringLiteral("暴风雪");
+    case WeatherKind::Hail:
+        return QStringLiteral("冰雹");
+    case WeatherKind::Sandstorm:
+        return QStringLiteral("沙尘暴");
+    case WeatherKind::Typhoon:
+        return QStringLiteral("台风");
+    default:
+        return QStringLiteral("晴");
+    }
+}
+
+// 天气的一句话效果说明，给暂停菜单与说明页用
+inline QString weatherDetail(WeatherKind kind) {
+    switch (kind) {
+    case WeatherKind::Rain:
+        return QStringLiteral("细雨打湿地面，视野微微发暗。");
+    case WeatherKind::Thunder:
+        return QStringLiteral("密集雨幕里不时落下闪电：白闪过后，落点附近的怪物挨一记雷击。");
+    case WeatherKind::Blizzard:
+        return QStringLiteral("狂风卷着雪片扫过，白茫茫一片看不清远处。");
+    case WeatherKind::Hail:
+        return QStringLiteral("冰雹砸在地上四处迸溅，被砸中的怪物持续掉一点血。");
+    case WeatherKind::Sandstorm:
+        return QStringLiteral("黄沙贴着地面横卷，视野被沙幕压低。");
+    case WeatherKind::Typhoon:
+        return QStringLiteral("台风过境：暴雨斜扫、飞叶乱舞，风一阵紧过一阵。");
+    default:
+        return QStringLiteral("风平浪静。");
+    }
+}
+
+// 一句话短说明：法师「改天」的选择面板上每个按钮的第二行
+inline QString weatherBrief(WeatherKind kind) {
+    switch (kind) {
+    case WeatherKind::Rain:
+        return QStringLiteral("细雨压暗视野");
+    case WeatherKind::Thunder:
+        return QStringLiteral("雨幕里落下雷击");
+    case WeatherKind::Blizzard:
+        return QStringLiteral("白茫一片看不清");
+    case WeatherKind::Hail:
+        return QStringLiteral("冰雹砸中掉血");
+    case WeatherKind::Sandstorm:
+        return QStringLiteral("沙幕贴着地横卷");
+    case WeatherKind::Typhoon:
+        return QStringLiteral("暴雨斜扫飞叶乱舞");
+    default:
+        return QStringLiteral("风平浪静");
+    }
+}
+
+// 天气的时间轴：首次出现前的等待、单次持续、退场后的平静期、强度渐入渐出
+inline constexpr float kWeatherFirstDelay = 22.f;
+inline constexpr float kWeatherRamp = 3.5f;
+inline constexpr float kWeatherLifeMin = 30.f;
+inline constexpr float kWeatherLifeMax = 55.f;
+inline constexpr float kWeatherCalmMin = 9.f;
+inline constexpr float kWeatherCalmMax = 17.f;
+// 落雷：只劈玩家附近的怪，伤害随怪物等级微涨；劈完地面留一记闪光与烟尘
+inline constexpr float kLightningRange = 150.f;
+inline constexpr float kLightningRadius = 34.f;
+inline constexpr float kLightningLife = 0.34f;
+// 同时劈下的雷最多几道（法师「雷罚」一次三道，普通雷雨天一道）
+inline constexpr int kMaxLightningBolts = 3;
+
+// 正在劈下的一道雷：世界坐标 + 年龄，绘制层按年龄淡出
+struct LightningBolt {
+    bool active = false;
+    float x = 0.f;
+    float y = 0.f;
+    float age = 0.f;
+};
+// 冰雹碎击：视野内的怪物被砸中掉一点血
+inline constexpr float kHailRange = 130.f;
 
 struct VfxEvent {
     VfxKind kind = VfxKind::Hit;
@@ -389,6 +487,33 @@ struct Drop {
     Item item;
 };
 
+// —— 传送平台
+// 玩家跑出迷宫遗迹 / 浅水 boss 房一定距离后，会在玩家附近、画面之外随机刷出一块 3×3 的
+// 符文平台，并标出它通往哪里；站上去起跳即传送过去，省得在开阔地图上长距离跋涉。
+inline constexpr int kTeleportPadTiles = 3;
+// 目的地离玩家超过这么多格才给传送平台；已经快到跟前就没必要再放了
+inline constexpr float kTeleportPadMinDist = 34.f;
+
+enum class TeleportTarget { Ruin, Pool, Count };
+
+inline QString teleportTargetName(TeleportTarget target) {
+    return target == TeleportTarget::Pool ? QStringLiteral("浅水区域") : QStringLiteral("迷宫遗迹");
+}
+
+struct TeleportPad {
+    bool active = false;
+    TeleportTarget target = TeleportTarget::Ruin;
+    // 平台左上角所在格，占 kTeleportPadTiles × kTeleportPadTiles
+    int tileX = 0;
+    int tileY = 0;
+    // 目的地（世界像素）：生成时定下，之后不再跟着玩家跑
+    float destX = 0.f;
+    float destY = 0.f;
+
+    float centerX() const { return (float(tileX) + kTeleportPadTiles * 0.5f) * float(kTile); }
+    float centerY() const { return (float(tileY) + kTeleportPadTiles * 0.5f) * float(kTile); }
+};
+
 class Session {
 public:
     void newGame(uint32_t seed, uint32_t runId, HeroClass hero = HeroClass::Warrior,
@@ -427,6 +552,8 @@ public:
     const TileMap& map() const { return map_; }
     const MazeRuin& ruin() const { return ruin_; }
     const ShallowPool& pool() const { return pool_; }
+    // 场上现存的传送平台（至多每个目的地一个），界面用它画世界层平台与画面外指示
+    const std::vector<TeleportPad>& teleportPads() const { return pads_; }
     // 本次浅水 boss 战里踩雷累计削减掉的理智上限
     float sanCapCut() const { return pool_.sanCut; }
     float plazaRed() const { return plazaRed_; }
@@ -485,6 +612,8 @@ public:
     // 左 Ctrl / 触屏按钮：按当前拟态形态放一次技能
     void castMimicSkill();
 
+    // 背包内容：只读，给界面的背包面板按获得顺序列出物品
+    const std::vector<Item>& bag() const { return bag_; }
     int itemCount(int kind) const;
     int talismanCount() const { return itemCount(kItemReturnTalisman); }
     int slimeCoreCount() const { return itemCount(kItemSlimeCore); }
@@ -523,6 +652,34 @@ public:
         const float drain = sanCapBase() / 600.f;
         return drain <= 0.f ? 0.f : player_.san / drain;
     }
+
+    // —— 天气系统
+    // 当前天气（Clear 表示平静期 / 天气系统已关闭）
+    WeatherKind weather() const { return weather_; }
+    // 天气强度：刚起时从 0 渐入到 1，退场时渐出，绘制层按它缩放粒子数与滤镜浓度
+    float weatherIntensity() const { return weatherIntensity_; }
+    // 天气是否正在场上（含渐入渐出），界面据此决定要不要显示天气状态条
+    bool weatherOn() const { return weather_ != WeatherKind::Clear || weatherIntensity_ > 0.02f; }
+    // 当前天气剩余秒数；平静期返回距离下一次天气的秒数
+    float weatherRemain() const { return std::max(0.f, weatherT_); }
+    bool weatherEnabled() const { return weatherEnabled_; }
+    // 设置里的「天气系统」开关：关掉立刻转入平静期，也不再轮换
+    void setWeatherEnabled(bool on);
+    // —— 法师技能「改天」：释放后由画面层弹出天气选择面板
+    // 是否要弹面板；取走一次就清掉，画面层每帧轮询
+    bool consumeWeatherPickRequest();
+    // 面板是否处于选择中（取消、换局、关掉天气系统都会结束）
+    bool weatherPickOpen() const { return weatherPickOpen_; }
+    // 选好某种天气：这时才扣 MP、进冷却并切换天气；MP 不足则失败且不消耗
+    bool chooseWeather(WeatherKind kind);
+    // 放弃选择：不扣 MP，也不进冷却
+    void cancelWeatherPick();
+    // 落雷的一次白闪（0~1），画面据此叠一层白光
+    float lightningFlash() const { return lightningFlash_; }
+    // 正在劈下的雷（最多 kMaxLightningBolts 道），界面逐道画成折线闪电
+    const std::array<LightningBolt, kMaxLightningBolts>& lightningBolts() const { return lightningBolts_; }
+    // 法师「雷罚」是否开着：开启期间落雷加密、一次三道，并持续耗蓝
+    bool thunderPunish() const { return player_.thunderPunish; }
 
     int xpToNext() const;
 
@@ -578,6 +735,12 @@ private:
     void castBurial(float& cooldown);
     void burialBlast(int stage);
     void updateBurial(float dt);
+    // 抹杀：起手扣 50% 最大 MP → 5 秒前摇（不能动）→ 随机抹杀当前一半敌人；
+    // 前摇被打断只保留 10% 的消耗（退回 40%）
+    void castErase(float& cooldown);
+    void updateErase(float dt);
+    void eraseBlast();
+    void interruptErase();
     void castAtomic(float& cooldown);
     void atomicBlast();
     void updateAtomic(float dt);
@@ -601,6 +764,12 @@ private:
     float dimensionSlowScale() const;
     void castMirrorShield(float& cooldown);
     void castMageHeal(float& cooldown);
+    // 改天：只置起「等画面层弹面板」的状态，不扣 MP、不进冷却
+    void requestWeatherPick(float& cooldown);
+    // 雷罚：开关雷雨天、每秒扣蓝；结束时转雨天并把天气交还给正常轮换
+    void toggleThunderPunish();
+    void updateThunderPunish(float dt);
+    void endThunderPunish(bool toRain);
     void castBerserk(float& cooldown, const QString& name);
     void castOverload(float& cooldown);
     void castMagField(float& cooldown);
@@ -638,6 +807,16 @@ private:
     void updateRuin(float dt);
     // 理智流逝：boss 激活后按 10 分钟线性清零，归零即死（不可复活）
     void updateSan(float dt);
+    // 天气：调度轮换 + 强度渐入渐出 + 雷雨天落雷 / 冰雹碎击（都只砸怪，不伤玩家）
+    void updateWeather(float dt);
+    void rollWeather();
+    // 落雷：默认一道；雷罚一次三道。每道各自挑目标、各自结算伤害
+    void strikeLightning(int count = 1);
+    // 只是把一道雷放进画面槽位（最多三道），伤害与闪光由 strikeLightning 负责
+    void spawnLightningBolt(float x, float y);
+    // 清空所有正在劈的雷（换天气 / 重开一局）
+    void clearLightningBolts();
+    void hailStrike();
     void spawnEye(float hp = -1.f, float shield = -1.f, int level = -1);
     void updateEye(Monster& monster, float dt);
     void onEyeDefeated();
@@ -670,6 +849,18 @@ private:
     void triggerShake();
     void restoreRuin(const QJsonObject& game);
     Monster* findMonster(int id);
+    // —— 传送平台
+    // 目的地还在场上（遗迹立着 / 浅水区开着）
+    bool teleportTargetLive(TeleportTarget target) const;
+    // 目的地世界坐标：遗迹取入口那一格，浅水区取外圈清空带上朝玩家这一侧
+    bool teleportDestination(TeleportTarget target, float& x, float& y) const;
+    // 在玩家附近、画面之外随机找一块整块可站的 3×3 空地放平台
+    bool placeTeleportPad(TeleportPad& pad, TeleportTarget target);
+    // 把落点吸附到最近的可站格（先就地，再按环形向外找）
+    bool snapToWalkable(float& x, float& y, int radiusTiles) const;
+    // 每帧维护平台：目的地没了就撤、玩家走远了就重新刷、踩上去起跳就传送
+    void updateTeleportPads(float dt);
+    void useTeleportPad(TeleportPad& pad);
 
     TileMap map_{1};
     MazeRuin ruin_;
@@ -749,5 +940,25 @@ private:
     ReviveState reviveState_ = ReviveState::None;
     bool revivePrompt_ = false;
     int talismanBonus_ = 0;
+    // —— 天气系统
+    // 设置里的「天气系统」开关，默认开
+    bool weatherEnabled_ = true;
+    WeatherKind weather_ = WeatherKind::Clear;
+    // 上一次出现过的天气：轮换时避开它，免得连着两场一样
+    WeatherKind lastWeather_ = WeatherKind::Clear;
+    float weatherT_ = kWeatherFirstDelay;  // 当前阶段（天气 / 平静期）剩余时间
+    float weatherIntensity_ = 0.f;         // 0~1，粒子与滤镜按它缩放
+    float lightningCd_ = 0.f;              // 距下一次落雷
+    float lightningFlash_ = 0.f;           // 白闪强度，随时间衰减
+    std::array<LightningBolt, kMaxLightningBolts> lightningBolts_{};
+    float hailCd_ = 0.f;  // 距下一次冰雹碎击
+    // —— 法师技能「改天」：等画面层弹面板 / 面板已打开 / 这次是哪个技能键（0~3 = D/F/C/V）
+    bool weatherPickRequest_ = false;
+    bool weatherPickOpen_ = false;
+    int weatherPickSlot_ = -1;
+    // —— 传送平台
+    std::vector<TeleportPad> pads_;
+    // 用掉平台后，对同一目的地的再次刷新冷却（秒）
+    float padCd_[static_cast<int>(TeleportTarget::Count)]{};
     uint32_t nextRand();
 };

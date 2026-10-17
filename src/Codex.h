@@ -2,7 +2,10 @@
 
 #include "Types.h"
 
+#include <QColor>
 #include <QString>
+
+#include <vector>
 
 struct SkillText {
     QString name;
@@ -22,6 +25,9 @@ inline constexpr int kSkillFlight = 12;
 inline constexpr int kSkillBurial = 13;
 inline constexpr int kSkillMirror = 14;
 inline constexpr int kSkillMageHeal = 15;
+inline constexpr int kSkillWeather = 16;
+inline constexpr int kSkillThunderPunish = 17;
+inline constexpr int kSkillErase = 18;
 // 机甲人
 inline constexpr int kSkillScatter = 20;
 inline constexpr int kSkillMissile = 21;
@@ -38,6 +44,24 @@ inline constexpr int kSkillSeek = 30;
 inline constexpr float kMeleeStaminaCost = 8.f;
 inline constexpr float kMeleeCooldown = 0.9f;
 
+// 法师「改天」：选好天气才结算 MP 与技能键冷却（取消不消耗）
+inline constexpr float kWeatherPickMp = 26.f;
+inline constexpr float kWeatherPickCd = 5.f;
+
+// 法师「雷罚」：开启期间每秒耗蓝、落雷间隔（比普通雷雨天密得多）、每次落雷的道数
+inline constexpr float kThunderPunishDrain = 2.f;
+inline constexpr float kThunderPunishCdMin = 1.4f;
+inline constexpr float kThunderPunishCdMax = 2.4f;
+inline constexpr int kThunderPunishBolts = 3;
+
+// 法师「抹杀」：5 秒前摇里逐个铺开 5 个越来越大的法阵，完成时随机抹杀当前一半敌人。
+// 起手先扣 50% 最大 MP，被打断只算 10%（退回 40%）
+inline constexpr float kEraseWindup = 5.f;
+inline constexpr int kEraseCircles = 5;
+inline constexpr float kEraseCostRatio = 0.5f;
+inline constexpr float kEraseAbortRatio = 0.1f;
+inline constexpr float kEraseCd = 22.f;
+
 // 战士「I am atomic」：一次倾泻当前全部 MP，冷却按这一发烧掉的 MP 占上限的比例减免
 inline constexpr float kAtomicMinMp = 30.f;      // 释放门槛，低于此值放不出来
 inline constexpr float kAtomicCdMax = 30.f;      // 刚好只够门槛时的冷却
@@ -47,7 +71,8 @@ inline constexpr int kWarriorSkillPool[] = {
     kSkillSpin, kSkillSwordQi, kSkillThrust, kSkillBerserk, kSkillAtomic};
 
 inline constexpr int kMageSkillPool[] = {
-    kSkillMageBolt, kSkillNova, kSkillFlight, kSkillBurial, kSkillMirror, kSkillMageHeal};
+    kSkillMageBolt, kSkillNova, kSkillFlight, kSkillBurial, kSkillMirror, kSkillMageHeal, kSkillWeather,
+    kSkillThunderPunish, kSkillErase};
 
 inline constexpr int kRobotSkillPool[] = {
     kSkillScatter, kSkillMissile, kSkillBoost, kSkillOverload, kSkillSwarm, kSkillMagField, kSkillMedkit, kSkillJetpack,
@@ -109,6 +134,32 @@ inline SkillText skillText(int id) {
         return {"逆反之盾", "吸收伤害并把每次伤害的 5% 反弹给攻击者。持续 10 秒，单次过高或累计达上限也会破碎。上限随等级提高。消耗 24 MP，冷却 15 秒。"};
     case kSkillMageHeal:
         return {"治疗术", "回复最大生命值的 15%。消耗 22 MP，冷却 20 秒。"};
+    case kSkillWeather:
+        return {"改天",
+            QString("释放后时停打开选择面板，可把当前天气改成晴或六种天灾之一，选中的天气立刻生效并持续一整场；"
+                    "点 ✕ 或 Esc 放弃选择则不消耗。消耗 %1 MP，冷却 %2 秒。设置里关掉「天气系统」时无法释放。")
+                .arg(int(kWeatherPickMp))
+                .arg(int(kWeatherPickCd))};
+    case kSkillErase:
+        return {"抹杀",
+            QString("起手先扣 %1% 最大 MP：%2 秒前摇里逐个铺开 %3 个越来越大的法阵，最后铺满全屏；"
+                    "期间不能移动，也不会被闪避 / 其他技能打断。法阵铺满后随机抹杀当前一半的敌对个体"
+                    "（数量向下取整，无视护盾与减伤）。前摇中受到伤害会被打断，只消耗 %4% 最大 MP"
+                    "（退回其余部分）。冷却 %5 秒。")
+                .arg(int(kEraseCostRatio * 100.f))
+                .arg(kEraseWindup, 0, 'f', 0)
+                .arg(kEraseCircles)
+                .arg(int(kEraseAbortRatio * 100.f))
+                .arg(int(kEraseCd))};
+    case kSkillThunderPunish:
+        return {"雷罚",
+            QString("开关雷罚：开启后立刻转为雷雨天，落雷间隔缩短到 %1~%2 秒，而且每次同时落下 %3 道雷。"
+                    "开启期间每秒消耗 %4 MP，此时自然回蓝暂停；MP 耗尽或再按一次关闭，天气转为雨天并交还给正常天气系统。"
+                    "设置里关掉「天气系统」时无法开启。")
+                .arg(kThunderPunishCdMin, 0, 'f', 1)
+                .arg(kThunderPunishCdMax, 0, 'f', 1)
+                .arg(kThunderPunishBolts)
+                .arg(int(kThunderPunishDrain))};
     case kSkillScatter:
         return {"散射", "朝面向扇形射出 5 发子弹，每发基础伤害 9。消耗 14 MP，冷却 2.4 秒。"};
     case kSkillMissile:
@@ -273,4 +324,63 @@ inline ItemText itemText(int id) {
     default:
         return {"未知", "", false};
     }
+}
+
+// 背包格子上的物品图标：返回仓库根目录 things/ 下的文件名。
+// 桌面端开局把它拷进 assets/things，安卓端编进 qrc 的 /assets/things 前缀，两处路径一致。
+inline QString itemIconFile(int id) {
+    switch (id) {
+    case kItemReturnTalisman:
+        return QStringLiteral("意识回归符咒.jpg");
+    case kItemSlimeCore:
+        return QStringLiteral("史莱姆核心.png");
+    default:
+        return QString();
+    }
+}
+
+// 物品名称的颜色：意识回归符咒是红字，史莱姆核心是绿字（背包面板与说明页共用同一份）
+inline QColor itemNameColor(int id) {
+    switch (id) {
+    case kItemReturnTalisman:
+        return QColor(232, 116, 96);
+    case kItemSlimeCore:
+        return QColor(140, 220, 128);
+    default:
+        return QColor(240, 228, 212);
+    }
+}
+
+// ---------------------------------------------------------------------------
+// 成就：id 是存档里的稳定键（Storage 的 achievements.json），名称与描述只用于展示，
+// 改文案不必动 id
+// ---------------------------------------------------------------------------
+inline constexpr const char* kAchWorldBeyond = "world_beyond";
+inline constexpr const char* kAchKeepGoing = "keep_going";
+
+struct AchievementText {
+    QString id;
+    QString name;
+    QString detail;
+};
+
+// 列表顺序就是成就页的展示顺序
+inline const std::vector<AchievementText>& achievementTexts() {
+    static const std::vector<AchievementText> list = {
+        {QString::fromLatin1(kAchWorldBeyond), QStringLiteral("世界之外的意识降临"),
+            QStringLiteral("第一次进行一局游戏。")},
+        {QString::fromLatin1(kAchKeepGoing), QStringLiteral("继续前进吧！"),
+            QStringLiteral("拒绝一次结算。")},
+    };
+    return list;
+}
+
+// 按 id 取成就文案；id 不认识时退回 id 本身，保证解锁提示不会变空
+inline AchievementText achievementText(const QString& id) {
+    for (const AchievementText& text : achievementTexts()) {
+        if (text.id == id) {
+            return text;
+        }
+    }
+    return {id, id, QString()};
 }

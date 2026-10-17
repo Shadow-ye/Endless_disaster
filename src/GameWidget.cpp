@@ -26,6 +26,7 @@
 #include <QPainter>
 #include <QPainterPath>
 #include <QPointingDevice>
+#include <QPolygonF>
 #include <QPushButton>
 #include <QRadialGradient>
 #include <QScrollArea>
@@ -47,6 +48,16 @@
 namespace {
 constexpr float kPi = 3.14159265f;
 constexpr size_t kMaxParticles = 560;
+// 天气粒子的上限：单独一套，不跟战斗特效抢名额（一场台风的雨丝加飞叶也就六七百颗）
+constexpr size_t kMaxWeatherParticles = 900;
+// 天气粒子的绘制样式
+constexpr int kLookStreak = 0;  // 雨丝 / 风线：一条沿速度方向的细线
+constexpr int kLookFlake = 1;   // 雪片：方块，带闪烁与左右摇摆
+constexpr int kLookPellet = 2;  // 冰雹：小而亮的冰粒
+constexpr int kLookSand = 3;    // 沙尘：短促的土色横线
+constexpr int kLookDebris = 4;  // 飞叶 / 碎屑：旋转的小条
+constexpr int kLookSplash = 5;  // 溅射：落地的一记小水花
+constexpr int kLookDust = 6;    // 浮尘：又大又透的一团
 // 右上角雷达盘的边长，以及靠它定位的迷宫地图边长
 constexpr int kRadarSide = 112;
 // 次元斩：每一道刃把画面沿刃线错开的最大像素
@@ -125,6 +136,10 @@ float skillCooldownMax(int skill, float mul) {
         return 15.f * mul;
     case kSkillMageHeal:
         return 20.f * mul;
+    case kSkillWeather:
+        return kWeatherPickCd * mul;
+    case kSkillErase:
+        return kEraseCd * mul;
     case kSkillBerserk:
         return 8.f * mul;
     case kSkillOverload:
@@ -188,6 +203,36 @@ QColor tileColor(Tile tile) {
         return QColor(78, 126, 46);
     }
     return QColor(86, 158, 62);
+}
+
+// 灾难滤镜：只把地图（地面 / 岩石 / 灌木 / 迷宫墙）压暗成末世色调，
+// 角色、弹幕与特效保持原亮度——整屏压暗会把画面拖得过暗，这里改成「地图变暗」表达灾变
+constexpr int kMapShadeR = 150;
+constexpr int kMapShadeG = 132;
+constexpr int kMapShadeB = 116;
+
+QColor mapShade(const QColor& color) {
+    return QColor(color.red() * kMapShadeR / 255, color.green() * kMapShadeG / 255,
+        color.blue() * kMapShadeB / 255, color.alpha());
+}
+
+// 地表 / 岩石 / 树木共用一张表贴，开局按上面的色调预压暗一份，绘制时直接取用
+QImage shadeMapImage(const QImage& source) {
+    if (source.isNull()) {
+        return source;
+    }
+    QImage shaded = source.convertToFormat(QImage::Format_ARGB32);
+    for (int y = 0; y < shaded.height(); ++y) {
+        auto* line = reinterpret_cast<QRgb*>(shaded.scanLine(y));
+        for (int x = 0; x < shaded.width(); ++x) {
+            if (qAlpha(line[x]) == 0) {
+                continue;
+            }
+            line[x] = qRgba(qRed(line[x]) * kMapShadeR / 255, qGreen(line[x]) * kMapShadeG / 255,
+                qBlue(line[x]) * kMapShadeB / 255, qAlpha(line[x]));
+        }
+    }
+    return shaded.convertToFormat(QImage::Format_ARGB32_Premultiplied);
 }
 
 void drawGround(QPainter& painter, const QImage& tiles, bool hasTiles, Tile tile, int x, int y, const TileMap& map) {
@@ -296,6 +341,47 @@ QColor attackMarkerColor(const Player& player) {
     }
     return QColor(220, 48, 42, 210);  // 默认：红
 }
+
+// 天气的标识色：HUD 状态条与画面色调共用同一份配色
+QColor weatherAccent(WeatherKind kind) {
+    switch (kind) {
+    case WeatherKind::Rain:
+        return QColor(126, 166, 206);
+    case WeatherKind::Thunder:
+        return QColor(168, 190, 240);
+    case WeatherKind::Blizzard:
+        return QColor(198, 226, 246);
+    case WeatherKind::Hail:
+        return QColor(170, 206, 226);
+    case WeatherKind::Sandstorm:
+        return QColor(206, 172, 108);
+    case WeatherKind::Typhoon:
+        return QColor(134, 200, 196);
+    default:
+        return QColor(168, 148, 128);
+    }
+}
+
+// 天气的大气色调（全屏叠一层），alpha 会再乘上当前强度。
+// 分寸：地图本身已经压暗过一记，这里只再补一点「天阴下来了」的色偏
+QColor weatherTint(WeatherKind kind) {
+    switch (kind) {
+    case WeatherKind::Rain:
+        return QColor(26, 42, 64, 48);
+    case WeatherKind::Thunder:
+        return QColor(12, 16, 30, 78);
+    case WeatherKind::Blizzard:
+        return QColor(214, 232, 244, 76);
+    case WeatherKind::Hail:
+        return QColor(146, 178, 202, 42);
+    case WeatherKind::Sandstorm:
+        return QColor(196, 152, 84, 96);
+    case WeatherKind::Typhoon:
+        return QColor(26, 46, 58, 74);
+    default:
+        return QColor(0, 0, 0, 0);
+    }
+}
 }  // namespace
 
 int GameWidget::frameIndex(const SpriteAnim& anim, float time, bool loop, float fps) {
@@ -328,6 +414,9 @@ GameWidget::GameWidget(QWidget* parent) : QWidget(parent) {
         setCursor(Cursors::crosshair());
     }
     spritesOk_ = sprites_.load(findAssets());
+    if (spritesOk_) {
+        tilesDark_ = shadeMapImage(sprites_.tiles);
+    }
     canvas_ = QImage(kViewW, kViewH, QImage::Format_RGB32);
     vignette_ = QImage(kViewW, kViewH, QImage::Format_ARGB32_Premultiplied);
     vignette_.fill(Qt::transparent);
@@ -351,6 +440,7 @@ GameWidget::GameWidget(QWidget* parent) : QWidget(parent) {
         autoAim_ = settings.autoAim;
 #endif
         showFps_ = settings.showFps;
+        brightness_ = settings.brightness;
     }
 
     pausePanel_ = new QWidget(this);
@@ -375,6 +465,10 @@ GameWidget::GameWidget(QWidget* parent) : QWidget(parent) {
     addButton(pausePanel_, pauseLayout, "存档", [this] { saveGame(); });
     addButton(pausePanel_, pauseLayout, "主动结算", [this] { askSettle(); });
     addButton(pausePanel_, pauseLayout, "退出", [this] { leaveToMenu(); });
+
+    auto* pauseSettingsTitle = new QLabel("设置", pausePanel_);
+    pauseSettingsTitle->setAlignment(Qt::AlignCenter);
+    pauseLayout->addWidget(pauseSettingsTitle);
 
     auto* sfxRow = new QWidget(pausePanel_);
     auto* sfxLayout = new QHBoxLayout(sfxRow);
@@ -402,6 +496,31 @@ GameWidget::GameWidget(QWidget* parent) : QWidget(parent) {
     bgmLayout->addWidget(pauseBgmValue_);
     pauseLayout->addWidget(bgmRow);
 
+    // 画面亮度：和主菜单设置页共用 settings.json 里的同一个值
+    auto* brightRow = new QWidget(pausePanel_);
+    auto* brightLayout = new QHBoxLayout(brightRow);
+    brightLayout->setContentsMargins(0, 4, 0, 0);
+    auto* brightLabel = new QLabel("亮度", brightRow);
+    pauseBrightSlider_ = new QSlider(Qt::Horizontal, brightRow);
+    pauseBrightSlider_->setRange(50, 150);
+    pauseBrightSlider_->setToolTip("整幅游戏画面的明暗，100% 为默认。");
+    pauseBrightValue_ = new QLabel(brightRow);
+    pauseBrightValue_->setMinimumWidth(36);
+    brightLayout->addWidget(brightLabel);
+    brightLayout->addWidget(pauseBrightSlider_, 1);
+    brightLayout->addWidget(pauseBrightValue_);
+    pauseLayout->addWidget(brightRow);
+
+    // 天气系统开关：和主菜单设置页共用 settings.json 里的同一个值，关掉立刻转晴
+    auto* weatherRow = new QWidget(pausePanel_);
+    auto* weatherLayout = new QHBoxLayout(weatherRow);
+    weatherLayout->setContentsMargins(0, 4, 0, 0);
+    pauseWeatherCheck_ = new QCheckBox("天气系统", weatherRow);
+    pauseWeatherCheck_->setToolTip("开启后局内每隔一段时间刮起一场天灾：雨天、雷雨天、暴风雪、冰雹、沙尘暴、台风。\n"
+                                   "雷雨天会落雷、冰雹会砸落，都只伤怪物，不会伤到你。");
+    weatherLayout->addWidget(pauseWeatherCheck_);
+    pauseLayout->addWidget(weatherRow);
+
     auto syncPauseAudioUi = [this](const AppSettings& settings) {
         pauseSfxCheck_->setChecked(settings.sfxEnabled);
         pauseSfxSlider_->setValue(settings.sfxVolume);
@@ -411,6 +530,9 @@ GameWidget::GameWidget(QWidget* parent) : QWidget(parent) {
         pauseBgmSlider_->setValue(settings.bgmVolume);
         pauseBgmSlider_->setEnabled(settings.bgmEnabled);
         pauseBgmValue_->setText(QString("%1%").arg(settings.bgmVolume));
+        pauseBrightSlider_->setValue(settings.brightness);
+        pauseBrightValue_->setText(QString("%1%").arg(settings.brightness));
+        pauseWeatherCheck_->setChecked(settings.weather);
     };
     auto applyPauseAudio = [this](bool playUi) {
         AppSettings settings = Storage::loadSettings();
@@ -418,14 +540,21 @@ GameWidget::GameWidget(QWidget* parent) : QWidget(parent) {
         settings.sfxVolume = pauseSfxSlider_->value();
         settings.bgmEnabled = pauseBgmCheck_->isChecked();
         settings.bgmVolume = pauseBgmSlider_->value();
+        settings.brightness = pauseBrightSlider_->value();
+        settings.weather = pauseWeatherCheck_->isChecked();
         pauseSfxSlider_->setEnabled(settings.sfxEnabled);
         pauseSfxValue_->setText(QString("%1%").arg(settings.sfxVolume));
         pauseBgmSlider_->setEnabled(settings.bgmEnabled);
         pauseBgmValue_->setText(QString("%1%").arg(settings.bgmVolume));
+        pauseBrightValue_->setText(QString("%1%").arg(settings.brightness));
         Audio::instance().setSfxEnabled(settings.sfxEnabled);
         Audio::instance().setSfxVolume(settings.sfxVolume);
         Audio::instance().setBgmEnabled(settings.bgmEnabled);
         Audio::instance().setBgmVolume(settings.bgmVolume);
+        // 亮度立刻生效：画面每帧都会重绘，改完就能在暂停菜单背后看到差别
+        brightness_ = settings.brightness;
+        // 天气同样立刻生效：关掉时当前这一场直接收场，打开时按平静期节奏重新排下一场
+        session_.setWeatherEnabled(settings.weather);
         Storage::saveSettings(settings);
         if (playUi && settings.sfxEnabled) {
             Audio::instance().play(SfxId::Ui);
@@ -446,6 +575,8 @@ GameWidget::GameWidget(QWidget* parent) : QWidget(parent) {
         }
     });
     connect(pauseBgmSlider_, &QSlider::valueChanged, this, [applyPauseAudio](int) { applyPauseAudio(false); });
+    connect(pauseBrightSlider_, &QSlider::valueChanged, this, [applyPauseAudio](int) { applyPauseAudio(false); });
+    connect(pauseWeatherCheck_, &QCheckBox::toggled, this, [applyPauseAudio](bool) { applyPauseAudio(true); });
 
     guideText_ = new QLabel(pausePanel_);
     guideText_->setWordWrap(true);
@@ -499,6 +630,7 @@ GameWidget::GameWidget(QWidget* parent) : QWidget(parent) {
         confirmPanel_->hide();
         Audio::instance().playRefuseBgm();
         Audio::instance().playContinueVoice(femaleHero(session_.player().hero));
+        unlockAchievement(kAchKeepGoing);
         if (session_.paused() && !session_.ended()) {
             pausePanel_->show();
             pausePanel_->raise();
@@ -539,6 +671,7 @@ GameWidget::GameWidget(QWidget* parent) : QWidget(parent) {
         updateBgmDuck();
         Audio::instance().playRefuseBgm();
         Audio::instance().playContinueVoice(femaleHero(session_.player().hero));
+        unlockAchievement(kAchKeepGoing);
         setFocus();
     });
     voidPanel_->setObjectName("panel");
@@ -608,6 +741,17 @@ GameWidget::GameWidget(QWidget* parent) : QWidget(parent) {
     mimicPanel_ = new QWidget(this);
     auto* mimicLayout = new QVBoxLayout(mimicPanel_);
     mimicLayout->setContentsMargins(14, 12, 14, 12);
+    // 右上角的关闭按钮：触屏没有 Esc / T，暂停中再点一次「拟态」也不会响应，必须给一个 ✕
+    auto* mimicHeader = new QHBoxLayout();
+    mimicHeader->setContentsMargins(0, 0, 0, 0);
+    mimicHeader->addStretch(1);
+    auto* mimicClose = new QPushButton(QStringLiteral("×"), mimicPanel_);
+    mimicClose->setObjectName("mimicClose");
+    mimicClose->setFixedSize(30, 30);
+    mimicClose->setToolTip(QStringLiteral("关闭拟态图鉴"));
+    connect(mimicClose, &QPushButton::clicked, this, [this] { closeMimicPanel(); });
+    mimicHeader->addWidget(mimicClose);
+    mimicLayout->addLayout(mimicHeader);
     mimicLabel_ = new QLabel(mimicPanel_);
     mimicLabel_->setAlignment(Qt::AlignCenter);
     mimicLabel_->setWordWrap(true);
@@ -628,8 +772,52 @@ GameWidget::GameWidget(QWidget* parent) : QWidget(parent) {
     }
     mimicLayout->addLayout(mimicGrid);
     mimicPanel_->setObjectName("panel");
-    mimicPanel_->setStyleSheet("QWidget#panel { background: #101a10; border: 1px solid #4a7638; } QLabel { background: transparent; color: #cfe8c0; border: none; }");
+    mimicPanel_->setStyleSheet("QWidget#panel { background: #101a10; border: 1px solid #4a7638; }"
+                               "QLabel { background: transparent; color: #cfe8c0; border: none; }"
+                               "QPushButton#mimicClose { background: #16240f; color: #cfe8c0; border: 1px solid #4a7638;"
+                               " border-radius: 4px; font-size: 18px; font-weight: bold; padding: 0; }"
+                               "QPushButton#mimicClose:hover { background: #223616; color: #eaf7dd; }");
     mimicPanel_->hide();
+
+    // 改天：法师按下技能键后弹出，选一种天气（打开时时停）
+    weatherPanel_ = new QWidget(this);
+    auto* weatherPickLayout = new QVBoxLayout(weatherPanel_);
+    weatherPickLayout->setContentsMargins(14, 12, 14, 12);
+    auto* weatherPickHeader = new QHBoxLayout();
+    weatherPickHeader->setContentsMargins(0, 0, 0, 0);
+    weatherPickHeader->addStretch(1);
+    auto* weatherClose = new QPushButton(QStringLiteral("×"), weatherPanel_);
+    weatherClose->setObjectName("weatherClose");
+    weatherClose->setFixedSize(30, 30);
+    weatherClose->setToolTip(QStringLiteral("关闭，不改天气"));
+    connect(weatherClose, &QPushButton::clicked, this, [this] { closeWeatherPanel(); });
+    weatherPickHeader->addWidget(weatherClose);
+    weatherPickLayout->addLayout(weatherPickHeader);
+    weatherLabel_ = new QLabel(weatherPanel_);
+    weatherLabel_->setAlignment(Qt::AlignCenter);
+    weatherLabel_->setWordWrap(true);
+    weatherPickLayout->addWidget(weatherLabel_);
+    auto* weatherPickGrid = new QGridLayout();
+    weatherPickGrid->setSpacing(6);
+    for (int i = 0; i <= int(WeatherKind::Typhoon); ++i) {
+        const WeatherKind kind = WeatherKind(i);
+        auto* button = new QPushButton(weatherPanel_);
+        button->setMinimumSize(186, 62);
+        connect(button, &QPushButton::clicked, this, [this, kind] { pickWeather(kind); });
+        weatherButtons_.push_back(button);
+        weatherPickGrid->addWidget(button, i / 3, i % 3);
+    }
+    weatherPickLayout->addLayout(weatherPickGrid);
+    weatherPanel_->setObjectName("panel");
+    weatherPanel_->setStyleSheet("QWidget#panel { background: #101820; border: 1px solid #3f6a76; }"
+                                 "QLabel { background: transparent; color: #c8e0e8; border: none; }"
+                                 "QPushButton { background: #14232b; color: #d7ebf2; border: 1px solid #3f6a76;"
+                                 " border-radius: 4px; padding: 4px 6px; font-size: 15px; }"
+                                 "QPushButton:hover { background: #1c3340; color: #f2fbff; }"
+                                 "QPushButton#weatherClose { background: #14232b; color: #c8e0e8; border: 1px solid #3f6a76;"
+                                 " border-radius: 4px; font-size: 18px; font-weight: bold; padding: 0; }"
+                                 "QPushButton#weatherClose:hover { background: #1c3340; color: #f2fbff; }");
+    weatherPanel_->hide();
 
     auto* esc = new QShortcut(QKeySequence(Qt::Key_Escape), this);
     esc->setContext(Qt::WidgetWithChildrenShortcut);
@@ -673,6 +861,10 @@ void GameWidget::leaveToMenu() {
     revivePanel_->hide();
     mimicPanel_->hide();
     mimicOpen_ = false;
+    weatherPanel_->hide();
+    weatherPickOpen_ = false;
+    session_.cancelWeatherPick();
+    closeBagPanel();
     updateBgmDuck();
     releaseAllTouches();
     emit returnedToMenu();
@@ -704,7 +896,7 @@ void GameWidget::refreshGuide() {
     html += block(touch ? "长按攻击" : "长按", heavyAttackText(), "");
 #if (defined(Q_OS_WIN) || defined(Q_OS_LINUX)) && !defined(Q_OS_ANDROID)
     if (!touch) {
-        html += block("中键", SkillText{QStringLiteral("索敌"), QStringLiteral("开关自动锁定附近敌人，朝向和攻击转向锁定目标。")},
+        html += block("CapsLock", SkillText{QStringLiteral("索敌"), QStringLiteral("开关自动锁定附近敌人，朝向和攻击转向锁定目标。")},
             autoAim_ ? QStringLiteral("开启") : QStringLiteral("关闭"));
     }
 #endif
@@ -724,12 +916,25 @@ void GameWidget::refreshGuide() {
         if (skill == kSkillFlight || skill == kSkillJetpack) {
             return player.flying ? QString("飞行中") : QString("关");
         }
+        if (skill == kSkillThunderPunish) {
+            return player.thunderPunish
+                ? QString("开启中　每秒 -%1 MP　当前 %2").arg(int(kThunderPunishDrain)).arg(weatherName(session_.weather()))
+                : QString("关闭");
+        }
         if (skill == kSkillSeek) {
             return player.seekOn ? QString("开启") : QString("关闭");
         }
         if (skill == kSkillMirror) {
             return player.mirrorT > 0.f
                 ? QString("吸收 %1/%2　剩余 %3s").arg(int(player.mirrorAbsorbed)).arg(int(player.mirrorCap)).arg(player.mirrorT, 0, 'f', 1)
+                : "冷却 " + cdText(cd);
+        }
+        if (skill == kSkillWeather) {
+            return QString("当前 %1　冷却 %2").arg(weatherName(session_.weather())).arg(cdText(cd));
+        }
+        if (skill == kSkillErase) {
+            return player.eraseStage > 0
+                ? QString("前摇中　剩 %1s").arg(player.eraseT, 0, 'f', 1)
                 : "冷却 " + cdText(cd);
         }
         const float active = skill == kSkillBerserk ? player.berserkT
@@ -780,17 +985,37 @@ void GameWidget::refreshGuide() {
         html += progress("暴食", float(session_.devourCount()), float(kGluttonyDevours), player.talentGluttony,
             talentGluttonyDetail());
     }
+    // 天气：把六种天灾与各自的作用列清楚；设置里关掉天气系统后这一段不出现
+    if (session_.weatherEnabled()) {
+        html += "<p style='color:#e4d4c4; margin:12px 0 4px 0;'><b>天气</b></p>";
+        html += QString("<p style='margin:8px 0 10px 0;'><span style='color:#a89888;'>"
+                        "局内每隔一段时间刮起一场天灾，每场持续半分多钟，退场后有一段平静期，"
+                        "左上角状态条随时显示当前天气与剩余时间。<br>当前：<b>%1</b>%2<br>"
+                        "落雷与冰雹只会砸到怪物，不会伤到你；不想要天气的话，可以在「设置」里关掉天气系统。</span></p>")
+                    .arg(weatherName(session_.weather()))
+                    .arg(session_.weather() == WeatherKind::Clear
+                            ? QString()
+                            : QStringLiteral("　剩 %1 秒").arg(session_.weatherRemain(), 0, 'f', 0));
+        for (int i = 1; i <= int(WeatherKind::Typhoon); ++i) {
+            const WeatherKind kind = WeatherKind(i);
+            html += QString("<p style='margin:4px 0;'><b>%1</b>　<span style='color:#a89888;'>%2</span></p>")
+                        .arg(weatherName(kind), weatherDetail(kind));
+        }
+    }
     if (player.slimeBody) {
         html += "<p style='color:#e4d4c4; margin:12px 0 4px 0;'><b>玩法　史莱姆之躯</b></p>";
-        html += "<p style='margin:8px 0 10px 0;'><span style='color:#a89888;'>"
-                "受到的伤害 -10%，「恢复」改为回复 20% 最大生命与体力；腐蚀地面也不再伤到你（同类相认）。<br>"
-                "按 T 打开拟态图鉴（打开时时停）选择外形：只能选已吞噬的怪物——史莱姆之躯下击杀即吞噬；"
-                "自己原本的躯体与史莱姆本体会默认解锁。<br>"
-                "每个外形附带一个左 Ctrl 技能与一项属性加成，换形态立即生效。</span></p>";
+        html += QString("<p style='margin:8px 0 10px 0;'><span style='color:#a89888;'>"
+                        "受到的伤害 -10%，「恢复」改为回复 20% 最大生命与体力；腐蚀地面也不再伤到你（同类相认）。<br>"
+                        "%1 打开拟态图鉴（打开时时停，点面板右上角 ✕ 关闭）选择外形：只能选已吞噬的怪物——"
+                        "史莱姆之躯下击杀即吞噬；自己原本的躯体与史莱姆本体会默认解锁。<br>"
+                        "每个外形附带一个 %2 技能与一项属性加成，换形态立即生效。</span></p>")
+                    .arg(touch ? QStringLiteral("点右上角「拟态」") : QStringLiteral("按 T"))
+                    .arg(touch ? QStringLiteral("「形态技」") : QStringLiteral("左 Ctrl"));
         for (int i = 0; i < int(MimicForm::Count); ++i) {
             const MimicForm form = MimicForm(i);
             const MimicText text = mimicText(form);
-            const bool owned = form == MimicForm::Hero || session_.devoured(form);
+            // 原本的躯体与史莱姆本体默认解锁，其余形态要吞噬过才能选
+            const bool owned = form == MimicForm::Hero || form == MimicForm::Slime || session_.devoured(form);
             html += QString("<p style='margin:4px 0;'><b>%1</b>　%2<br><span style='color:%3;'>%4　%5</span></p>")
                         .arg(owned ? text.name : QString("%1（未吞噬）").arg(text.name))
                         .arg(player.mimic == form ? QStringLiteral("« 当前") : QString())
@@ -809,12 +1034,31 @@ void GameWidget::refreshGuide() {
                 "它靠冲撞、弹跳砸击与腐蚀水弹进攻，途经处的地面会被腐蚀（约 10 秒后自行恢复），踩上去的玩家与怪物都持续掉血——"
                 "护盾、飞行、跳跃、史莱姆一族与史莱姆之躯都能免疫腐蚀地面。</span></p>";
     }
-    if (const int charms = session_.talismanCount()) {
-        html += QString("<p style='color:#e4d4c4; margin:12px 0 4px 0;'><b>物品</b></p>");
-        html += QString("<p style='margin:8px 0 10px 0;'><b>%1 x%2</b><br><span style='color:#a89888;'>%3</span></p>")
-            .arg(itemText(kItemReturnTalisman).name)
-            .arg(charms)
-            .arg(itemText(kItemReturnTalisman).detail);
+    // 传送阵：场上刷出来了才写这一段
+    if (!session_.teleportPads().empty()) {
+        html += "<p style='color:#e4d4c4; margin:12px 0 4px 0;'><b>玩法　传送阵</b></p>";
+        html += "<p style='margin:8px 0 10px 0;'><span style='color:#a89888;'>"
+                "离迷宫遗迹 / 浅水区太远时，附近画面外会随机刷出一块 3×3 的紫色符文传送阵；"
+                "画面边缘的紫色箭头指向它并标着距离。踩上去会一直显示「跳跃触发」与它通往的地点，"
+                "在阵上起跳即传送过去，落地后有一段短暂的护身时间。</span></p>";
+    }
+    // 背包：获得的物品都收在这里（画面上不再有数量文字），说明页把全包内容列一遍
+    if (!session_.bag().empty()) {
+        html += QString("<p style='color:#e4d4c4; margin:12px 0 4px 0;'><b>背包</b></p>");
+        html += QString("<p style='margin:8px 0 4px 0;'><span style='color:#a89888;'>"
+                        "%1开关背包面板，鼠标悬停在物品格上（触屏点按）看物品说明。</span></p>")
+                    .arg(touch ? QStringLiteral("点右上角「背包」按钮（或面板里的关闭键）")
+                               : QStringLiteral("按 B（或点面板右上角的关闭键）"));
+        for (const Item& item : session_.bag()) {
+            const ItemText text = itemText(item.kind);
+            // 物品名称按类别上色：符咒红、核心绿（与背包面板同一份配色）
+            html += QString("<p style='margin:8px 0 10px 0;'><b style='color:%1;'>%2 x%3</b><br>"
+                            "<span style='color:#a89888;'>%4</span></p>")
+                .arg(itemNameColor(item.kind).name())
+                .arg(text.name)
+                .arg(item.count)
+                .arg(text.detail);
+        }
     }
     if (session_.cursed()) {
         html += QString("<p style='color:#e4d4c4; margin:12px 0 4px 0;'><b>诅咒</b></p>");
@@ -861,6 +1105,10 @@ void GameWidget::prepareNew(HeroClass hero, int skillD, int skillF, int skillC, 
     pendingSeed_ = seed == 0 ? 1u : seed;
     pendingRunId_ = runId == 0 ? 1u : runId;
     particles_.clear();
+    // 上一局的雨雪不许飘进新的一局
+    weather_.clear();
+    weatherSpawnAcc_ = {};
+    weatherTime_ = 0.f;
     endCommitted_ = false;
     updateBgmDuck();
     // 新的一局：结算后一直放的 5 号曲到此为止，换回 1 号循环。
@@ -889,6 +1137,9 @@ void GameWidget::prepareNewStepRuin() {
 void GameWidget::prepareContinue(const QJsonObject& game) {
     beginPrepare();
     particles_.clear();
+    weather_.clear();
+    weatherSpawnAcc_ = {};
+    weatherTime_ = 0.f;
     endCommitted_ = false;
     updateBgmDuck();
     // 新的一局：结算后一直放的 5 号曲到此为止，换回 1 号循环
@@ -900,7 +1151,11 @@ void GameWidget::prepareContinue(const QJsonObject& game) {
 // 准备收尾：预热首帧与 HUD 字形缓存（此时还不跑模拟，加载页可能还要停留一会儿）
 void GameWidget::prepareFinish() {
     // 新开局与继续存档都从这里收尾：设置页只在主菜单能进，开局前读一次就能即时生效
-    showFps_ = Storage::loadSettings().showFps;
+    const AppSettings settings = Storage::loadSettings();
+    showFps_ = settings.showFps;
+    brightness_ = settings.brightness;
+    // 天气系统：设置关掉时本局不起风，存档里带来的天气也一并收掉
+    session_.setWeatherEnabled(settings.weather);
     renderFrameToCanvas();
     warmUpHud();
 }
@@ -910,6 +1165,8 @@ void GameWidget::startRun() {
     clock_.restart();
     preparing_ = false;
     running_ = true;
+    // 「第一次进行一局游戏」：新开局与继续存档都走这里，只会在首次解锁
+    unlockAchievement(kAchWorldBeyond);
     setFocus();
 }
 
@@ -921,9 +1178,15 @@ void GameWidget::resetOverlays() {
     revivePanel_->hide();
     mimicPanel_->hide();
     mimicOpen_ = false;
+    // 改天的选择面板也一并收起（Session 里的选择状态跟着清掉）
+    weatherPanel_->hide();
+    weatherPickOpen_ = false;
+    session_.cancelWeatherPick();
     // 新的一局天赋面板回到折叠态
     talentHudOpen_ = false;
     talentHudRect_ = QRect();
+    // 背包面板也一并收起
+    closeBagPanel();
 }
 
 void GameWidget::setPaused(bool paused) {
@@ -935,10 +1198,18 @@ void GameWidget::setPaused(bool paused) {
     session_.setPaused(paused);
     confirmPanel_->hide();
     pausePanel_->setVisible(paused);
+    if (paused) {
+        // 暂停菜单压住一切：背包与改天的选择面板跟着收起，免得两层叠在一起
+        closeBagPanel();
+        weatherPanel_->hide();
+        weatherPickOpen_ = false;
+        session_.cancelWeatherPick();
+    }
     // 任何界面都不再压 BGM：暂停菜单弹出时背景音乐照常放
     if (declined) {
         Audio::instance().playRefuseBgm();
         Audio::instance().playContinueVoice(femaleHero(session_.player().hero));
+        unlockAchievement(kAchKeepGoing);
     }
     if (paused) {
         const AppSettings settings = Storage::loadSettings();
@@ -946,6 +1217,7 @@ void GameWidget::setPaused(bool paused) {
         QSignalBlocker b2(pauseSfxSlider_);
         QSignalBlocker b3(pauseBgmCheck_);
         QSignalBlocker b4(pauseBgmSlider_);
+        QSignalBlocker b5(pauseBrightSlider_);
         pauseSfxCheck_->setChecked(settings.sfxEnabled);
         pauseSfxSlider_->setValue(settings.sfxVolume);
         pauseSfxSlider_->setEnabled(settings.sfxEnabled);
@@ -954,6 +1226,11 @@ void GameWidget::setPaused(bool paused) {
         pauseBgmSlider_->setValue(settings.bgmVolume);
         pauseBgmSlider_->setEnabled(settings.bgmEnabled);
         pauseBgmValue_->setText(QString("%1%").arg(settings.bgmVolume));
+        pauseBrightSlider_->setValue(settings.brightness);
+        pauseBrightValue_->setText(QString("%1%").arg(settings.brightness));
+        brightness_ = settings.brightness;
+        QSignalBlocker b6(pauseWeatherCheck_);
+        pauseWeatherCheck_->setChecked(settings.weather);
         refreshGuide();
         pausePanel_->raise();
         layoutOverlays();
@@ -963,9 +1240,19 @@ void GameWidget::setPaused(bool paused) {
 }
 
 void GameWidget::togglePause() {
+    // 改天的选择面板开着时，Esc / Tab 先收面板（视同放弃，不消耗 MP 与冷却）
+    if (weatherPickOpen_) {
+        closeWeatherPanel();
+        return;
+    }
     // 拟态图鉴开着时，Esc / Tab 先关图鉴而不是弹暂停菜单
     if (mimicOpen_) {
         closeMimicPanel();
+        return;
+    }
+    // 背包打开时时停中：Esc 先收背包，而不是把游戏恢复成「暂停菜单」那一层
+    if (bagOpen_) {
+        closeBagPanel();
         return;
     }
     if (session_.ended() || (voidPanel_ && voidPanel_->isVisible()) || (revivePanel_ && revivePanel_->isVisible())) {
@@ -989,6 +1276,14 @@ void GameWidget::saveGame() {
         toast_ = "存档失败";
         toastTime_ = 1.3f;
     }
+}
+
+void GameWidget::unlockAchievement(const QString& id) {
+    if (!Storage::unlockAchievement(id)) {
+        return;
+    }
+    toast_ = QStringLiteral("成就解锁　%1").arg(achievementText(id).name);
+    toastTime_ = 2.6f;
 }
 
 void GameWidget::askSettle() {
@@ -1048,9 +1343,11 @@ void GameWidget::showRevivePrompt() {
 void GameWidget::refreshMimicPanel() {
     const bool slime = session_.slimeBody();
     if (slime) {
-        mimicLabel_->setText(QStringLiteral("拟态　点击选择要幻化的外形　Esc / T 关闭\n"
-                                            "已吞噬 %1 只怪物　左 Ctrl 使用该形态的技能")
-                                 .arg(session_.devourCount()));
+        mimicLabel_->setText(QStringLiteral("拟态　点击选择要幻化的外形　%1\n"
+                                            "已吞噬 %2 只怪物　%3 使用该形态的技能")
+                                 .arg(touchUi_ ? QStringLiteral("点右上角 ✕ 关闭") : QStringLiteral("Esc / T 关闭"))
+                                 .arg(session_.devourCount())
+                                 .arg(touchUi_ ? QStringLiteral("「形态技」") : QStringLiteral("左 Ctrl")));
     } else {
         mimicLabel_->setText(QStringLiteral("尚未转化为史莱姆之躯"));
     }
@@ -1058,7 +1355,8 @@ void GameWidget::refreshMimicPanel() {
         const MimicForm form = MimicForm(i);
         QPushButton* button = mimicButtons_[i];
         const MimicText text = mimicText(form);
-        const bool owned = form == MimicForm::Hero || session_.devoured(form);
+        // 原本的躯体与史莱姆本体默认解锁，其余形态要吞噬过才能选
+        const bool owned = form == MimicForm::Hero || form == MimicForm::Slime || session_.devoured(form);
         const bool current = slime && session_.mimicForm() == form;
         button->setIcon(mimicIcon(form));
         button->setEnabled(slime && owned);
@@ -1080,7 +1378,7 @@ void GameWidget::toggleMimicPanel() {
         return;
     }
     // 别的模态面板开着时不开图鉴，避免叠在一起
-    if (pausePanel_->isVisible() || resultPanel_->isVisible() || confirmPanel_->isVisible()
+    if (weatherPickOpen_ || pausePanel_->isVisible() || resultPanel_->isVisible() || confirmPanel_->isVisible()
         || revivePanel_->isVisible() || voidPanel_->isVisible()) {
         return;
     }
@@ -1110,6 +1408,340 @@ void GameWidget::closeMimicPanel() {
     setFocus();
 }
 
+// —— 背包：B 键 / 触屏右上角「背包」按钮开关。和设置（暂停菜单）一致：打开即时停，
+// BGM 只是压低不停播；触屏另有面板右上角的 ✕ 关闭键（手机没有 B 键）
+void GameWidget::toggleBagPanel() {
+    if (bagOpen_) {
+        closeBagPanel();
+        return;
+    }
+    if (!running_ || session_.ended() || session_.player().state == ActorState::Dead) {
+        return;
+    }
+    // 别的模态面板开着时不叠背包
+    if (session_.paused() || pausePanel_->isVisible() || resultPanel_->isVisible()
+        || confirmPanel_->isVisible() || revivePanel_->isVisible() || voidPanel_->isVisible()
+        || mimicPanel_->isVisible()) {
+        return;
+    }
+    bagOpen_ = true;
+    bagSelected_ = -1;
+    // 时停：暂停模拟，但不弹暂停菜单；BGM 与设置界面一样走压低而不是停播
+    session_.setPaused(true);
+    updateBgmDuck();
+}
+
+void GameWidget::closeBagPanel() {
+    if (!bagOpen_) {
+        return;
+    }
+    bagOpen_ = false;
+    bagSelected_ = -1;
+    bagPanelRect_ = QRect();
+    bagCloseRect_ = QRect();
+    updateBgmDuck();
+    if (running_ && !session_.ended() && !pausePanel_->isVisible() && !mimicOpen_) {
+        session_.setPaused(false);
+    }
+}
+
+// —— 改天：法师技能落地到选择面板。Session 只置起请求，这里负责时停与按钮。
+// 选中才结算 MP / 冷却，取消（✕ / Esc）完全免费。
+void GameWidget::openWeatherPanel() {
+    // 请求已经消费掉：面板弹不出来就把 Session 里的选择状态收干净，免得技能键被永久卡住
+    if (weatherPickOpen_ || !running_ || session_.ended() || !session_.weatherPickOpen()
+        || session_.player().state == ActorState::Dead) {
+        session_.cancelWeatherPick();
+        return;
+    }
+    // 别的模态面板开着时不叠（暂停中本来也跑不到这里）
+    if (pausePanel_->isVisible() || resultPanel_->isVisible() || confirmPanel_->isVisible()
+        || revivePanel_->isVisible() || voidPanel_->isVisible()) {
+        session_.cancelWeatherPick();
+        return;
+    }
+    closeBagPanel();
+    closeMimicPanel();
+    weatherPickOpen_ = true;
+    refreshWeatherPanel();
+    // 时停：暂停模拟，但不弹暂停菜单
+    session_.setPaused(true);
+    weatherPanel_->show();
+    weatherPanel_->raise();
+    layoutOverlays();
+    updateBgmDuck();
+}
+
+void GameWidget::refreshWeatherPanel() {
+    const WeatherKind current = session_.weather();
+    weatherLabel_->setText(QStringLiteral("改天：选择接下来要刮的天气（消耗 %1 MP）\n"
+                                          "选中的天气立刻生效；点 ✕ 或按 Esc 放弃，不消耗 MP 与冷却")
+                               .arg(int(kWeatherPickMp)));
+    for (int i = 0; i < weatherButtons_.size(); ++i) {
+        const WeatherKind kind = WeatherKind(i);
+        QPushButton* button = weatherButtons_[i];
+        button->setText(QString("%1%2\n%3")
+                .arg(current == kind ? QStringLiteral("» ") : QString())
+                .arg(weatherName(kind))
+                .arg(weatherBrief(kind)));
+        button->setToolTip(weatherDetail(kind));
+    }
+}
+
+void GameWidget::pickWeather(WeatherKind kind) {
+    if (!weatherPickOpen_) {
+        return;
+    }
+    weatherPickOpen_ = false;
+    weatherPanel_->hide();
+    // 选中这一刻才扣 MP 与进冷却
+    session_.chooseWeather(kind);
+    updateBgmDuck();
+    if (running_ && !session_.ended() && !pausePanel_->isVisible() && !mimicOpen_ && !bagOpen_) {
+        session_.setPaused(false);
+    }
+    setFocus();
+}
+
+void GameWidget::closeWeatherPanel() {
+    if (!weatherPickOpen_ && !weatherPanel_->isVisible()) {
+        return;
+    }
+    weatherPickOpen_ = false;
+    weatherPanel_->hide();
+    session_.cancelWeatherPick();
+    updateBgmDuck();
+    if (running_ && !session_.ended() && !pausePanel_->isVisible() && !mimicOpen_ && !bagOpen_) {
+        session_.setPaused(false);
+    }
+    setFocus();
+}
+
+// 面板几何：手机按屏幕高度缩放，桌面端用固定像素（与其它 HUD 面板同规格）
+GameWidget::BagLayout GameWidget::bagLayout(const QRect& view) const {
+    const qreal u = touchUi_ ? touchUnit() : 0.0;
+    BagLayout layout;
+    layout.cols = touchUi_ ? 4 : 5;
+    layout.cell = touchUi_ ? std::max(34, int(u * 0.075)) : 46;
+    layout.gap = touchUi_ ? std::max(4, int(u * 0.012)) : 6;
+    layout.pad = touchUi_ ? std::max(8, int(u * 0.022)) : 10;
+    layout.titleH = touchUi_ ? std::max(18, int(u * 0.04)) : 20;
+    const int count = int(session_.bag().size());
+    const int rows = count <= 0 ? 1 : (count + layout.cols - 1) / layout.cols;
+    layout.rows = std::min(4, std::max(1, rows));
+    const int gridW = layout.cols * layout.cell + (layout.cols - 1) * layout.gap;
+    const int gridH = layout.rows * layout.cell + (layout.rows - 1) * layout.gap;
+    const int panelW = gridW + layout.pad * 2;
+    const int panelH = layout.titleH + gridH + layout.pad * 2;
+    layout.panel = QRect(view.x() + (view.width() - panelW) / 2, view.y() + (view.height() - panelH) / 2,
+        panelW, panelH);
+    return layout;
+}
+
+int GameWidget::bagCellAt(const QPoint& viewPos) const {
+    if (!bagOpen_ || !bagPanelRect_.contains(viewPos)) {
+        return -1;
+    }
+    const BagLayout layout = bagLayout(viewRect());
+    // 面板最多画得下 rows * cols 格，多出来的物品不参与命中
+    const int count = std::min<int>(int(session_.bag().size()), layout.rows * layout.cols);
+    for (int i = 0; i < count; ++i) {
+        const int row = i / layout.cols;
+        const int col = i % layout.cols;
+        const QRect cell(layout.panel.x() + layout.pad + col * (layout.cell + layout.gap),
+            layout.panel.y() + layout.pad + layout.titleH + row * (layout.cell + layout.gap),
+            layout.cell, layout.cell);
+        if (cell.contains(viewPos)) {
+            return i;
+        }
+    }
+    return -1;
+}
+
+const QImage& GameWidget::itemIcon(int kind) {
+    auto it = itemIcons_.find(kind);
+    if (it != itemIcons_.end()) {
+        return it.value();
+    }
+    // things/ 在桌面是 assets/things，安卓是 qrc 的 /assets/things，两处路径一致。
+    // 原图有上千像素，按格子尺寸缩一次存下来，省得每帧重缩
+    QImage image;
+    const QString file = itemIconFile(kind);
+    if (!file.isEmpty()) {
+        const QImage raw(Platform::assetDir() + "/things/" + file);
+        if (!raw.isNull()) {
+            const int target = std::max(16, bagLayout(viewRect()).cell - 6);
+            image = raw.scaled(target, target, Qt::KeepAspectRatio, Qt::SmoothTransformation);
+        }
+    }
+    return *itemIcons_.insert(kind, image);
+}
+
+QPoint GameWidget::pointerLocal() const {
+#if defined(Q_OS_ANDROID)
+    // 触屏没有悬停：只有接过真实鼠标（或被送过悬停事件）时才认指针位置
+    return mouseAim_ ? mousePos_ : QPoint(-1, -1);
+#else
+    return mapFromGlobal(QCursor::pos());
+#endif
+}
+
+void GameWidget::drawBagPanel(QPainter& painter, const QRect& view) {
+    const std::vector<Item>& bag = session_.bag();
+    const BagLayout layout = bagLayout(view);
+    bagPanelRect_ = layout.panel;
+    const qreal u = touchUi_ ? touchUnit() : 0.0;
+    const int hintPx = touchUi_ ? std::max(9, int(u * 0.022)) : 9;
+    const int namePx = touchUi_ ? std::max(10, int(u * 0.024)) : 10;
+    const int detailPx = touchUi_ ? std::max(10, int(u * 0.022)) : 10;
+
+    painter.save();
+    painter.setRenderHint(QPainter::Antialiasing, true);
+    painter.setPen(Qt::NoPen);
+    painter.setBrush(QColor(10, 9, 8, 228));
+    painter.drawRoundedRect(layout.panel, 6, 6);
+    painter.setBrush(Qt::NoBrush);
+    painter.setPen(QColor(122, 88, 62));
+    painter.drawRoundedRect(layout.panel.adjusted(0, 0, -1, -1), 6, 6);
+
+    // 指针位置先算出来：标题栏的关闭键也要用它做悬停高亮
+    const QPoint pointer = pointerLocal();
+
+    const QRect titleRect(layout.panel.x() + layout.pad, layout.panel.y() + layout.pad / 2,
+        layout.panel.width() - layout.pad * 2, layout.titleH);
+    painter.setFont(QFont(Platform::uiFontFamily(), touchUi_ ? hintPx + 3 : 12, QFont::Bold));
+    painter.setPen(QColor(228, 212, 188));
+    painter.drawText(titleRect, Qt::AlignLeft | Qt::AlignVCenter, QStringLiteral("背包"));
+    // 右上角给 ✕ 关闭键留出位置（手机没有 B 键，这是主要的关闭方式）
+    const int closeR = touchUi_ ? std::max(13, int(u * 0.032)) : 11;
+    const QPoint closeCenter(layout.panel.right() - layout.pad - closeR,
+        layout.panel.y() + layout.pad / 2 + layout.titleH / 2);
+    bagCloseRect_ = QRect(closeCenter.x() - closeR, closeCenter.y() - closeR, closeR * 2, closeR * 2);
+    painter.setFont(QFont(Platform::uiFontFamily(), hintPx));
+    painter.setPen(QColor(150, 138, 124));
+    painter.drawText(QRect(titleRect.x(), titleRect.y(), titleRect.width() - closeR * 2 - 6, titleRect.height()),
+        Qt::AlignRight | Qt::AlignVCenter,
+        touchUi_ ? QStringLiteral("点右上角关闭") : QStringLiteral("B 关闭　悬停看说明"));
+
+    // ✕ 关闭键：自绘线条，不依赖字体里有没有 ✕ 字形（安卓常缺）
+    const bool closeHot = bagCloseRect_.contains(pointer);
+    painter.setPen(Qt::NoPen);
+    painter.setBrush(closeHot ? QColor(196, 92, 72, 235) : QColor(38, 30, 26, 235));
+    painter.drawEllipse(bagCloseRect_);
+    painter.setBrush(Qt::NoBrush);
+    painter.setPen(QPen(closeHot ? QColor(248, 216, 198) : QColor(164, 132, 112), 2));
+    const qreal arm = closeR * 0.45;
+    painter.drawLine(QPointF(closeCenter.x() - arm, closeCenter.y() - arm),
+        QPointF(closeCenter.x() + arm, closeCenter.y() + arm));
+    painter.drawLine(QPointF(closeCenter.x() + arm, closeCenter.y() - arm),
+        QPointF(closeCenter.x() - arm, closeCenter.y() + arm));
+
+    // 鼠标悬停优先，其次是触屏点选的格子
+    const int visible = std::min<int>(int(bag.size()), layout.rows * layout.cols);
+    const int hover = pointer.x() >= 0 ? bagCellAt(pointer) : -1;
+    const int focus = hover >= 0 ? hover
+        : (bagSelected_ >= 0 && bagSelected_ < visible ? bagSelected_ : -1);
+
+    for (int i = 0; i < visible; ++i) {
+        const int row = i / layout.cols;
+        const int col = i % layout.cols;
+        const QRect cell(layout.panel.x() + layout.pad + col * (layout.cell + layout.gap),
+            layout.panel.y() + layout.pad + layout.titleH + row * (layout.cell + layout.gap),
+            layout.cell, layout.cell);
+        painter.setPen(Qt::NoPen);
+        painter.setBrush(QColor(26, 22, 19, 210));
+        painter.drawRect(cell);
+        painter.setBrush(Qt::NoBrush);
+        painter.setPen(QPen(i == focus ? QColor(232, 176, 128) : QColor(90, 58, 50), i == focus ? 2 : 1));
+        painter.drawRect(cell.adjusted(0, 0, -1, -1));
+
+        const QRect inner = cell.adjusted(3, 3, -3, -3);
+        const QImage& icon = itemIcon(bag[i].kind);
+        if (icon.isNull()) {
+            // 缺图时退化成物品名首字（同名称配色），至少能认出是哪件
+            painter.setFont(QFont(Platform::uiFontFamily(), namePx, QFont::Bold));
+            painter.setPen(itemNameColor(bag[i].kind));
+            painter.drawText(cell, Qt::AlignCenter, bag[i].name.left(1));
+        } else {
+            // 图标在 itemIcon 里已经缩到格子尺寸，这里只负责居中
+            painter.drawImage(QPointF(inner.x() + (inner.width() - icon.width()) * 0.5,
+                                  inner.y() + (inner.height() - icon.height()) * 0.5),
+                icon);
+        }
+        // 数量角标：只有 1 个也照样标出来，免得看着像「没拿到」
+        if (bag[i].count > 0) {
+            painter.setFont(QFont(Platform::uiFontFamily(), hintPx, QFont::Bold));
+            const QFontMetrics fm(painter.font());
+            const QString num = QString("x%1").arg(bag[i].count);
+            const QRect badge(cell.right() - fm.horizontalAdvance(num) - 3, cell.bottom() - fm.height() + 1,
+                fm.horizontalAdvance(num) + 2, fm.height());
+            painter.setPen(Qt::NoPen);
+            painter.setBrush(QColor(12, 10, 9, 225));
+            painter.drawRect(badge);
+            painter.setPen(QColor(240, 228, 212));
+            painter.drawText(badge, Qt::AlignRight | Qt::AlignVCenter, num);
+        }
+    }
+    if (bag.empty()) {
+        painter.setFont(QFont(Platform::uiFontFamily(), touchUi_ ? hintPx + 2 : 11));
+        painter.setPen(QColor(140, 128, 116));
+        painter.drawText(QRect(layout.panel.x(), layout.panel.y() + layout.pad + layout.titleH,
+                             layout.panel.width(), layout.cell),
+            Qt::AlignCenter, QStringLiteral("空空如也"));
+    }
+
+    // 物品详情：桌面跟着指针走，触屏固定在面板下缘（挑不到指针）
+    if (focus >= 0) {
+        const ItemText text = itemText(bag[focus].kind);
+        const int infoW = touchUi_ ? std::min<int>(layout.panel.width(), int(u * 0.52)) : 268;
+        const int infoPad = 8;
+        const QFont nameFont(Platform::uiFontFamily(), namePx + 1, QFont::Bold);
+        const QFont detailFont(Platform::uiFontFamily(), detailPx);
+        painter.setFont(detailFont);
+        const QRect detailBound = painter.boundingRect(QRect(0, 0, infoW - infoPad * 2, 4096),
+            Qt::TextWordWrap, text.detail);
+        const QFontMetrics nameFm(nameFont);
+        const QRect info(0, 0, infoW, infoPad * 2 + nameFm.height() + 4 + detailBound.height());
+        QRect placed = info;
+        if (touchUi_ || pointer.x() < 0) {
+            placed.moveTo(layout.panel.x() + (layout.panel.width() - info.width()) / 2,
+                std::min(layout.panel.bottom() + 8, view.bottom() - info.height() - 4));
+        } else {
+            placed.moveTo(pointer.x() + 16, pointer.y() + 16);
+            if (placed.right() > view.right() - 4) {
+                placed.moveLeft(pointer.x() - info.width() - 16);
+            }
+            if (placed.left() < view.left() + 4) {
+                placed.moveLeft(view.left() + 4);
+            }
+            if (placed.bottom() > view.bottom() - 4) {
+                placed.moveTop(view.bottom() - info.height() - 4);
+            }
+            if (placed.top() < view.top() + 4) {
+                placed.moveTop(view.top() + 4);
+            }
+        }
+        painter.setPen(Qt::NoPen);
+        painter.setBrush(QColor(8, 7, 6, 238));
+        painter.drawRoundedRect(placed, 5, 5);
+        painter.setBrush(Qt::NoBrush);
+        painter.setPen(QColor(140, 104, 72));
+        painter.drawRoundedRect(placed.adjusted(0, 0, -1, -1), 5, 5);
+        painter.setFont(nameFont);
+        // 物品名称按类别上色：符咒红、核心绿
+        painter.setPen(itemNameColor(bag[focus].kind));
+        const QRect nameRect(placed.x() + infoPad, placed.y() + infoPad, placed.width() - infoPad * 2, nameFm.height());
+        // 名称后面始终带数量（与格子上的角标一致）
+        painter.drawText(nameRect, Qt::AlignLeft | Qt::AlignVCenter,
+            QString("%1 x%2").arg(text.name).arg(bag[focus].count));
+        painter.setFont(detailFont);
+        painter.setPen(QColor(178, 162, 142));
+        painter.drawText(QRect(nameRect.x(), nameRect.bottom() + 4, detailBound.width(), detailBound.height()),
+            Qt::TextWordWrap, text.detail);
+    }
+    painter.restore();
+}
+
 void GameWidget::commitEnd() {
     if (!session_.ended() || endCommitted_) {
         return;
@@ -1126,6 +1758,10 @@ void GameWidget::commitEnd() {
     revivePanel_->hide();
     mimicPanel_->hide();
     mimicOpen_ = false;
+    weatherPanel_->hide();
+    weatherPickOpen_ = false;
+    session_.cancelWeatherPick();
+    closeBagPanel();
     releaseAllTouches();
     Records records = Storage::loadRecords();
     if (session_.time() > records.bestTime) {
@@ -1172,6 +1808,8 @@ void GameWidget::layoutOverlays() {
     revivePanel_->move((width() - revivePanel_->width()) / 2, (height() - revivePanel_->height()) / 2);
     mimicPanel_->adjustSize();
     mimicPanel_->move((width() - mimicPanel_->width()) / 2, (height() - mimicPanel_->height()) / 2);
+    weatherPanel_->adjustSize();
+    weatherPanel_->move((width() - weatherPanel_->width()) / 2, (height() - weatherPanel_->height()) / 2);
     // 面板显隐大多走这里，顺便同步一次 BGM 压音状态
     updateBgmDuck();
 }
@@ -1181,7 +1819,9 @@ void GameWidget::updateBgmDuck() {
         || (confirmPanel_ && confirmPanel_->isVisible())
         || (voidPanel_ && voidPanel_->isVisible())
         || (revivePanel_ && revivePanel_->isVisible())
-        || (mimicPanel_ && mimicPanel_->isVisible());
+        || (mimicPanel_ && mimicPanel_->isVisible())
+        || (weatherPanel_ && weatherPanel_->isVisible())
+        || bagOpen_;
     Audio::instance().setBgmDucked(ducked);
 }
 
@@ -1237,7 +1877,12 @@ void GameWidget::tick() {
             }
             input_.clearEdges();
         }
+        // 改天：法师按下技能键后弹天气选择面板（打开时时停，选中才扣 MP 与进冷却）
+        if (session_.consumeWeatherPickRequest()) {
+            openWeatherPanel();
+        }
         updateParticles(frame);
+        updateWeather(frame);
     }
     if (session_.ended()) {
         session_.consumeVoidPrompt();
@@ -1375,6 +2020,24 @@ void GameWidget::spawnVfx(const VfxEvent& event) {
         spray(6 + int(r / 3.f), r * 1.2f, r * 2.6f, 20.f, 70.f, 210.f, 0.3f, 0.6f, 2.f, 3.5f, 6.f, r * 0.35f, acid, 3, true);
         break;
     }
+    case VfxKind::Hail: {
+        // 冰雹砸中怪：溅起一圈白蓝冰屑
+        static const QColor ice[] = {QColor(226, 244, 255), QColor(176, 214, 244), QColor(255, 255, 255)};
+        const float r = std::max(4.f, event.radius);
+        spray(5 + int(r / 3.f), r * 1.4f, r * 3.2f, 20.f, 70.f, 220.f, 0.22f, 0.45f, 1.5f, 3.f, 8.f, r * 0.3f,
+            ice, 3, true);
+        break;
+    }
+    case VfxKind::Thunder: {
+        // 落雷落点：白蓝色的电火花贴着地面炸开
+        static const QColor spark[] = {QColor(214, 236, 255), QColor(140, 190, 255), QColor(255, 255, 255)};
+        static const QColor dust[] = {QColor(150, 150, 156), QColor(104, 106, 112)};
+        const float r = std::max(12.f, event.radius);
+        spray(18 + int(r / 2.f), r * 2.2f, r * 5.4f, 40.f, 150.f, 300.f, 0.25f, 0.5f, 2.f, 3.5f, 8.f, r * 0.35f,
+            spark, 3, true);
+        spray(6, 8.f, 26.f, 10.f, 34.f, -14.f, 0.5f, 0.8f, 3.f, 5.f, 6.f, r * 0.4f, dust, 2, false);
+        break;
+    }
     case VfxKind::Rise: {
         // 浮出水面：大片水花与绿色黏液从水心往外炸开
         static const QColor water[] = {QColor(150, 214, 228), QColor(206, 240, 246)};
@@ -1421,6 +2084,351 @@ void GameWidget::drawParticles(QPainter& painter) {
         c.setAlpha(int(255.f * a));
         painter.fillRect(QRectF(px - p.size * 0.5f, py - p.size * 0.5f, p.size, p.size), c);
     }
+}
+
+// —— 天气系统：粒子层
+// 粒子活在画布坐标系里（480×270），跟相机无关：雨雪沙本来就是笼罩整屏的现象。
+// 生成节流按「每秒几颗 × 当前天气强度」累积，同屏颗数 = 生成率 × 行程 / 速度，
+// 所以各天气的生成率是照着「想要的同屏颗数」倒推出来的。
+void GameWidget::spawnWeather(float dt) {
+    const WeatherKind kind = session_.weather();
+    const float intensity = session_.weatherIntensity();
+    if (kind == WeatherKind::Clear || intensity <= 0.02f) {
+        return;
+    }
+    const float w = float(kViewW);
+    const float h = float(kViewH);
+    auto push = [&](float x, float y, float vx, float vy, float life, float size, float len, int style, const QColor& color) {
+        if (weather_.size() >= kMaxWeatherParticles) {
+            return;
+        }
+        WeatherParticle p;
+        p.x = x;
+        p.y = y;
+        p.vx = vx;
+        p.vy = vy;
+        p.life = p.maxLife = life;
+        p.size = size;
+        p.len = len;
+        p.style = style;
+        p.color = color.rgb();
+        p.spin = vfxRand() * kPi * 2.f;
+        weather_.push_back(p);
+    };
+    // 按雨量吐粒子；到了上限就只推进节流，不再堆积。
+    // 变量名不能叫 emit：Qt 把头文件里的 emit 定义成了空宏
+    auto burst = [&](int style, float rate, auto spawnOne) {
+        weatherSpawnAcc_[style] += dt * intensity * rate;
+        while (weatherSpawnAcc_[style] >= 1.f) {
+            weatherSpawnAcc_[style] -= 1.f;
+            spawnOne();
+        }
+    };
+    auto pick = [this](const QColor* colors, int count) {
+        return colors[int(vfxRand() * float(count)) % count];
+    };
+    switch (kind) {
+    case WeatherKind::Rain:
+    case WeatherKind::Thunder: {
+        const bool storm = kind == WeatherKind::Thunder;
+        static const QColor rain[] = {QColor(150, 184, 214), QColor(186, 210, 234)};
+        static const QColor rainHeavy[] = {QColor(178, 204, 234), QColor(214, 234, 250)};
+        const float windX = storm ? -74.f : -38.f;
+        burst(kLookStreak, storm ? 300.f : 215.f, [&] {
+            const float vy = (storm ? 400.f : 340.f) + vfxRand() * 120.f;
+            const float vx = windX + (vfxRand() - 0.5f) * 30.f;
+            push(-40.f + vfxRand() * (w + 80.f), -10.f - vfxRand() * 22.f, vx, vy, 1.6f, storm ? 1.6f : 1.4f,
+                (storm ? 9.f : 7.f) + vfxRand() * 6.f, kLookStreak,
+                storm ? pick(rainHeavy, 2) : pick(rain, 2));
+        });
+        // 溅射：雨点砸在地上，随机撒在画面里
+        burst(kLookSplash, storm ? 26.f : 16.f, [&] {
+            push(vfxRand() * w, 20.f + vfxRand() * (h - 44.f), 0.f, 0.f, 0.22f, 3.f + vfxRand() * 3.f, 0.f,
+                kLookSplash, QColor(196, 220, 244));
+        });
+        break;
+    }
+    case WeatherKind::Blizzard: {
+        static const QColor snow[] = {QColor(248, 252, 255), QColor(222, 236, 250)};
+        // 风雪是一阵紧一阵的：横向风按一条慢波呼吸
+        const float gust = 0.72f + 0.28f * (0.5f + 0.5f * std::sin(weatherTime_ * 0.5f));
+        burst(kLookFlake, 46.f, [&] {
+            const float vy = 55.f + vfxRand() * 70.f;
+            const float vx = -150.f * gust + (vfxRand() - 0.5f) * 44.f;
+            push(-40.f + vfxRand() * (w + 80.f), -10.f - vfxRand() * 24.f, vx, vy, 6.5f, 1.6f + vfxRand() * 1.6f,
+                0.f, kLookFlake, pick(snow, 2));
+        });
+        // 风线：被风雪拉出来的长条，横着扫过画面
+        burst(kLookStreak, 26.f, [&] {
+            push(w + 12.f, vfxRand() * h, -300.f * gust - vfxRand() * 70.f, 14.f + vfxRand() * 34.f, 4.f, 1.f,
+                22.f + vfxRand() * 16.f, kLookStreak, QColor(228, 242, 254, 150));
+        });
+        break;
+    }
+    case WeatherKind::Hail: {
+        static const QColor ice[] = {QColor(228, 244, 255), QColor(188, 218, 246)};
+        burst(kLookPellet, 118.f, [&] {
+            const float vy = 430.f + vfxRand() * 110.f;
+            const float vx = -30.f + (vfxRand() - 0.5f) * 30.f;
+            push(-30.f + vfxRand() * (w + 60.f), -10.f - vfxRand() * 24.f, vx, vy, 1.2f, 1.8f + vfxRand() * 1.4f,
+                0.f, kLookPellet, pick(ice, 2));
+        });
+        // 冰粒砸在地上迸开的一记白点
+        burst(kLookSplash, 30.f, [&] {
+            push(vfxRand() * w, 30.f + vfxRand() * (h - 54.f), 0.f, 0.f, 0.3f, 4.f + vfxRand() * 4.f, 0.f,
+                kLookSplash, QColor(220, 240, 255));
+        });
+        break;
+    }
+    case WeatherKind::Sandstorm: {
+        static const QColor sand[] = {QColor(206, 172, 112), QColor(178, 142, 88), QColor(234, 204, 150)};
+        // 沙线：寿命给足，让它们一路从右边扫到画外再被边界回收——
+        // 寿命短的话会在半路凭空消失，左边就空了
+        burst(kLookSand, 62.f, [&] {
+            push(w + 12.f, vfxRand() * h, -150.f - vfxRand() * 90.f, (vfxRand() - 0.5f) * 46.f, 6.f, 1.f,
+                6.f + vfxRand() * 12.f, kLookSand, pick(sand, 3));
+        });
+        // 浮尘：又大又透，从右侧整片横推过来。速度不能太慢、寿命不能太短，
+        // 否则最慢的一团走到画面中间就到寿了，只剩右半边有沙；这里保证每一团都能穿过整屏
+        static const QColor dust[] = {QColor(198, 164, 106, 88), QColor(170, 136, 84, 76)};
+        burst(kLookDust, 20.f, [&] {
+            push(w + 22.f, vfxRand() * (h + 24.f) - 12.f, -72.f - vfxRand() * 52.f, (vfxRand() - 0.5f) * 22.f, 9.f,
+                10.f + vfxRand() * 22.f, 0.f, kLookDust, pick(dust, 2));
+        });
+        break;
+    }
+    case WeatherKind::Typhoon: {
+        static const QColor rain[] = {QColor(158, 196, 214), QColor(200, 226, 238)};
+        // 台风的风是一阵一阵的：整个风场按慢波收紧、放松
+        const float gust = 0.62f + 0.38f * (0.5f + 0.5f * std::sin(weatherTime_ * 0.85f));
+        burst(kLookStreak, 300.f, [&] {
+            const float vy = 380.f + vfxRand() * 140.f;
+            push(-40.f + vfxRand() * (w + 80.f), -10.f - vfxRand() * 24.f, -140.f * gust + (vfxRand() - 0.5f) * 60.f,
+                vy, 1.4f, 1.5f, 10.f + vfxRand() * 8.f, kLookStreak, pick(rain, 2));
+        });
+        // 飞叶与断枝：横着甩过来，边走边转
+        static const QColor debris[] = {QColor(96, 132, 62), QColor(126, 152, 74), QColor(112, 86, 52)};
+        burst(kLookDebris, 26.f, [&] {
+            push(w + 14.f, vfxRand() * h, -170.f * gust - vfxRand() * 120.f, (vfxRand() - 0.5f) * 120.f, 6.5f,
+                2.f + vfxRand() * 2.f, 6.f + vfxRand() * 8.f, kLookDebris, pick(debris, 3));
+        });
+        burst(kLookSplash, 20.f, [&] {
+            push(vfxRand() * w, 20.f + vfxRand() * (h - 44.f), 0.f, 0.f, 0.2f, 3.f + vfxRand() * 3.f, 0.f,
+                kLookSplash, QColor(190, 222, 232));
+        });
+        break;
+    }
+    default:
+        break;
+    }
+}
+
+void GameWidget::updateWeather(float dt) {
+    weatherTime_ += dt;
+    spawnWeather(dt);
+    const float w = float(kViewW);
+    const float h = float(kViewH);
+    for (WeatherParticle& p : weather_) {
+        p.life -= dt;
+        if (p.style == kLookSplash) {
+            // 溅射原地淡出，不跟着风跑
+            continue;
+        }
+        p.x += p.vx * dt;
+        p.y += p.vy * dt;
+        p.spin += dt * 4.f;
+        if (p.style == kLookFlake || p.style == kLookDust) {
+            // 雪花与浮尘再叠一点横向摇摆，看着像飘而不是平移
+            p.x += std::sin(p.spin * 2.3f + p.len) * 14.f * dt;
+        }
+    }
+    weather_.erase(std::remove_if(weather_.begin(), weather_.end(),
+                       [w, h](const WeatherParticle& p) {
+                           return p.life <= 0.f || p.y > h + 16.f || p.y < -60.f || p.x < -60.f || p.x > w + 70.f;
+                       }),
+        weather_.end());
+}
+
+void GameWidget::drawWeather(QPainter& painter) {
+    const WeatherKind kind = session_.weather();
+    const float k = session_.weatherIntensity();
+    if (kind != WeatherKind::Clear && k > 0.01f) {
+        // 大气色调：雷雨压得最暗、暴风雪发白、沙尘暴发黄
+        const QColor tint = weatherTint(kind);
+        if (tint.alpha() > 0) {
+            painter.fillRect(QRect(0, 0, kViewW, kViewH), withAlpha(tint, int(tint.alpha() * k)));
+        }
+        if (kind == WeatherKind::Sandstorm) {
+            // 几条横向滚过的沙带：把地平线以上的视野整块压低
+            painter.setPen(Qt::NoPen);
+            for (int i = 0; i < 5; ++i) {
+                const float span = float(kViewW) + 320.f;
+                const float phase = std::fmod(weatherTime_ * (34.f + i * 12.f) + i * 97.f, span);
+                const float bandX = float(kViewW) + 160.f - phase;
+                const float y = float(kViewH) * (0.16f + 0.17f * i) + std::sin(weatherTime_ * 0.7f + i) * 6.f;
+                const float bandW = 150.f + i * 46.f;
+                painter.fillRect(QRectF(bandX - bandW, y, bandW, 12.f + i * 3.f), QColor(206, 176, 122, int(48.f * k)));
+            }
+        } else if (kind == WeatherKind::Blizzard) {
+            // 白幕：中间还能看清，四周白成一片
+            QRadialGradient white(kViewW * 0.5f, kViewH * 0.5f, kViewW * 0.62f);
+            white.setColorAt(0.f, QColor(232, 244, 252, 0));
+            white.setColorAt(1.f, QColor(226, 240, 250, int(146.f * k)));
+            painter.setPen(Qt::NoPen);
+            painter.setBrush(white);
+            painter.drawRect(QRect(0, 0, kViewW, kViewH));
+        }
+    }
+    // 粒子
+    painter.setRenderHint(QPainter::Antialiasing, false);
+    for (const WeatherParticle& p : weather_) {
+        // 浓度只跟「出生 / 消亡」那一下有关，不跟整段寿命挂钩：
+        // 走位型粒子通常是先出界再被回收（寿命给得很宽），若按 剩余寿命/总寿命 取浓，
+        // 越往画面左侧越淡，整屏就不会是同一个浓度。溅射是短命的一次性效果，仍按寿命淡出
+        const float age = p.maxLife - p.life;
+        const float a = p.style == kLookSplash
+            ? std::clamp(p.life / p.maxLife, 0.f, 1.f)
+            : std::clamp(age / 0.25f, 0.f, 1.f) * std::clamp(p.life / 0.3f, 0.f, 1.f);
+        QColor c = QColor::fromRgb(p.color);
+        switch (p.style) {
+        case kLookStreak: {
+            const float speed = std::sqrt(p.vx * p.vx + p.vy * p.vy);
+            if (speed < 0.01f) {
+                break;
+            }
+            c.setAlpha(int(c.alpha() * a));
+            painter.setPen(QPen(c, p.size));
+            painter.drawLine(QPointF(p.x, p.y),
+                QPointF(p.x - p.vx / speed * p.len, p.y - p.vy / speed * p.len));
+            break;
+        }
+        case kLookFlake:
+            // 雪片闪烁：亮度随时间抖动，看着才像在飘
+            c.setAlpha(int((150.f + 105.f * (0.5f + 0.5f * std::sin(p.spin * 4.f))) * a));
+            painter.fillRect(QRectF(p.x - p.size * 0.5f, p.y - p.size * 0.5f, p.size, p.size), c);
+            break;
+        case kLookPellet:
+            painter.fillRect(QRectF(p.x - p.size * 0.5f, p.y - p.size * 0.5f, p.size, p.size * 1.6f),
+                withAlpha(c, int(210.f * a)));
+            painter.fillRect(QRectF(p.x - 0.5f, p.y - 0.5f, 1.f, 2.f), QColor(255, 255, 255, int(235.f * a)));
+            break;
+        case kLookSand:
+            c.setAlpha(int(c.alpha() * 0.8f * a));
+            painter.setPen(QPen(c, 1.f));
+            painter.drawLine(QPointF(p.x, p.y), QPointF(p.x - p.len * 0.7f, p.y + p.len * 0.12f));
+            break;
+        case kLookDust:
+            painter.setPen(Qt::NoPen);
+            painter.setBrush(withAlpha(c, int(c.alpha() * a)));
+            painter.drawEllipse(QRectF(p.x - p.size * 0.5f, p.y - p.size * 0.35f, p.size, p.size * 0.7f));
+            break;
+        case kLookDebris: {
+            const float ang = p.spin * 2.4f;
+            const float hx = std::cos(ang) * p.len * 0.5f;
+            const float hy = std::sin(ang) * p.len * 0.5f;
+            c.setAlpha(int(215.f * a));
+            painter.setPen(QPen(c, p.size * 0.7f, Qt::SolidLine, Qt::RoundCap));
+            painter.drawLine(QPointF(p.x - hx, p.y - hy), QPointF(p.x + hx, p.y + hy));
+            break;
+        }
+        case kLookSplash: {
+            // 一记小水花：随生命向外张开，同时淡掉
+            const float s = p.size * (1.f + (1.f - a) * 0.9f);
+            c.setAlpha(int(160.f * a));
+            painter.setPen(QPen(c, 1.f));
+            painter.drawLine(QPointF(p.x - s, p.y), QPointF(p.x + s, p.y));
+            painter.drawLine(QPointF(p.x, p.y - s * 0.7f), QPointF(p.x, p.y + s * 0.7f));
+            break;
+        }
+        default:
+            break;
+        }
+    }
+    painter.setPen(Qt::NoPen);
+    painter.setBrush(Qt::NoBrush);
+    drawLightningBolt(painter);
+    // 落雷的白闪：整个画面被照亮一拍
+    const float flash = session_.lightningFlash();
+    if (flash > 0.01f) {
+        painter.fillRect(QRect(0, 0, kViewW, kViewH), QColor(222, 236, 255, int(148.f * flash)));
+    }
+}
+
+// 落雷：一条从画面上缘斜劈到落点的折线闪电。折线形状由落点坐标掷出的固定随机数决定，
+// 整段动画里形状不变，只是随年龄淡掉与收细。
+void GameWidget::drawLightningBolt(QPainter& painter) {
+    const QPointF camera = cameraOrigin();
+    // 最多三道同时在场（雷罚一次三道），每一道各自一条折线
+    for (const LightningBolt& bolt : session_.lightningBolts()) {
+        if (!bolt.active) {
+            continue;
+        }
+        const float a = std::clamp(1.f - bolt.age / kLightningLife, 0.f, 1.f);
+        if (a <= 0.01f) {
+            continue;
+        }
+        const float bx = bolt.x - float(camera.x());
+        const float by = bolt.y - float(camera.y());
+        uint32_t seed = mixHash(uint32_t(int(bolt.x * 8.f)) * 73856093u
+            ^ uint32_t(int(bolt.y * 5.f)) * 19349663u);
+        auto boltRand = [&seed]() {
+            seed = mixHash(seed + 0x9e3779b9u);
+            return float(seed & 0xFFFFu) / 65536.f;
+        };
+        const float topX = bx + 34.f;
+        const float topY = -8.f;
+        QPainterPath path;
+        path.moveTo(topX, topY);
+        constexpr int kSegments = 7;
+        for (int i = 1; i <= kSegments; ++i) {
+            const float t = float(i) / float(kSegments);
+            // 中段左右乱抖，末段收回落点
+            const float jitter = i == kSegments ? 0.f : (boltRand() - 0.5f) * 26.f;
+            path.lineTo(topX + (bx - topX) * t + jitter, topY + (by - topY) * t);
+        }
+        strokeGlow(painter, QColor(148, 198, 255, int(120.f * a)), 4.f * a + 1.f, [&] { painter.drawPath(path); });
+        painter.setBrush(Qt::NoBrush);
+        painter.setPen(QPen(QColor(206, 234, 255, int(190.f * a)), 2.4f * a + 0.8f, Qt::SolidLine, Qt::RoundCap, Qt::RoundJoin));
+        painter.drawPath(path);
+        painter.setPen(QPen(QColor(255, 255, 255, int(240.f * a)), 1.f * a + 0.4f, Qt::SolidLine, Qt::RoundCap, Qt::RoundJoin));
+        painter.drawPath(path);
+        painter.setPen(Qt::NoPen);
+        // 落点：一记贴地的光晕
+        painter.setBrush(QColor(178, 218, 255, int(76.f * a)));
+        painter.drawEllipse(QRectF(bx - 15.f, by - 8.f, 30.f, 16.f));
+        painter.setBrush(Qt::NoBrush);
+    }
+}
+
+// 左上角 HUD 的天气状态条：一行「天气　雷雨天　剩 23s」，
+// 排在天赋面板下面，位置由调用方按当前的 hudY 递下来
+void GameWidget::drawWeatherHud(QPainter& painter, int x, int y, int w) {
+    if (!session_.weatherOn()) {
+        return;
+    }
+    const WeatherKind kind = session_.weather();
+    const QColor accent = weatherAccent(kind);
+    const int panelH = 18;
+    painter.setPen(Qt::NoPen);
+    painter.setBrush(QColor(12, 10, 9, 190));
+    painter.drawRect(QRect(x, y, w, panelH));
+    painter.setBrush(Qt::NoBrush);
+    painter.setPen(QPen(withAlpha(accent, 150), 1));
+    painter.drawRect(QRect(x, y, w - 1, panelH - 1));
+    painter.setFont(QFont(Platform::uiFontFamily(), 9, QFont::Bold));
+    painter.setPen(accent);
+    painter.drawText(QRect(x + 6, y, w - 12, panelH), Qt::AlignLeft | Qt::AlignVCenter,
+        QString("天气　%1").arg(weatherName(kind)));
+    // 剩余时间：天气还在场上才算，平静期的等待不必写在脸上
+    painter.setPen(withAlpha(accent, 190));
+    // 雷罚把天气锁在雷雨里，剩余时间不会走，改写「雷罚中」
+    const QString tail = session_.thunderPunish()
+        ? QStringLiteral("雷罚中")
+        : kind == WeatherKind::Clear ? QStringLiteral("转晴中")
+                                     : QString("剩 %1s").arg(session_.weatherRemain(), 0, 'f', 0);
+    painter.drawText(QRect(x + 6, y, w - 12, panelH), Qt::AlignRight | Qt::AlignVCenter, tail);
+    painter.setFont(QFont(Platform::uiFontFamily(), 11));
+    painter.setPen(QColor(228, 212, 188));
 }
 
 QRect GameWidget::viewRect() const {
@@ -1561,8 +2569,9 @@ void GameWidget::syncKey(int key, bool down) {
         }
         break;
     case Qt::Key_B:
+        // 背包：不塞进 InputState，直接开关面板（打开时游戏照常跑）
         if (down) {
-            input_.bEdge = true;
+            toggleBagPanel();
         }
         break;
     case Qt::Key_G:
@@ -1582,6 +2591,14 @@ void GameWidget::syncKey(int key, bool down) {
             toggleMimicPanel();
         }
         break;
+#if (defined(Q_OS_WIN) || defined(Q_OS_LINUX)) && !defined(Q_OS_ANDROID)
+    case Qt::Key_CapsLock:
+        // 索敌：桌面端用 CapsLock 开关自动锁定（原来是鼠标中键）
+        if (down && running_ && !session_.ended() && !session_.paused()) {
+            toggleAutoAim();
+        }
+        break;
+#endif
     default:
         break;
     }
@@ -1631,17 +2648,28 @@ void GameWidget::mousePressEvent(QMouseEvent* event) {
             event->accept();
             return;
         }
+        // 背包面板上的点击只用来选物品 / 点 ✕ 关闭，不当作一次攻击
+        if (bagOpen_ && bagPanelRect_.isValid() && bagPanelRect_.contains(event->position().toPoint())) {
+            bagClick_ = true;
+            const QPoint pos = event->position().toPoint();
+            if (bagCloseRect_.contains(pos)) {
+                closeBagPanel();
+            } else {
+                const int cell = bagCellAt(pos);
+                if (cell >= 0) {
+                    bagSelected_ = bagSelected_ == cell ? -1 : cell;
+                }
+            }
+            event->accept();
+            return;
+        }
         input_.lmb = true;
         input_.lmbEdge = true;
     } else if (event->button() == Qt::RightButton) {
         input_.rmb = true;
         input_.rmbEdge = true;
     }
-#if (defined(Q_OS_WIN) || defined(Q_OS_LINUX)) && !defined(Q_OS_ANDROID)
-    else if (event->button() == Qt::MiddleButton && running_ && !session_.ended() && !session_.paused()) {
-        toggleAutoAim();
-    }
-#endif
+    // 索敌不再挂鼠标中键：桌面端改用 CapsLock（见 syncKey），中键留空以免误触
 }
 
 void GameWidget::mouseReleaseEvent(QMouseEvent* event) {
@@ -1652,6 +2680,11 @@ void GameWidget::mouseReleaseEvent(QMouseEvent* event) {
         // 按下时被天赋面板吃掉的这一下，抬起也不产生攻击输入
         if (talentClick_) {
             talentClick_ = false;
+            return;
+        }
+        // 背包面板上的那一按同理
+        if (bagClick_) {
+            bagClick_ = false;
             return;
         }
         input_.lmb = false;
@@ -1745,19 +2778,20 @@ QVector<GameWidget::TouchButton> GameWidget::touchButtons() const {
         buttons.push_back({outer[i].first, around(u * 0.37, degrees), small, outer[i].second});
     }
 
-    // 右上：Tab（技能与天赋说明）/ Esc（暂停）
+    // 右上：Tab（技能与天赋说明）/ Esc（暂停）/ 索敌 / 背包；后面几枚按解锁情况继续往左排
     const qreal top = u * 0.045;
     buttons.push_back({TouchControl::Pause, QPointF(w - u * 0.075, u * 0.075), top, QStringLiteral("暂停")});
     buttons.push_back({TouchControl::Guide, QPointF(w - u * 0.185, u * 0.075), top, QStringLiteral("说明")});
     buttons.push_back({TouchControl::AutoAim, QPointF(w - u * 0.295, u * 0.075), top, QStringLiteral("索敌")});
+    buttons.push_back({TouchControl::Bag, QPointF(w - u * 0.405, u * 0.075), top, QStringLiteral("背包")});
     if (player.talentGuide) {
         // 天赋「世界指引」解锁后才有的开关，桌面版是 G 键
-        buttons.push_back({TouchControl::Seek, QPointF(w - u * 0.405, u * 0.075), top, QStringLiteral("寻路")});
+        buttons.push_back({TouchControl::Seek, QPointF(w - u * 0.515, u * 0.075), top, QStringLiteral("寻路")});
     }
     if (player.slimeBody) {
         // 史莱姆之躯专属：拟态图鉴（T）与拟态技能（左 Ctrl）
-        buttons.push_back({TouchControl::Mimic, QPointF(w - u * 0.515, u * 0.075), top, QStringLiteral("拟态")});
-        buttons.push_back({TouchControl::MimicSkill, QPointF(w - u * 0.625, u * 0.075), top, QStringLiteral("形态技")});
+        buttons.push_back({TouchControl::Mimic, QPointF(w - u * 0.625, u * 0.075), top, QStringLiteral("拟态")});
+        buttons.push_back({TouchControl::MimicSkill, QPointF(w - u * 0.735, u * 0.075), top, QStringLiteral("形态技")});
     }
     return buttons;
 }
@@ -1809,6 +2843,24 @@ void GameWidget::handleTouch(QTouchEvent* event) {
                     }
                 }
             }
+            if (bagOpen_) {
+                // 背包开着：右上角「背包」按钮照常开关，面板里的 ✕ 关闭键也能点，
+                // 点格子固定物品说明，其余位置一律忽略
+                if (hit == TouchControl::Bag) {
+                    touchBindings_.insert(id, hit);
+                    toggleBagPanel();
+                    break;
+                }
+                if (bagCloseRect_.contains(pos.toPoint())) {
+                    closeBagPanel();
+                    break;
+                }
+                const int cell = bagCellAt(pos.toPoint());
+                if (cell >= 0) {
+                    bagSelected_ = bagSelected_ == cell ? -1 : cell;
+                }
+                break;
+            }
             if (hit == TouchControl::Guide || hit == TouchControl::Pause) {
                 togglePause();
                 touchBindings_.insert(id, hit);
@@ -1817,6 +2869,9 @@ void GameWidget::handleTouch(QTouchEvent* event) {
             } else if (hit == TouchControl::AutoAim) {
                 touchBindings_.insert(id, hit);
                 toggleAutoAim();
+            } else if (hit == TouchControl::Bag) {
+                touchBindings_.insert(id, hit);
+                toggleBagPanel();
             } else if (hit != TouchControl::None) {
                 touchBindings_.insert(id, hit);
                 pressTouch(hit, true);
@@ -2218,6 +3273,8 @@ void GameWidget::focusOutEvent(QFocusEvent* event) {
 void GameWidget::resizeEvent(QResizeEvent* event) {
     QWidget::resizeEvent(event);
     touchSprites_.clear();
+    // 背包格子尺寸跟着控件尺寸走，图标缓存一并作废（下次开面板按新尺寸重缩）
+    itemIcons_.clear();
     layoutOverlays();
 }
 
@@ -2353,6 +3410,84 @@ QIcon GameWidget::mimicIcon(MimicForm form) {
     return QIcon(pixmap);
 }
 
+// 抹杀的法阵：五层从地面铺开的圆盘，逐层更大、更亮。俯视透视用竖向压扁的椭圆 +
+// 抬高的上沿光环 + 一圈柱面光墙拼出立体感，看起来像从地面立起来的法阵。
+void GameWidget::drawEraseCircles(QPainter& painter, const Player& player) {
+    const float elapsed = kEraseWindup - player.eraseT;
+    const float cx = player.x;
+    const float cy = player.y;
+    const float spin = player.animT;
+    // 从最大的一层往内画，小的压在上面，亮部不会被外层盖住
+    for (int i = kEraseCircles - 1; i >= 0; --i) {
+        const float appearAt = float(i) * (kEraseWindup / float(kEraseCircles));
+        if (elapsed < appearAt) {
+            continue;
+        }
+        const float grow = std::clamp((elapsed - appearAt) / 0.4f, 0.f, 1.f);
+        const float R = kEraseRingBase * float(i + 1) * (0.62f + 0.38f * grow);
+        const float a = grow;
+        const QRectF ground(cx - R, cy - R * kEraseRingSquash, R * 2.f, R * 2.f * kEraseRingSquash);
+        const float lift = R * 0.5f;
+        const QRectF ceiling(cx - R, cy - lift - R * kEraseRingSquash, R * 2.f, R * 2.f * kEraseRingSquash);
+
+        // 柱面光墙：地面环的前缘与抬高后的环前缘之间连成一段下亮上淡的渐变面
+        QPainterPath wall;
+        wall.moveTo(cx - R, cy);
+        wall.arcTo(ground, 180.f, 180.f);
+        wall.lineTo(cx + R, cy - lift);
+        wall.arcTo(ceiling, 0.f, -180.f);
+        wall.closeSubpath();
+        QLinearGradient wallGrad(0.f, cy - lift, 0.f, cy);
+        wallGrad.setColorAt(0.f, QColor(200, 150, 255, int(34.f * a)));
+        wallGrad.setColorAt(0.7f, QColor(168, 106, 255, int(104.f * a)));
+        wallGrad.setColorAt(1.f, QColor(232, 212, 255, 0));
+        painter.setPen(Qt::NoPen);
+        painter.setBrush(wallGrad);
+        painter.drawPath(wall);
+
+        // 地面圆盘、同心环与旋转符文都画在压扁的坐标系里，天然带俯视透视
+        painter.save();
+        painter.translate(cx, cy);
+        painter.scale(1.f, kEraseRingSquash);
+        QRadialGradient disc(QPointF(0.f, 0.f), R);
+        disc.setColorAt(0.f, QColor(96, 44, 190, int(18.f * a)));
+        disc.setColorAt(0.66f, QColor(140, 78, 240, int(56.f * a)));
+        disc.setColorAt(0.93f, QColor(206, 160, 255, int(118.f * a)));
+        disc.setColorAt(1.f, QColor(240, 225, 255, 0));
+        painter.setPen(Qt::NoPen);
+        painter.setBrush(disc);
+        painter.drawEllipse(QPointF(0.f, 0.f), R, R);
+        painter.setBrush(Qt::NoBrush);
+        for (int ring = 0; ring < 3; ++ring) {
+            const float rr = R * (1.f - 0.26f * float(ring));
+            painter.setPen(QPen(QColor(214, 176, 255, int((70 + 55 * ring) * a)), ring == 0 ? 1.6f : 1.f));
+            painter.drawEllipse(QPointF(0.f, 0.f), rr, rr);
+        }
+        const int ticks = 18 + i * 5;
+        painter.setPen(Qt::NoPen);
+        painter.setBrush(QColor(240, 224, 255, int(210.f * a)));
+        for (int k = 0; k < ticks; ++k) {
+            const float ang = spin * (0.4f + 0.1f * float(i)) + float(k) * 2.f * kPi / float(ticks);
+            const float rr = R * 0.9f;
+            const float x = std::cos(ang) * rr;
+            const float y = std::sin(ang) * rr;
+            const float s = 2.2f + 0.5f * float(i);
+            const float ca = std::cos(ang + kPi * 0.5f) * s;
+            const float sa = std::sin(ang + kPi * 0.5f) * s;
+            const QPointF rune[4] = {QPointF(x + ca, y + sa), QPointF(x - sa, y + ca), QPointF(x - ca, y - sa),
+                QPointF(x + sa, y - ca)};
+            painter.drawPolygon(rune, 4);
+        }
+        painter.restore();
+
+        // 抬高的上沿：一圈更亮的光环，柱面才有「顶」
+        strokeGlow(painter, QColor(226, 194, 255, int(170.f * a)), 1.6f, [&] { painter.drawEllipse(ceiling); });
+        painter.setBrush(Qt::NoBrush);
+        painter.setPen(QPen(QColor(196, 140, 255, int(90.f * a)), 1.f));
+        painter.drawEllipse(ceiling);
+    }
+}
+
 void GameWidget::drawWorld(QPainter& painter) {
     const Player& player = session_.player();
     const QPointF camera = cameraOrigin();
@@ -2390,6 +3525,11 @@ void GameWidget::drawWorld(QPainter& painter) {
             }
         }
     }
+    // 灾难滤镜：此刻画布上只有地面，整块压暗一记。后面画的地表物另用预压暗的表贴，
+    // 角色 / 弹幕 / 特效 / 玩法提示都是叠在这之后画的，保持原亮度
+    painter.setCompositionMode(QPainter::CompositionMode_Multiply);
+    painter.fillRect(QRectF(cameraX, cameraY, kViewW, kViewH), QColor(kMapShadeR, kMapShadeG, kMapShadeB));
+    painter.setCompositionMode(QPainter::CompositionMode_SourceOver);
 
     // 排雷棋盘：地面上的方格、数字与已被踩过的雷
     if (const ShallowPool& pool = session_.pool(); pool.active && pool.phase == ShallowPool::Phase::Live) {
@@ -2447,6 +3587,43 @@ void GameWidget::drawWorld(QPainter& painter) {
         painter.setBrush(Qt::NoBrush);
         painter.setPen(QPen(QColor(240, 226, 168, 210), 2));
         painter.drawRect(outline);
+    }
+
+    // 传送平台：跑出迷宫 / 浅水区太远时刷在附近画面外的 3×3 符文落点，
+    // 站上去起跳即传送；平台上方写着它通往哪里
+    for (const TeleportPad& pad : session_.teleportPads()) {
+        const float side = float(kTeleportPadTiles) * float(kTile);
+        const QRectF plate(float(pad.tileX) * float(kTile), float(pad.tileY) * float(kTile), side, side);
+        const float pulse = 0.5f + 0.5f * std::sin(session_.time() * 3.f);
+        painter.setPen(Qt::NoPen);
+        painter.setBrush(QColor(46, 28, 78, 170));
+        painter.drawRect(plate);
+        painter.setBrush(Qt::NoBrush);
+        painter.setPen(QPen(QColor(178, 138, 250, int(150 + 90 * pulse)), 2));
+        painter.drawRect(plate.adjusted(1.f, 1.f, -1.f, -1.f));
+        // 内圈双环 + 四道随时间旋转的符文刻痕
+        const QPointF center = plate.center();
+        const float r1 = side * (0.30f + 0.05f * pulse);
+        const float r2 = side * 0.16f;
+        painter.setPen(QPen(QColor(206, 180, 255, int(120 + 100 * pulse)), 1));
+        painter.drawEllipse(QRectF(center.x() - r1, center.y() - r1, r1 * 2.f, r1 * 2.f));
+        painter.drawEllipse(QRectF(center.x() - r2, center.y() - r2, r2 * 2.f, r2 * 2.f));
+        painter.setPen(QPen(QColor(226, 206, 255, 200), 1.4));
+        for (int k = 0; k < 4; ++k) {
+            const float a = float(k) * 1.57079632f + session_.time() * 1.4f;
+            const float ax = std::cos(a) * r1;
+            const float ay = std::sin(a) * r1;
+            painter.drawLine(QPointF(center.x() + ax * 0.55f, center.y() + ay * 0.55f),
+                QPointF(center.x() + ax, center.y() + ay));
+        }
+        // 平台名：先描一层深色再压亮色，贴在任何地表上都看得清。
+        // 具体通往哪里不写在平台旁边，等玩家踩上去再在提示里告诉他
+        const QString label = QStringLiteral("传送阵");
+        painter.setFont(QFont(Platform::uiFontFamily(), 8, QFont::Bold));
+        painter.setPen(QColor(14, 10, 24, 220));
+        painter.drawText(QRectF(plate.x(), plate.y() - 17.f, side, 14.f), Qt::AlignCenter, label);
+        painter.setPen(QColor(226, 210, 255));
+        painter.drawText(QRectF(plate.x(), plate.y() - 16.f, side, 14.f), Qt::AlignCenter, label);
     }
 
     // 腐化史莱姆的攻击范围预警：冲刺走廊 / 落点圈 / 水弹射线，压在地面、实体之下
@@ -2517,27 +3694,28 @@ void GameWidget::drawWorld(QPainter& painter) {
     auto paintMazeBlock = [&](int x, int y) {
         const QRect block(x * kTile, y * kTile - 12, kTile, kTile + 12);
         painter.setPen(Qt::NoPen);
-        painter.setBrush(QColor(8, 10, 16, 170));
+        painter.setBrush(mapShade(QColor(8, 10, 16, 170)));
         painter.drawRect(QRect(x * kTile + 1, y * kTile + 10, kTile - 2, 5));
-        painter.setBrush(QColor(22, 26, 40));
-        painter.setPen(QPen(QColor(6, 8, 14), 1));
+        painter.setBrush(mapShade(QColor(22, 26, 40)));
+        painter.setPen(QPen(mapShade(QColor(6, 8, 14)), 1));
         painter.drawRect(block);
         painter.setPen(Qt::NoPen);
-        painter.setBrush(QColor(168, 188, 214));
+        painter.setBrush(mapShade(QColor(168, 188, 214)));
         painter.drawRect(QRect(x * kTile, y * kTile - 12, kTile, 4));
-        painter.setBrush(QColor(70, 82, 108));
+        painter.setBrush(mapShade(QColor(70, 82, 108)));
         painter.drawRect(QRect(x * kTile, y * kTile - 8, kTile, 2));
     };
     auto paintProp = [&](int x, int y, Tile tile) {
         const QRect prop(x * kTile - 8, y * kTile - 14, 32, 32);
         painter.setPen(Qt::NoPen);
-        painter.setBrush(tile == Tile::Rock ? QColor(20, 16, 16, 160) : QColor(12, 36, 12, 150));
+        painter.setBrush(mapShade(tile == Tile::Rock ? QColor(20, 16, 16, 160) : QColor(12, 36, 12, 150)));
         painter.drawEllipse(QRectF(x * kTile + 1, y * kTile + 6, 14, 8));
-        if (spritesOk_) {
+        if (spritesOk_ && !tilesDark_.isNull()) {
+            // 地表物同样吃灾难滤镜：用预压暗的表贴，和脚下的地面保持同一色调
             const QRect source = tile == Tile::Rock ? QRect(112, 48, 32, 32) : QRect(64, 48, 32, 32);
-            painter.drawImage(prop, sprites_.tiles, source);
+            painter.drawImage(prop, tilesDark_, source);
         } else {
-            painter.setBrush(tile == Tile::Rock ? QColor(40, 40, 44) : QColor(30, 110, 40));
+            painter.setBrush(mapShade(tile == Tile::Rock ? QColor(40, 40, 44) : QColor(30, 110, 40)));
             painter.drawEllipse(prop);
         }
     };
@@ -2812,6 +3990,10 @@ void GameWidget::drawWorld(QPainter& painter) {
                     painter.setPen(QPen(QColor(120, 30, 180, int(70 * fade)), 1));
                     painter.drawEllipse(QRectF(cx - player.burialR, cy - player.burialR, player.burialR * 2.f, player.burialR * 2.f));
                 }
+            }
+            // 抹杀：五层法阵逐个铺开，最后一个铺满整屏
+            if (player.eraseStage > 0) {
+                drawEraseCircles(painter, player);
             }
             // 史莱姆之躯指示：头顶一枚红色描边、绿色倒三角，闪烁
             auto drawSlimeBodyMark = [&](float markX, float tipY) {
@@ -4068,6 +5250,130 @@ void GameWidget::drawMazeMap(QPainter& painter, const QRect& view) {
     }
 }
 
+// 传送阵：踩在上面时持续显示用法与目的地；平台刷在画面外时，
+// 在视口边缘画一个紫色箭头指出它在哪一侧、还有多远
+void GameWidget::drawTeleportMarkers(QPainter& painter, const QRect& view) {
+    const std::vector<TeleportPad>& pads = session_.teleportPads();
+    if (pads.empty()) {
+        return;
+    }
+    const Player& player = session_.player();
+    const QPointF camera = cameraOrigin();
+    // 画布固定 kViewW×kViewH，再整体拉伸到 view：世界坐标→屏幕坐标要跟着这个比例走，
+    // 否则窗口不是 1 倍时箭头会指偏
+    const float scaleX = float(view.width()) / float(kViewW);
+    const float scaleY = float(view.height()) / float(kViewH);
+    const float cameraX = float(camera.x());
+    const float cameraY = float(camera.y());
+    // 留出边距：标记贴着画面边框会糊在黑色衬边上
+    constexpr float kInset = 18.f;
+    const QRectF area = QRectF(view).adjusted(kInset, kInset, -kInset, -kInset);
+    // 平台占 3×3 格，人站在这个方框里就算「踩在传送阵上」（世界坐标判定，与缩放无关）
+    const float padHalf = float(kTeleportPadTiles) * 0.5f * float(kTile);
+    const TeleportPad* standing = nullptr;
+    for (const TeleportPad& pad : pads) {
+        if (std::abs(player.x - pad.centerX()) <= padHalf && std::abs(player.y - pad.centerY()) <= padHalf) {
+            standing = &pad;
+            break;
+        }
+    }
+    painter.setRenderHint(QPainter::Antialiasing, true);
+    for (const TeleportPad& pad : pads) {
+        if (&pad == standing) {
+            continue;  // 脚下这块不用指方向
+        }
+        const float wx = pad.centerX();
+        const float wy = pad.centerY();
+        const float sx = float(view.x()) + (wx - cameraX) * scaleX;
+        const float sy = float(view.y()) + (wy - cameraY) * scaleY;
+        if (QRectF(view).contains(sx, sy)) {
+            // 平台本体已经在画面里，本体上就写着「传送阵」，不用再补边缘标记
+            continue;
+        }
+        const float dx = sx - float(area.center().x());
+        const float dy = sy - float(area.center().y());
+        const float adx = std::abs(dx);
+        const float ady = std::abs(dy);
+        if (adx < 0.01f && ady < 0.01f) {
+            continue;
+        }
+        // 从画面中心朝平台方向射出去，夹到留白后的视口边界上
+        const float halfW = float(area.width()) * 0.5f;
+        const float halfH = float(area.height()) * 0.5f;
+        const float scale = std::min(halfW / std::max(adx, 0.01f), halfH / std::max(ady, 0.01f));
+        const QPointF mark(area.center().x() + dx * scale, area.center().y() + dy * scale);
+        const float ang = std::atan2(dy, dx);
+        const float nx = std::cos(ang);
+        const float ny = std::sin(ang);
+        const int pulse = int(180 + 70 * (0.5 + 0.5 * std::sin(session_.time() * 3.5f)));
+        constexpr float kR = 10.f;
+        QPolygonF arrow;
+        arrow << QPointF(mark.x() + nx * kR, mark.y() + ny * kR)
+              << QPointF(mark.x() - ny * kR * 0.8f - nx * kR * 0.5f, mark.y() + nx * kR * 0.8f - ny * kR * 0.5f)
+              << QPointF(mark.x() + ny * kR * 0.8f - nx * kR * 0.5f, mark.y() - nx * kR * 0.8f - ny * kR * 0.5f);
+        painter.setPen(Qt::NoPen);
+        painter.setBrush(QColor(70, 44, 118, 215));
+        painter.drawPolygon(arrow);
+        painter.setBrush(Qt::NoBrush);
+        painter.setPen(QPen(QColor(198, 162, 255, pulse), 1.6));
+        painter.drawPolygon(arrow);
+        // 文字贴着标记内侧摆，再夹进视口，保证完整可读
+        const int dist = int(std::lround(std::hypot(wx - player.x, wy - player.y) / float(kTile)));
+        const QString text = QStringLiteral("传送阵 %1").arg(dist);
+        painter.setFont(QFont(Platform::uiFontFamily(), 9, QFont::Bold));
+        const QFontMetrics fm(painter.font());
+        const float textW = float(fm.horizontalAdvance(text)) + 10.f;
+        const float textH = float(fm.height()) + 2.f;
+        const float inX = mark.x() - nx * (kR + 4.f);
+        const float inY = mark.y() - ny * (kR + 4.f);
+        QRectF box(inX - textW * 0.5f, inY - textH * 0.5f, textW, textH);
+        box.moveLeft(std::clamp(box.left(), double(view.left()) + 2.0, double(view.right()) - box.width() - 2.0));
+        box.moveTop(std::clamp(box.top(), double(view.top()) + 2.0, double(view.bottom()) - box.height() - 2.0));
+        painter.setPen(Qt::NoPen);
+        painter.setBrush(QColor(14, 10, 22, 195));
+        painter.drawRoundedRect(box, 4, 4);
+        painter.setPen(QColor(228, 212, 255));
+        painter.drawText(box, Qt::AlignCenter, text);
+    }
+    // 踩在传送阵上：提示固定挂在底部技能栏上方，不压角色、也不跟着镜头抖
+    if (standing) {
+        const QString tipUse = QStringLiteral("跳跃触发");
+        const QString tipDest = QStringLiteral("通往%1").arg(teleportTargetName(standing->target));
+        painter.setFont(QFont(Platform::uiFontFamily(), 10, QFont::Bold));
+        const QFontMetrics fmBig(painter.font());
+        painter.setFont(QFont(Platform::uiFontFamily(), 9));
+        const QFontMetrics fmSmall(painter.font());
+        const double boxW = double(std::max(fmBig.horizontalAdvance(tipUse), fmSmall.horizontalAdvance(tipDest))) + 20.0;
+        const double boxH = double(fmBig.height() + fmSmall.height()) + 12.0;
+        // 底部是「技能 Chip 行（38 高 + 10 底边距）+ Tab 提示」，再往下才轮到提示条
+        const double chipTop = double(view.y() + view.height() - 48);
+        double by = chipTop - 22.0 - boxH;
+        if (session_.cursed()) {
+            by -= 32.0;  // 让开底部中央的诅咒提示条
+        }
+        by = std::max(by, double(view.top()) + 2.0);
+        const double bx = double(view.center().x()) - boxW * 0.5;
+        const QRectF box(bx, by, boxW, boxH);
+        painter.setPen(Qt::NoPen);
+        painter.setBrush(QColor(14, 10, 24, 215));
+        painter.drawRoundedRect(box, 5, 5);
+        painter.setBrush(Qt::NoBrush);
+        painter.setPen(QPen(QColor(178, 138, 250, 190), 1));
+        painter.drawRoundedRect(box, 5, 5);
+        painter.setFont(QFont(Platform::uiFontFamily(), 10, QFont::Bold));
+        painter.setPen(QColor(240, 230, 255));
+        painter.drawText(QRectF(bx, by + 4.0, boxW, double(fmBig.height())), Qt::AlignCenter, tipUse);
+        painter.setFont(QFont(Platform::uiFontFamily(), 9));
+        painter.setPen(QColor(202, 190, 212));
+        painter.drawText(QRectF(bx, by + 4.0 + double(fmBig.height()), boxW, double(fmSmall.height())),
+            Qt::AlignCenter, tipDest);
+    }
+    painter.setBrush(Qt::NoBrush);
+    painter.setPen(QColor(228, 212, 188));
+    painter.setFont(QFont(Platform::uiFontFamily(), 11));
+    painter.setRenderHint(QPainter::Antialiasing, false);
+}
+
 QRect GameWidget::bossBarPlate(const QRect& view) const {
     const int left = view.x() + 232;
     int right = view.right() - (touchUi_ ? 148 : 96);
@@ -4318,10 +5624,10 @@ void GameWidget::renderFrameToCanvas() {
     world.setRenderHint(QPainter::SmoothPixmapTransform, false);
     drawWorld(world);
     world.resetTransform();
-    world.setCompositionMode(QPainter::CompositionMode_Multiply);
-    world.fillRect(canvas_.rect(), QColor(128, 112, 98));
-    world.setCompositionMode(QPainter::CompositionMode_SourceOver);
+    // 灾难滤镜已经在地图层里生效（只压暗地图），这里不再整屏压暗，角色与特效保持原亮度
     world.drawImage(0, 0, vignette_);
+    // 天气压在暗角之上：雨雪沙本来就该罩住整幅画面，角色与 HUD 仍是它上面的层
+    drawWeather(world);
     const float plazaRed = session_.plazaRed();
     if (plazaRed > 0.01f) {
         QRadialGradient red(kViewW * 0.5, kViewH * 0.5, kViewW * 0.72);
@@ -4341,6 +5647,21 @@ void GameWidget::renderFrameToCanvas() {
         world.setPen(Qt::NoPen);
         world.setBrush(purple);
         world.drawRect(canvas_.rect());
+    }
+    // 画面亮度：设置在 settings.json（设置页 / 游戏内暂停菜单可调），100 为不增不减。
+    // 只叠在游戏画面上，HUD 文字与血条不受影响
+    const int brightness = std::clamp(brightness_, 50, 150);
+    if (brightness != 100) {
+        if (brightness > 100) {
+            const int add = (brightness - 100) * 255 / 200;
+            world.setCompositionMode(QPainter::CompositionMode_Plus);
+            world.fillRect(canvas_.rect(), QColor(add, add, add));
+        } else {
+            const int grey = 255 - (100 - brightness) * 255 / 200;
+            world.setCompositionMode(QPainter::CompositionMode_Multiply);
+            world.fillRect(canvas_.rect(), QColor(grey, grey, grey));
+        }
+        world.setCompositionMode(QPainter::CompositionMode_SourceOver);
     }
     drawDimensionCuts(world);
 }
@@ -4478,10 +5799,36 @@ void GameWidget::warmUpHud() {
         "玩家 0123456789 HP MP 护盾 体力 魔力 等级 经验 护甲 暴击 技能 天赋 已解锁 秒 分 精英 迷宫遗迹 史莱姆 克苏鲁之眼"));
     painter.setFont(QFont(Platform::uiFontFamily(), 7, QFont::Bold));
     painter.drawText(scratch.rect(), Qt::AlignRight | Qt::AlignBottom, QStringLiteral("韧性崩溃"));
+    // 天气状态条是 9 号粗体一行：天气名 + 剩余秒数（字形缓存按字号 + 字重分开）
+    painter.setFont(QFont(Platform::uiFontFamily(), 9, QFont::Bold));
+    painter.drawText(scratch.rect(), Qt::AlignLeft | Qt::AlignBottom, QStringLiteral(
+        "天气 晴 雨天 雷雨天 暴风雪 冰雹 沙尘暴 台风 剩 转晴中 0123456789 s"));
     // 帧率显示用 9 号字，字符要单独预热一遍（字形缓存按字号分开）
     painter.setFont(QFont(Platform::uiFontFamily(), 9));
     painter.drawText(scratch.rect(), Qt::AlignLeft | Qt::AlignVCenter, QStringLiteral(
-        "FPS ms 怪 粒 SCORE 核心 符咒 0123456789 : ."));
+        "FPS ms 怪 粒 SCORE 0123456789 : ."));
+    // 传送阵：世界层名称 8 号粗体、踩上去的提示 10 号粗体 + 9 号、边缘标记 9 号粗体
+    painter.setFont(QFont(Platform::uiFontFamily(), 8, QFont::Bold));
+    painter.drawText(scratch.rect(), Qt::AlignLeft | Qt::AlignBottom, QStringLiteral("传送阵"));
+    painter.setFont(QFont(Platform::uiFontFamily(), 10, QFont::Bold));
+    painter.drawText(scratch.rect(), Qt::AlignHCenter | Qt::AlignTop, QStringLiteral("跳跃触发"));
+    painter.setFont(QFont(Platform::uiFontFamily(), 9));
+    painter.drawText(scratch.rect(), Qt::AlignHCenter | Qt::AlignBottom,
+        QStringLiteral("通往迷宫遗迹 浅水区域"));
+    painter.setFont(QFont(Platform::uiFontFamily(), 9, QFont::Bold));
+    painter.drawText(scratch.rect(), Qt::AlignRight | Qt::AlignVCenter, QStringLiteral("传送阵 0123456789"));
+    // 背包面板（B）：标题 / 物品名 / 说明各一档字号，外加物品文案里的常用字
+    painter.setFont(QFont(Platform::uiFontFamily(), 12, QFont::Bold));
+    painter.drawText(scratch.rect(), Qt::AlignLeft | Qt::AlignTop, QStringLiteral("背包 物品 空空如也"));
+    painter.setFont(QFont(Platform::uiFontFamily(), 10));
+    painter.drawText(scratch.rect(), Qt::AlignLeft | Qt::AlignTop, QStringLiteral(
+        "B 关闭 悬停看说明 再点按钮关闭 x0123456789"));
+    painter.setFont(QFont(Platform::uiFontFamily(), 10, QFont::Bold));
+    painter.drawText(scratch.rect(), Qt::AlignLeft | Qt::AlignTop, QStringLiteral(
+        "意识回归符咒 史莱姆核心"));
+    painter.setFont(QFont(Platform::uiFontFamily(), 10));
+    painter.drawText(scratch.rect(), Qt::AlignLeft | Qt::AlignTop, QStringLiteral(
+        "克苏鲁之眼 投影 掉落 可堆叠 死亡 被动 触发 回归 复活 结算 诅咒 余光 注意 精英 腐化 吞噬 天赋 暴食 确认 拒绝 转化 消耗 折算 积分"));
 }
 
 void GameWidget::paintEvent(QPaintEvent* event) {
@@ -4531,12 +5878,34 @@ void GameWidget::paintEvent(QPaintEvent* event) {
         QString("LV %1    XP %2 / %3").arg(player.level).arg(shown(player.xp)).arg(session_.xpToNext()));
     painter.drawText(QRect(meta.x() + 6, meta.y() + 18, 198, 16), Qt::AlignVCenter | Qt::AlignLeft,
         QString("ARM %1    CRT %2%").arg(int(std::lround(player.armor))).arg(12 + player.critBonus));
+    // 索敌状态铭牌（仅桌面）：安卓右上角本来就有「索敌」按钮显示开关，PC 上原来只有一条
+    // 转瞬即逝的 toast，这里补一个常驻提示；开启时亮绿，关闭时压暗
+    const int seekPlateY = originY + 136;
+    if (!touchUi_) {
+        const QRect seekPlate(originX + 14, seekPlateY, 210, 20);
+        const bool seekOn = autoAim_;
+        painter.setPen(Qt::NoPen);
+        painter.setBrush(seekOn ? QColor(16, 34, 18, 205) : QColor(12, 10, 9, 190));
+        painter.drawRect(seekPlate);
+        painter.setBrush(Qt::NoBrush);
+        painter.setPen(QPen(seekOn ? QColor(96, 178, 88) : QColor(90, 58, 50), 1));
+        painter.drawRect(seekPlate.adjusted(0, 0, -1, -1));
+        painter.setFont(QFont(Platform::uiFontFamily(), 10, QFont::Bold));
+        painter.setPen(seekOn ? QColor(150, 226, 140) : QColor(150, 138, 124));
+        painter.drawText(QRect(seekPlate.x() + 6, seekPlate.y(), 130, 19), Qt::AlignLeft | Qt::AlignVCenter,
+            QStringLiteral("索敌  CapsLock"));
+        painter.setPen(seekOn ? QColor(196, 246, 180) : QColor(122, 114, 104));
+        painter.drawText(QRect(seekPlate.x() + 140, seekPlate.y(), 64, 19), Qt::AlignRight | Qt::AlignVCenter,
+            seekOn ? QStringLiteral("开") : QStringLiteral("关"));
+        painter.setFont(QFont(Platform::uiFontFamily(), 11));
+    }
     // 天赋进度：平时折叠成一行标题，点标题行才展开明细（桌面左键 / 触屏点按）
     // 史莱姆之躯多一行「暴食」进度，展开时面板跟着长高
     const bool showGluttony = session_.slimeBody();
     const int talentRows = showGluttony ? 7 : 6;
     const int talentX = originX + 14;
-    const int talentY = originY + 136;
+    // 桌面端上面多了一块索敌铭牌，天赋面板跟着下移
+    const int talentY = touchUi_ ? originY + 136 : seekPlateY + 24;
     const int talentW = 210;
     const int talentHeaderH = 18;
     const int talentPanelH = talentHudOpen_ ? talentHeaderH + 4 + talentRows * 13 : talentHeaderH;
@@ -4586,6 +5955,11 @@ void GameWidget::paintEvent(QPaintEvent* event) {
         }
     }
     int hudY = talentHudRect_.bottom() + 3;
+    // 天气状态条：挂在天赋面板正下方（没有天气时不占位）
+    if (session_.weatherOn()) {
+        drawWeatherHud(painter, originX + 14, hudY, 210);
+        hudY += 22;
+    }
     // 史莱姆之躯的形态面板：当前外形、加成与拟态技能冷却
     if (session_.slimeBody()) {
         const MimicText text = mimicText(session_.mimicForm());
@@ -4699,16 +6073,8 @@ void GameWidget::paintEvent(QPaintEvent* event) {
         hudY += panelH + 4;
     }
     painter.setPen(QColor(228, 212, 188));
-    // 意识回归符咒按获取个数挂在 SCORE 旁边
-    const int charms = session_.talismanCount();
-    const int cores = session_.slimeCoreCount();
+    // 物品一律收进背包（B 键 / 触屏右上角按钮），画面上不再用文字统计数量
     QString scoreText = QString("SCORE %1").arg(session_.score());
-    if (cores > 0) {
-        scoreText = QString("核心 x%1   ").arg(cores) + scoreText;
-    }
-    if (charms > 0) {
-        scoreText = QString("符咒 x%1   ").arg(charms) + scoreText;
-    }
     // 顶部一行：计时居中，帧率跟在它右侧。帧率开启时先把这一段的字体钉死，
     // 上面各面板绘制会改字体，跟着当前字体走会让测量和排版漂移
     const QString timeText = formatTime(session_.time());
@@ -4746,6 +6112,8 @@ void GameWidget::paintEvent(QPaintEvent* event) {
         painter.setFont(QFont(Platform::uiFontFamily(), 9));
         scoreText = fpsText + "  " + scoreText;
     }
+    // SCORE 所在行的下缘：下面的 toast（升级 / 成就等提示）要挂在它下面，别叠在一起
+    int scoreRowBottom = originY + 32;
     if (touchUi_) {
         if (fpsSharesScoreRow) {
             // 从左侧属性面板右缘起排，免得压住 HP 那一列
@@ -4756,9 +6124,11 @@ void GameWidget::paintEvent(QPaintEvent* event) {
             // 右上角留给「索敌 / 说明 / 暂停」按钮
             painter.drawText(QRect(originX, originY + 30, viewW, 22), Qt::AlignHCenter | Qt::AlignTop, scoreText);
         }
+        scoreRowBottom = originY + 52;
     } else if (fpsOnTimeRow) {
         // 同行右侧让给了帧率，SCORE 下移一行居中
         painter.drawText(QRect(originX, originY + 30, viewW, 22), Qt::AlignHCenter | Qt::AlignTop, scoreText);
+        scoreRowBottom = originY + 52;
     } else {
         painter.drawText(QRect(originX, originY + 10, viewW - 16, 22), Qt::AlignRight | Qt::AlignTop, scoreText);
     }
@@ -4788,6 +6158,7 @@ void GameWidget::paintEvent(QPaintEvent* event) {
     drawSanBar(painter, view);
     drawRadar(painter, view);
     drawMazeMap(painter, view);
+    drawTeleportMarkers(painter, view);
     struct Chip {
         QString key;
         QString name;
@@ -4816,12 +6187,27 @@ void GameWidget::paintEvent(QPaintEvent* event) {
                 : QString("%1/3").arg(player.stacksThrust);
         } else if (skill == kSkillFlight || skill == kSkillJetpack) {
             chip.sub = player.flying ? QString("飞行中") : QString("关");
+        } else if (skill == kSkillThunderPunish) {
+            chip.sub = player.thunderPunish
+                ? QStringLiteral("开 -%1MP/s").arg(int(kThunderPunishDrain))
+                : QStringLiteral("关");
+        } else if (skill == kSkillErase && player.eraseStage > 0) {
+            chip.remain = std::max(0.f, slotCd);
+            chip.maxCd = skillCdMax(skill);
+            chip.sub = QString("前摇 %1s").arg(player.eraseT, 0, 'f', 1);
         } else if (skill == kSkillSeek) {
             chip.sub = player.seekOn ? QString("开") : QString("关");
         } else if (skill == kSkillMirror && player.mirrorT > 0.f) {
             chip.sub = QString("%1/%2").arg(int(player.mirrorAbsorbed)).arg(int(player.mirrorCap));
             chip.remain = player.mirrorT;
             chip.maxCd = 10.f;
+        } else if (skill == kSkillWeather) {
+            // 与其它技能一致：第二行先给冷却读数，再带上当前天气
+            chip.remain = std::max(0.f, slotCd);
+            chip.maxCd = skillCdMax(skill);
+            chip.sub = chip.remain > 0.05f
+                ? QString("%1 %2s").arg(weatherName(session_.weather())).arg(chip.remain, 0, 'f', 1)
+                : QString("%1 就绪").arg(weatherName(session_.weather()));
         } else if (skill == kSkillBerserk && player.berserkT > 0.f) {
             chip.sub = QString("%1 %2s").arg(skillText(skill).name).arg(player.berserkT, 0, 'f', 1);
             chip.remain = player.berserkT;
@@ -4943,10 +6329,14 @@ void GameWidget::paintEvent(QPaintEvent* event) {
     }
     painter.setPen(QColor(138, 122, 108));
     if (!touchUi_) {
-        painter.drawText(QRect(originX, chipY - 16, viewW, 14), Qt::AlignHCenter, "Tab 查看技能与天赋");
+        painter.drawText(QRect(originX, chipY - 16, viewW, 14), Qt::AlignHCenter,
+            "Tab 查看技能与天赋　B 打开背包");
     }
     if (toastTime_ > 0.f) {
-        painter.drawText(QRect(originX, originY + 40, viewW, 24), Qt::AlignHCenter, toast_);
+        // 挂在 SCORE 那一行下面：帧率 / 触屏布局会把 SCORE 压到 originY + 30，
+        // 原来固定的 originY + 40 会和它叠在一起
+        const int toastY = std::max(originY + 40, scoreRowBottom + 6);
+        painter.drawText(QRect(originX, toastY, viewW, 24), Qt::AlignHCenter, toast_);
     }
     // 吟唱字幕挂在角色头顶，一个词一个词往外蹦；画在这里是为了压在白闪之上
     const QString chant = session_.atomicChant();
@@ -4976,6 +6366,10 @@ void GameWidget::paintEvent(QPaintEvent* event) {
     }
     if (!spritesOk_) {
         painter.drawText(QRect(originX, originY + viewH - 28, viewW, 20), Qt::AlignCenter, "未找到像素图，当前用色块代替");
+    }
+    // 背包面板（B / 右上角按钮）压在其它 HUD 之上，但仍在触屏按钮之下
+    if (bagOpen_) {
+        drawBagPanel(painter, view);
     }
     if (touchUi_ && running_ && !session_.ended()) {
         drawTouchControls(painter);

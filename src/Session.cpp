@@ -56,6 +56,15 @@ constexpr float kMineSanCut = 10.f;
 // 理智上限被削到原上限的这个比例就不再下降
 constexpr float kSanCutFloorRatio = 0.3f;
 
+// —— 传送平台
+// 生成距离：视野是 30×17 格，取 20~30 格确保平台落在画面之外、走两步又能摸到
+constexpr float kPadSpawnMinTiles = 20.f;
+constexpr float kPadSpawnMaxTiles = 30.f;
+// 平台自己离玩家超过这么远（玩家走岔了）就把平台挪到身边重新刷
+constexpr float kPadKeepTiles = 44.f;
+// 用掉后的再次刷新冷却
+constexpr float kPadRearmTime = 12.f;
+
 // 史莱姆之躯：受到伤害的倍率，以及「恢复」按最大生命/体力的百分比
 constexpr float kSlimeBodyDamageTaken = 0.9f;
 constexpr float kSlimeBodyHealRatio = 0.2f;
@@ -408,6 +417,20 @@ void Session::newGameStepReset(uint32_t seed, uint32_t runId, HeroClass hero, in
     reason_ = EndReason::None;
     notice_.clear();
     rng_ = seed ^ runId ^ 0xA5A5u;
+    pads_.clear();
+    for (float& cd : padCd_) {
+        cd = 0.f;
+    }
+    // 天气从平静期起手：开场静默 kWeatherFirstDelay 秒后刮起第一场
+    cancelWeatherPick();
+    weather_ = WeatherKind::Clear;
+    lastWeather_ = WeatherKind::Clear;
+    weatherT_ = kWeatherFirstDelay;
+    weatherIntensity_ = 0.f;
+    lightningCd_ = 0.f;
+    lightningFlash_ = 0.f;
+    clearLightningBolts();
+    hailCd_ = 0.f;
     // 开局赠送的世界指引提示：本步不产生其它提示，放这里与拆分前的最终提示一致
     if (guideAtStart) {
         note("天赋：世界指引（开局赠送）");
@@ -513,7 +536,9 @@ bool Session::loadFrom(const QJsonObject& game) {
     if (player_.slimeBody) {
         const int mimic = std::clamp(p.value("mimic").toInt(int(MimicForm::Slime)), 0, int(MimicForm::Count) - 1);
         player_.mimic = MimicForm(mimic);
-        player_.devouredMask = uint32_t(p.value("devoured").toDouble(double(mimicBit(MimicForm::Hero))));
+        // 默认（含旧存档）至少带「原本的躯体」与史莱姆本体两个形态
+        const double defaultForms = double(mimicBit(MimicForm::Hero) | mimicBit(MimicForm::Slime));
+        player_.devouredMask = uint32_t(p.value("devoured").toDouble(defaultForms));
         // 存档里若指到没吞噬过的形态，退回默认的史莱姆形象
         if (player_.mimic != MimicForm::Hero && (player_.devouredMask & mimicBit(player_.mimic)) == 0u) {
             player_.mimic = MimicForm::Slime;
@@ -521,8 +546,10 @@ bool Session::loadFrom(const QJsonObject& game) {
     }
     player_.devourCount = std::max(0, p.value("devourCount").toInt());
     player_.talentGluttony = p.value("talentGluttony").toBool(false);
-    // 自己的尸体默认已被吞噬：任何情况下这一位都在
-    player_.devouredMask |= mimicBit(MimicForm::Hero);
+    // 雷罚是持续开关：读档时若还开着就继续烧蓝，免得读档后凭空多出一场免耗蓝的雷雨
+    player_.thunderPunish = p.value("thunderPunish").toBool(false);
+    // 原本的躯体与史莱姆本体默认已被吞噬：任何情况下这两位都在
+    player_.devouredMask |= mimicBit(MimicForm::Hero) | mimicBit(MimicForm::Slime);
     eliteCd_ = float(p.value("eliteCd").toDouble(0.0));
     if (p.contains("baseMaxHp")) {
         baseMaxHp_ = float(p.value("baseMaxHp").toDouble());
@@ -595,6 +622,15 @@ bool Session::loadFrom(const QJsonObject& game) {
     player_.san = float(game.value("san").toDouble(player_.maxSan));
     player_.sanWeak = player_.san <= player_.maxSan * 0.1f && player_.san > 0.f;
     sanActive_ = game.value("sanActive").toBool(false);
+    // 天气：旧存档没有这几个字段，按平静期起手处理
+    weather_ = WeatherKind(std::clamp(game.value("weather").toInt(0), 0, int(WeatherKind::Typhoon)));
+    lastWeather_ = WeatherKind(std::clamp(game.value("lastWeather").toInt(0), 0, int(WeatherKind::Typhoon)));
+    weatherT_ = std::max(0.f, float(game.value("weatherT").toDouble(kWeatherFirstDelay)));
+    weatherIntensity_ = weather_ == WeatherKind::Clear ? 0.f : 1.f;
+    lightningCd_ = 3.f;
+    lightningFlash_ = 0.f;
+    clearLightningBolts();
+    hailCd_ = 0.5f;
     sanKill_ = false;
     reviveState_ = ReviveState::None;
     revivePrompt_ = false;
@@ -624,6 +660,10 @@ QJsonObject Session::toJson() const {
     game.insert("eyeDefeats", eyeDefeats_);
     game.insert("san", player_.san);
     game.insert("sanActive", sanActive_);
+    // 天气：只存当前这一场与剩余时间，轮换本身由 Session 的随机序列推进
+    game.insert("weather", int(weather_));
+    game.insert("lastWeather", int(lastWeather_));
+    game.insert("weatherT", weatherT_);
     game.insert("spawnCd", spawnCd_);
     game.insert("flyerCd", flyerCd_);
     QJsonObject p;
@@ -677,6 +717,9 @@ QJsonObject Session::toJson() const {
     p.insert("devourCount", player_.devourCount);
     if (player_.talentGluttony) {
         p.insert("talentGluttony", true);
+    }
+    if (player_.thunderPunish) {
+        p.insert("thunderPunish", true);
     }
     p.insert("eliteCd", eliteCd_);
     game.insert("player", p);
@@ -988,8 +1031,9 @@ bool Session::acceptReviveWithSlimeCore() {
 
 void Session::transformIntoSlimeBody() {
     player_.slimeBody = true;
-    // 自己的尸体默认已经被吞噬，所以「原本的躯体」一开始就能选；复活后默认史莱姆形象
-    player_.devouredMask |= mimicBit(MimicForm::Hero);
+    // 自己的尸体与史莱姆本体默认已经被吞噬，所以「原本的躯体」与「史莱姆」一开始就能选；
+    // 复活后默认史莱姆形象
+    player_.devouredMask |= mimicBit(MimicForm::Hero) | mimicBit(MimicForm::Slime);
     player_.mimic = MimicForm::Slime;
     player_.cdMimicSkill = 0.f;
     player_.mimicFlyT = 0.f;
@@ -1343,6 +1387,8 @@ void Session::hurtPlayer(float damage, Monster* source) {
             return;
         }
     }
+    // 抹杀前摇：挨一下就算打断（护盾 / 减伤照常结算，但法阵散掉，只吃 10% 最大 MP）
+    interruptErase();
     if (player_.guardT > 0.f) {
         damage *= 0.35f;
     }
@@ -1788,6 +1834,10 @@ void Session::castSlot(int skill, float& cooldown) {
         toggleFlight();
         return;
     }
+    if (skill == kSkillThunderPunish) {
+        toggleThunderPunish();
+        return;
+    }
     if (skill == kSkillBurial) {
         castBurial(cooldown);
         return;
@@ -1798,6 +1848,15 @@ void Session::castSlot(int skill, float& cooldown) {
     }
     if (skill == kSkillMageHeal) {
         castMageHeal(cooldown);
+        return;
+    }
+    if (skill == kSkillWeather) {
+        // 改天先不结算：等玩家在面板上选完天气，选中时才扣 MP 与进冷却
+        requestWeatherPick(cooldown);
+        return;
+    }
+    if (skill == kSkillErase) {
+        castErase(cooldown);
         return;
     }
     if (skill == kSkillBerserk) {
@@ -2416,6 +2475,109 @@ void Session::updateBurial(float dt) {
     player_.burialStage = 0;
     player_.burialT = 0.f;
     player_.burialNext = 0.f;
+}
+
+// —— 法师技能「抹杀」：5 秒前摇铺满 5 个法阵，完成时随机抹杀当前一半敌人
+void Session::castErase(float& cooldown) {
+    // 万葬的两段结算还在走时不能叠一发抹杀：两个前摇会互相覆盖状态
+    if (player_.hero != HeroClass::Mage || player_.eraseStage > 0 || player_.burialStage > 0
+        || player_.state == ActorState::Dead) {
+        return;
+    }
+    if (cooldown > 0.f) {
+        return;
+    }
+    const float cost = player_.maxMp * kEraseCostRatio;
+    if (player_.mp < cost) {
+        note("MP 不足");
+        return;
+    }
+    // 起手就扣掉 50%：中途被打断时退回 40%，净消耗正好是 10%
+    player_.mp -= cost;
+    cooldown = kEraseCd * cdMul();
+    player_.skillCasts += 1;
+    player_.eraseStage = 1;
+    player_.eraseT = kEraseWindup;
+    player_.state = ActorState::Attack;
+    player_.attackT = 0.45f / atkSpeedMul();
+    player_.heavy = true;
+    player_.animT = 0.f;
+    player_.attackId += 1;
+    pushFx(AttackFxKind::Pulse, 30.f, 0.f, 0.4f, 0xB98CFF);
+    queueSfx(SfxId::Skill);
+    note("抹杀");
+    checkTalents();
+}
+
+void Session::updateErase(float dt) {
+    if (player_.eraseStage <= 0) {
+        return;
+    }
+    if (player_.state == ActorState::Dead) {
+        player_.eraseStage = 0;
+        player_.eraseT = 0.f;
+        return;
+    }
+    player_.eraseT = std::max(0.f, player_.eraseT - dt);
+    // 前摇太长：先甩一段施法动作，余下时间回到待机循环，免得定格成一个姿势站五秒
+    player_.state = kEraseWindup - player_.eraseT < 0.45f ? ActorState::Attack : ActorState::Idle;
+    if (player_.eraseT <= 0.f) {
+        eraseBlast();
+    }
+}
+
+void Session::interruptErase() {
+    if (player_.eraseStage <= 0 || player_.state == ActorState::Dead) {
+        return;
+    }
+    player_.eraseStage = 0;
+    player_.eraseT = 0.f;
+    player_.state = ActorState::Idle;
+    player_.attackT = 0.f;
+    // 起手扣的是 50%，打断后退回 40%，净支出 10% 最大 MP
+    player_.mp = std::min(player_.maxMp, player_.mp + player_.maxMp * (kEraseCostRatio - kEraseAbortRatio));
+    note("抹杀被打断　只消耗 10% MP");
+    queueSfx(SfxId::Ui);
+}
+
+void Session::eraseBlast() {
+    player_.eraseStage = 0;
+    player_.eraseT = 0.f;
+    player_.state = ActorState::Attack;
+    player_.attackT = 0.6f / atkSpeedMul();
+    player_.animT = 0.f;
+    player_.attackId += 1;
+    pushFx(AttackFxKind::Mushroom, 190.f, 0.f, 0.6f, 0xB060FF);
+    pushFx(AttackFxKind::Pulse, 320.f, 0.f, 0.55f, 0xD8B8FF);
+    queueSfx(SfxId::Explode);
+    triggerShake();
+    // 收集当前所有敌对个体（整只沉在水下、还没排完雷的史莱姆 boss 抹不到）
+    std::vector<Monster*> targets;
+    for (Monster& monster : monsters_) {
+        if (monster.state == ActorState::Dead || monster.hp <= 0.f) {
+            continue;
+        }
+        if (monster.kind == MonsterKind::SlimeBoss && !pool_.cleared) {
+            continue;
+        }
+        targets.push_back(&monster);
+    }
+    // 洗牌后取前一半：数量向下取整，随机由 Session 的随机序列决定（读档可复现）
+    for (size_t i = targets.size(); i > 1; --i) {
+        const size_t j = nextRand() % i;
+        std::swap(targets[i - 1], targets[j]);
+    }
+    const size_t killCount = targets.size() / 2;
+    for (size_t i = 0; i < killCount; ++i) {
+        Monster& monster = *targets[i];
+        // 抹除不是伤害：无视护盾、减伤与 boss 入场保护，交给既有的死亡结算
+        queueVfx(VfxKind::Kill, monster.x, monster.y, monsterHitRadius(monster));
+        monster.shield = 0.f;
+        monster.hp = 0.f;
+        monster.hurtT = 0.12f;
+    }
+    note(QString("抹杀　%1 个目标").arg(int(killCount)));
+    checkTalents();
 }
 
 // I am atomic：一次烧掉当前全部 MP，换来一发抹除画面内一切的核级引爆
@@ -3089,7 +3251,9 @@ void Session::update(float dt, const InputState& input, float mouseX, float mous
     updateAttackFx(dt);
     updateRuin(dt);
     updatePool(dt);
+    updateTeleportPads(dt);
     updateSan(dt);
+    updateWeather(dt);
     if (player_.state != ActorState::Dead) {
         spawn(worldDt);
     } else if (player_.animT > 0.85f) {
@@ -3124,6 +3288,7 @@ void Session::updatePlayer(float dt, const InputState& input, float mouseX, floa
     player_.cdV = std::max(0.f, player_.cdV - dt);
     updateBurial(dt);
     updateAtomic(dt);
+    updateErase(dt);
     player_.berserkT = std::max(0.f, player_.berserkT - dt);
     if (player_.state != ActorState::Dead) {
         updateRobotBuffs(dt);
@@ -3139,7 +3304,10 @@ void Session::updatePlayer(float dt, const InputState& input, float mouseX, floa
     if (player_.state != ActorState::Dodge && !player_.flying) {
         player_.stamina = std::min(player_.maxStamina, player_.stamina + 32.f * dt);
     }
-    player_.mp = std::min(player_.maxMp, player_.mp + 10.f * mimicBonus().manaRegen * dt);
+    // 雷罚开着时自然回蓝暂停：否则每秒 10 点的回复会把 2 点的消耗完全吃掉
+    if (!player_.thunderPunish) {
+        player_.mp = std::min(player_.maxMp, player_.mp + 10.f * mimicBonus().manaRegen * dt);
+    }
     player_.shield = std::min(player_.maxShield, player_.shield + 3.f * dt);
     if (player_.state == ActorState::Dead) {
         // 死亡瞬间把次元斩的一切收干净：判定作废、配音叫停（界面据此恢复 BGM）
@@ -3164,6 +3332,12 @@ void Session::updatePlayer(float dt, const InputState& input, float mouseX, floa
         if (player_.state == ActorState::Dead) {
             return;  // 踩雷把人踩死了
         }
+    }
+
+    // 抹杀前摇：锁死移动、闪避与其它操作，只有受到伤害（见 hurtPlayer）或死亡能打断
+    if (player_.eraseStage > 0) {
+        checkTalents();
+        return;
     }
 
     // —— 史莱姆之躯：拟态计时与左 Ctrl 技能
@@ -4383,7 +4557,7 @@ void Session::onEyeDefeated() {
     ruin_.pulseR = -1.f;
     triggerShake();
     addItem(kItemReturnTalisman, 1);
-    note(QString("克苏鲁之眼被击败　获得 %1").arg(itemText(kItemReturnTalisman).name));
+    note(QString("克苏鲁之眼被击败　获得 %1（已放入背包）").arg(itemText(kItemReturnTalisman).name));
     // 击败 boss：理智恢复正常，停止流逝
     if (sanActive_) {
         sanActive_ = false;
@@ -4424,6 +4598,397 @@ void Session::updateSan(float dt) {
         queueSfx(SfxId::Death);
         note("理智彻底崩溃");
     }
+}
+
+// —— 法师技能「改天」：释放只置起请求，面板选中后才真正结算
+// MP 与冷却都放在「选中」那一刻：中途取消不该白白烧掉一发技能
+void Session::requestWeatherPick(float& cooldown) {
+    if (player_.hero != HeroClass::Mage || weatherPickOpen_ || player_.state == ActorState::Dead) {
+        return;
+    }
+    if (cooldown > 0.f) {
+        return;
+    }
+    if (!weatherEnabled_) {
+        note("天气系统已在设置中关闭，改天无法释放");
+        return;
+    }
+    if (player_.mp < kWeatherPickMp * skillCostMul()) {
+        note("MP 不足");
+        return;
+    }
+    // 记下这一发是从哪个技能键按出来的，选中时才知道该进哪个冷却
+    int slot = -1;
+    if (&cooldown == &player_.cdD) {
+        slot = 0;
+    } else if (&cooldown == &player_.cdF) {
+        slot = 1;
+    } else if (&cooldown == &player_.cdC) {
+        slot = 2;
+    } else if (&cooldown == &player_.cdV) {
+        slot = 3;
+    }
+    if (slot < 0) {
+        return;
+    }
+    weatherPickSlot_ = slot;
+    weatherPickOpen_ = true;
+    weatherPickRequest_ = true;
+}
+
+bool Session::consumeWeatherPickRequest() {
+    const bool requested = weatherPickRequest_;
+    weatherPickRequest_ = false;
+    return requested;
+}
+
+void Session::cancelWeatherPick() {
+    weatherPickOpen_ = false;
+    weatherPickRequest_ = false;
+    weatherPickSlot_ = -1;
+}
+
+bool Session::chooseWeather(WeatherKind kind) {
+    if (!weatherPickOpen_) {
+        return false;
+    }
+    const int slot = weatherPickSlot_;
+    weatherPickOpen_ = false;
+    weatherPickRequest_ = false;
+    weatherPickSlot_ = -1;
+    if (!weatherEnabled_) {
+        note("天气系统已在设置中关闭");
+        return false;
+    }
+    const float cost = kWeatherPickMp * skillCostMul();
+    if (player_.mp < cost) {
+        note("MP 不足");
+        return false;
+    }
+    player_.mp -= cost;
+    float* cooldown = slot == 0 ? &player_.cdD : slot == 1 ? &player_.cdF : slot == 2 ? &player_.cdC : &player_.cdV;
+    *cooldown = kWeatherPickCd * cdMul();
+    player_.skillCasts += 1;
+    // 雷罚还把天气锁在雷雨里：玩家既然手动改天，就先收掉雷罚（不再强制转雨天）
+    endThunderPunish(false);
+    // 换天气：强度仍按 kWeatherRamp 渐入，不会硬切画面
+    lastWeather_ = weather_;
+    weather_ = kind;
+    clearLightningBolts();
+    if (kind == WeatherKind::Clear) {
+        weatherT_ = kWeatherCalmMin;
+        note("改天　转晴");
+    } else {
+        weatherT_ = kWeatherLifeMin + float(nextRand() % 1000u) / 1000.f * (kWeatherLifeMax - kWeatherLifeMin);
+        // 落雷 / 冰雹的节拍从头起算，免得刚换完天气就立刻砸下来
+        lightningCd_ = 2.5f;
+        hailCd_ = 0.5f;
+        note(QString("改天　%1").arg(weatherName(kind)));
+    }
+    pushFx(AttackFxKind::Pulse, 34.f, 0.f, 0.45f, 0x9FD8FF);
+    queueSfx(SfxId::Skill);
+    checkTalents();
+    return true;
+}
+
+// —— 天气系统
+// 六种天灾轮流上场：开场静默 kWeatherFirstDelay 秒后第一次刮起来，此后
+// 「天气 → 平静 → 天气」循环，强度在 kWeatherRamp 秒内渐入渐出。
+// 天气只砸怪不伤玩家：雷雨天的落雷与冰雹的碎击都写在下面两个入口里。
+void Session::setWeatherEnabled(bool on) {
+    const bool was = weatherEnabled_;
+    weatherEnabled_ = on;
+    if (!on) {
+        // 关掉立刻收手：转入平静期，强度渐出（粒子在绘制层自己衰减完）
+        cancelWeatherPick();
+        endThunderPunish(false);
+        weather_ = WeatherKind::Clear;
+        weatherIntensity_ = 0.f;
+        clearLightningBolts();
+        return;
+    }
+    if (!was) {
+        // 重新打开：把等待压进一段平静期里，不必再空等开场那段长静默
+        weather_ = WeatherKind::Clear;
+        weatherT_ = std::clamp(weatherT_, kWeatherCalmMin, kWeatherCalmMax);
+    }
+}
+
+void Session::rollWeather() {
+    if (weather_ == WeatherKind::Clear) {
+        // 六选一，避开上一场（免得连着两场一样），雷雨天略微压低权重
+        WeatherKind pick = WeatherKind::Rain;
+        for (int tries = 0; tries < 8; ++tries) {
+            const uint32_t roll = nextRand() % 100u;
+            if (roll < 24u) {
+                pick = WeatherKind::Rain;
+            } else if (roll < 40u) {
+                pick = WeatherKind::Thunder;
+            } else if (roll < 58u) {
+                pick = WeatherKind::Blizzard;
+            } else if (roll < 74u) {
+                pick = WeatherKind::Hail;
+            } else if (roll < 88u) {
+                pick = WeatherKind::Sandstorm;
+            } else {
+                pick = WeatherKind::Typhoon;
+            }
+            if (pick != lastWeather_ || tries >= 4) {
+                break;
+            }
+        }
+        weather_ = pick;
+        weatherT_ = kWeatherLifeMin + float(nextRand() % 1000u) / 1000.f * (kWeatherLifeMax - kWeatherLifeMin);
+        const float phase = float(nextRand() % 1000u) / 1000.f;
+        // 落雷 / 冰雹的节拍错开一点，免得每次都在天气刚起时同时开火
+        lightningCd_ = 2.5f + phase * 4.f;
+        hailCd_ = 0.5f + phase;
+        note(QString("天气　%1").arg(weatherName(weather_)));
+    } else {
+        lastWeather_ = weather_;
+        weather_ = WeatherKind::Clear;
+        weatherT_ = kWeatherCalmMin + float(nextRand() % 1000u) / 1000.f * (kWeatherCalmMax - kWeatherCalmMin);
+    }
+}
+
+// —— 法师技能「雷罚」：把天气锁进雷雨天，按秒烧蓝；关掉后转雨天交还正常轮换
+void Session::toggleThunderPunish() {
+    if (player_.hero != HeroClass::Mage || player_.state == ActorState::Dead) {
+        return;
+    }
+    if (player_.thunderPunish) {
+        endThunderPunish(true);
+        note("雷罚结束　转雨天");
+        return;
+    }
+    if (!weatherEnabled_) {
+        note("天气系统已在设置中关闭，雷罚无法开启");
+        return;
+    }
+    if (player_.mp < 1.f) {
+        note("MP 不足");
+        return;
+    }
+    player_.thunderPunish = true;
+    player_.skillCasts += 1;
+    lastWeather_ = weather_;
+    weather_ = WeatherKind::Thunder;
+    // 强度先顶到落雷门槛之上：开启后不必再等一段渐入才劈第一道
+    weatherIntensity_ = std::max(weatherIntensity_, 0.35f);
+    lightningCd_ = 0.8f;
+    pushFx(AttackFxKind::Pulse, 30.f, 0.f, 0.4f, 0xB8D8FF);
+    queueSfx(SfxId::Skill);
+    note("雷罚　雷雨天");
+    checkTalents();
+}
+
+void Session::updateThunderPunish(float dt) {
+    if (!player_.thunderPunish) {
+        return;
+    }
+    if (player_.state == ActorState::Dead || !weatherEnabled_) {
+        endThunderPunish(false);
+        return;
+    }
+    player_.mp -= kThunderPunishDrain * dt;
+    if (player_.mp <= 0.f) {
+        player_.mp = 0.f;
+        endThunderPunish(true);
+        note("MP 耗尽　雷罚结束");
+    }
+}
+
+void Session::endThunderPunish(bool toRain) {
+    if (!player_.thunderPunish) {
+        return;
+    }
+    player_.thunderPunish = false;
+    if (!toRain) {
+        return;
+    }
+    // 关闭后转雨天，并把这一场雨天交还给正常天气轮换
+    lastWeather_ = weather_;
+    weather_ = WeatherKind::Rain;
+    weatherT_ = kWeatherLifeMin + float(nextRand() % 1000u) / 1000.f * (kWeatherLifeMax - kWeatherLifeMin);
+    lightningCd_ = 0.f;
+}
+
+void Session::updateWeather(float dt) {
+    lightningFlash_ = std::max(0.f, lightningFlash_ - dt * 2.8f);
+    for (LightningBolt& bolt : lightningBolts_) {
+        if (!bolt.active) {
+            continue;
+        }
+        bolt.age += dt;
+        if (bolt.age >= kLightningLife) {
+            bolt.active = false;
+        }
+    }
+    // 雷罚的持续耗蓝放在天气这一层：暂停时 update 不会走到这里，蓝也就不会掉
+    updateThunderPunish(dt);
+    if (!weatherEnabled_) {
+        weatherIntensity_ = std::max(0.f, weatherIntensity_ - dt / kWeatherRamp);
+        return;
+    }
+    const float target = weather_ == WeatherKind::Clear ? 0.f : 1.f;
+    const float step = dt / kWeatherRamp;
+    weatherIntensity_ = target > weatherIntensity_ ? std::min(target, weatherIntensity_ + step)
+                                                   : std::max(target, weatherIntensity_ - step);
+    // 死了就不再轮换天气：画面停在这一场，等结算或复活
+    if (player_.state == ActorState::Dead) {
+        return;
+    }
+    // 雷罚：天气锁在雷雨里不推进轮换，落雷按更密的节拍一次降下三道
+    if (player_.thunderPunish) {
+        if (weatherIntensity_ > 0.2f) {
+            lightningCd_ -= dt;
+            if (lightningCd_ <= 0.f) {
+                strikeLightning(kThunderPunishBolts);
+                lightningCd_ = kThunderPunishCdMin
+                    + float(nextRand() % 1000u) / 1000.f * (kThunderPunishCdMax - kThunderPunishCdMin);
+            }
+        }
+        return;
+    }
+    weatherT_ -= dt;
+    if (weatherT_ <= 0.f) {
+        rollWeather();
+    }
+    // 雷雨天：强度起来之后按 4~8 秒的节拍落雷
+    if (weather_ == WeatherKind::Thunder && weatherIntensity_ > 0.35f) {
+        lightningCd_ -= dt;
+        if (lightningCd_ <= 0.f) {
+            strikeLightning();
+            lightningCd_ = 4.f + float(nextRand() % 1000u) / 1000.f * 4.f;
+        }
+    }
+    // 冰雹：强度起来之后每 0.45 秒砸一下视野内的怪
+    if (weather_ == WeatherKind::Hail && weatherIntensity_ > 0.35f) {
+        hailCd_ -= dt;
+        if (hailCd_ <= 0.f) {
+            hailStrike();
+            hailCd_ = 0.45f;
+        }
+    }
+}
+
+// 把一道雷放进画面槽位：三个槽都占着（雷罚一次三道）时把最老的那道顶掉
+void Session::spawnLightningBolt(float x, float y) {
+    int slot = 0;
+    float oldest = -1.f;
+    for (int i = 0; i < kMaxLightningBolts; ++i) {
+        if (!lightningBolts_[i].active) {
+            slot = i;
+            break;
+        }
+        if (lightningBolts_[i].age > oldest) {
+            oldest = lightningBolts_[i].age;
+            slot = i;
+        }
+    }
+    LightningBolt& bolt = lightningBolts_[slot];
+    bolt.active = true;
+    bolt.x = x;
+    bolt.y = y;
+    bolt.age = 0.f;
+}
+
+void Session::clearLightningBolts() {
+    for (LightningBolt& bolt : lightningBolts_) {
+        bolt = LightningBolt{};
+    }
+}
+
+// 落雷：优先劈玩家附近的一只怪，附近没怪就往玩家旁边空地上劈一记（只有画面效果）。
+// count > 1 时（雷罚）尽量每道劈不同的怪，不够就落到空地上。
+void Session::strikeLightning(int count) {
+    std::vector<int> struck;
+    for (int i = 0; i < count; ++i) {
+        Monster* target = nullptr;
+        int candidates = 0;
+        for (Monster& monster : monsters_) {
+            if (monster.state == ActorState::Dead || monster.kind == MonsterKind::Eye
+                || monster.kind == MonsterKind::SlimeBoss) {
+                continue;
+            }
+            if (lengthOf(monster.x - player_.x, monster.y - player_.y) > kLightningRange) {
+                continue;
+            }
+            bool taken = false;
+            for (int id : struck) {
+                if (id == monster.id) {
+                    taken = true;
+                    break;
+                }
+            }
+            if (taken) {
+                continue;
+            }
+            // 蓄水池抽样：不额外开数组，也能等概率挑一只
+            candidates += 1;
+            if (nextRand() % uint32_t(candidates) == 0u) {
+                target = &monster;
+            }
+        }
+        float x = 0.f;
+        float y = 0.f;
+        if (target) {
+            x = target->x;
+            y = target->y;
+            struck.push_back(target->id);
+        } else {
+            const float angle = float(nextRand() % 1000u) / 1000.f * 6.2831853f;
+            const float dist = 40.f + float(nextRand() % 1000u) / 1000.f * 100.f;
+            x = player_.x + std::cos(angle) * dist;
+            y = player_.y + std::sin(angle) * dist;
+        }
+        spawnLightningBolt(x, y);
+        queueVfx(VfxKind::Thunder, x, y, kLightningRadius);
+        // 伤害范围比画出来的白闪略小一点：站在边缘的怪只被擦到
+        for (Monster& monster : monsters_) {
+            if (monster.state == ActorState::Dead) {
+                continue;
+            }
+            if (lengthOf(monster.x - x, monster.y - y) <= reachWithRadius(kLightningRadius, monster)) {
+                // hurtMonster 会把 lastHitBy 记成玩家这次的攻击序号，从而吃掉这一刀；
+                // 天灾伤人属于额外伤害，还回去，玩家自己的攻击判定不受影响
+                const int savedHitBy = monster.lastHitBy;
+                hurtMonster(monster, 16.f + float(monster.level) * 1.2f, 10.f);
+                monster.lastHitBy = savedHitBy;
+            }
+        }
+    }
+    // 白闪 / 音效 / 震屏一轮只来一次，三道雷不会叠成三份
+    lightningFlash_ = 1.f;
+    queueSfx(SfxId::Explode);
+    triggerShake();
+}
+
+// 冰雹碎击：随机砸中视野内的一只怪，掉一点血（伤害很低，胜在不停地下）
+void Session::hailStrike() {
+    Monster* target = nullptr;
+    int candidates = 0;
+    for (Monster& monster : monsters_) {
+        if (monster.state == ActorState::Dead || monster.kind == MonsterKind::Eye
+            || monster.kind == MonsterKind::SlimeBoss) {
+            continue;
+        }
+        if (lengthOf(monster.x - player_.x, monster.y - player_.y) > kHailRange) {
+            continue;
+        }
+        candidates += 1;
+        if (nextRand() % uint32_t(candidates) == 0u) {
+            target = &monster;
+        }
+    }
+    if (!target) {
+        return;
+    }
+    queueVfx(VfxKind::Hail, target->x, target->y, 10.f);
+    // 同上：冰雹不该吃掉玩家这一刀
+    const int savedHitBy = target->lastHitBy;
+    hurtMonster(*target, 3.f + float(target->level) * 0.4f, 1.f);
+    target->lastHitBy = savedHitBy;
 }
 
 void Session::cameraShake(float& sx, float& sy) const {
@@ -4630,6 +5195,274 @@ bool Session::spawnPool() {
     return false;
 }
 
+// ---------------------------------------------------------------------------
+// 传送平台
+// ---------------------------------------------------------------------------
+
+bool Session::teleportTargetLive(TeleportTarget target) const {
+    if (target == TeleportTarget::Ruin) {
+        return ruin_.active && ruin_.phase == MazeRuin::Phase::Live;
+    }
+    return pool_.active && pool_.phase == ShallowPool::Phase::Live;
+}
+
+bool Session::teleportDestination(TeleportTarget target, float& x, float& y) const {
+    if (!teleportTargetLive(target)) {
+        return false;
+    }
+    if (target == TeleportTarget::Ruin) {
+        // 落在迷宫入口那一格：外墙唯一的缺口，传送过去正对门口
+        x = ruin_.entranceWorldX();
+        y = ruin_.entranceWorldY();
+        return true;
+    }
+    // 浅水：落在外圈清空带上、朝玩家来的那一侧，进场就能直接开排雷
+    float dx = player_.x - pool_.centerX();
+    float dy = player_.y - pool_.centerY();
+    const float len = lengthOf(dx, dy);
+    if (len < 1.f) {
+        dx = 1.f;
+        dy = 0.f;
+    } else {
+        dx /= len;
+        dy /= len;
+    }
+    const float edge = float(pool_.radius + ShallowPool::kClearMargin) * float(kTile);
+    x = pool_.centerX() + dx * edge;
+    y = pool_.centerY() + dy * edge;
+    return true;
+}
+
+bool Session::snapToWalkable(float& x, float& y, int radiusTiles) const {
+    const int tx = tileOf(x);
+    const int ty = tileOf(y);
+    // 由近及远一圈圈找：第一圈里有可站格就用它，找不到再往外扩
+    for (int r = 0; r <= radiusTiles; ++r) {
+        bool found = false;
+        int bestX = 0;
+        int bestY = 0;
+        float bestD = 0.f;
+        for (int dy = -r; dy <= r; ++dy) {
+            for (int dx = -r; dx <= r; ++dx) {
+                if (std::max(std::abs(dx), std::abs(dy)) != r) {
+                    continue;
+                }
+                if (!map_.walkable(tx + dx, ty + dy)) {
+                    continue;
+                }
+                const float d = float(dx * dx + dy * dy);
+                if (!found || d < bestD) {
+                    found = true;
+                    bestD = d;
+                    bestX = tx + dx;
+                    bestY = ty + dy;
+                }
+            }
+        }
+        if (found) {
+            x = (float(bestX) + 0.5f) * float(kTile);
+            y = (float(bestY) + 0.5f) * float(kTile);
+            return true;
+        }
+    }
+    return false;
+}
+
+bool Session::placeTeleportPad(TeleportPad& pad, TeleportTarget target) {
+    // 先把玩家腿能走到的范围扫一遍：平台必须真的走得到，
+    // 否则刷在池塘或迷宫墙对面就白搭（跳跃过不了水，也翻不过迷宫墙）
+    const int scan = int(kPadSpawnMaxTiles) + 4;
+    const int px = tileOf(player_.x);
+    const int py = tileOf(player_.y);
+    const int w = scan * 2 + 1;
+    auto indexOf = [&](int x, int y) {
+        return size_t(x - (px - scan)) + size_t(y - (py - scan)) * size_t(w);
+    };
+    auto inBox = [&](int x, int y) {
+        return x >= px - scan && x <= px + scan && y >= py - scan && y <= py + scan;
+    };
+    std::vector<uint8_t> reach(size_t(w) * size_t(w), 0);
+    std::vector<size_t> stack;
+    auto visit = [&](int x, int y) {
+        if (!inBox(x, y) || !map_.walkable(x, y)) {
+            return;
+        }
+        const size_t index = indexOf(x, y);
+        if (reach[index]) {
+            return;
+        }
+        reach[index] = 1;
+        stack.push_back(index);
+    };
+    // 起点就是玩家脚下：哪怕正站在岩石上（跳跃落地）也要从这里起算
+    reach[indexOf(px, py)] = 1;
+    stack.push_back(indexOf(px, py));
+    const int dirs[4][2] = {{1, 0}, {-1, 0}, {0, 1}, {0, -1}};
+    while (!stack.empty()) {
+        const size_t index = stack.back();
+        stack.pop_back();
+        const int cx = int(index % size_t(w)) + (px - scan);
+        const int cy = int(index / size_t(w)) + (py - scan);
+        for (const auto& d : dirs) {
+            visit(cx + d[0], cy + d[1]);
+        }
+    }
+    auto reachable = [&](int x, int y) {
+        return inBox(x, y) && reach[indexOf(x, y)] != 0;
+    };
+
+    for (int attempt = 0; attempt < 60; ++attempt) {
+        const float angle = float(nextRand() % 628u) / 100.f;
+        const float dist = kPadSpawnMinTiles
+            + float(nextRand() % 1000u) / 1000.f * (kPadSpawnMaxTiles - kPadSpawnMinTiles);
+        const int cx = px + int(std::cos(angle) * dist);
+        const int cy = py + int(std::sin(angle) * dist);
+        // 别把平台摆进迷宫 / 浅水区的地盘：那边有覆盖层，落上去反而看不清
+        if (ruin_.active && ruin_.inClearZone(cx, cy)) {
+            continue;
+        }
+        if (pool_.active && pool_.inClearZone(cx, cy)) {
+            continue;
+        }
+        if (!reachable(cx, cy)) {
+            continue;
+        }
+        const int ox = cx - kTeleportPadTiles / 2;
+        const int oy = cy - kTeleportPadTiles / 2;
+        bool ok = true;
+        for (int y = 0; y < kTeleportPadTiles && ok; ++y) {
+            for (int x = 0; x < kTeleportPadTiles && ok; ++x) {
+                if (!map_.walkable(ox + x, oy + y)) {
+                    ok = false;
+                }
+            }
+        }
+        if (!ok) {
+            continue;
+        }
+        pad.active = true;
+        pad.target = target;
+        pad.tileX = ox;
+        pad.tileY = oy;
+        return true;
+    }
+    return false;
+}
+
+void Session::updateTeleportPads(float dt) {
+    for (float& cd : padCd_) {
+        cd = std::max(0.f, cd - dt);
+    }
+    if (player_.state != ActorState::Dead) {
+        for (int i = 0; i < static_cast<int>(TeleportTarget::Count); ++i) {
+            const TeleportTarget target = TeleportTarget(i);
+            TeleportPad* pad = nullptr;
+            for (TeleportPad& candidate : pads_) {
+                if (candidate.target == target) {
+                    pad = &candidate;
+                    break;
+                }
+            }
+            float destX = 0.f;
+            float destY = 0.f;
+            if (!teleportDestination(target, destX, destY)) {
+                // 遗迹沉入地下 / 浅水区消失：平台一并撤掉
+                if (pad) {
+                    pad->active = false;
+                }
+                continue;
+            }
+            // 目的地就在跟前（或已经从那边出发）：不需要传送平台
+            if (lengthOf(destX - player_.x, destY - player_.y) < kTeleportPadMinDist * float(kTile)) {
+                if (pad) {
+                    pad->active = false;
+                }
+                continue;
+            }
+            if (!pad) {
+                if (padCd_[i] > 0.f) {
+                    continue;
+                }
+                TeleportPad fresh;
+                if (placeTeleportPad(fresh, target)) {
+                    fresh.destX = destX;
+                    fresh.destY = destY;
+                    pads_.push_back(fresh);
+                } else {
+                    // 这一片地太挤，隔一会儿再试，别每帧都跑 60 次投点
+                    padCd_[i] = 2.f;
+                }
+                continue;
+            }
+            // 浅水区的落点跟着玩家所在的方位微调，走过去正好从最近的一侧进场
+            pad->destX = destX;
+            pad->destY = destY;
+            // 玩家走岔了、平台晾在很远的地方：挪到身边重新刷一块
+            if (lengthOf(pad->centerX() - player_.x, pad->centerY() - player_.y) > kPadKeepTiles * float(kTile)) {
+                TeleportPad fresh;
+                if (placeTeleportPad(fresh, target)) {
+                    fresh.destX = destX;
+                    fresh.destY = destY;
+                    *pad = fresh;
+                }
+            }
+        }
+        pads_.erase(
+            std::remove_if(pads_.begin(), pads_.end(), [](const TeleportPad& pad) { return !pad.active; }),
+            pads_.end());
+    }
+    // 站在平台上起跳即传送：跟 jumpT 走，键盘空格与触屏「跳跃」按钮都能触发
+    if (player_.jumpT <= 0.f) {
+        return;
+    }
+    for (TeleportPad& pad : pads_) {
+        const float half = float(kTeleportPadTiles) * 0.5f * float(kTile);
+        if (std::abs(player_.x - pad.centerX()) > half || std::abs(player_.y - pad.centerY()) > half) {
+            continue;
+        }
+        useTeleportPad(pad);
+        break;
+    }
+}
+
+void Session::useTeleportPad(TeleportPad& pad) {
+    float destX = pad.destX;
+    float destY = pad.destY;
+    const int targetIndex = static_cast<int>(pad.target);
+    if (!snapToWalkable(destX, destY, 4)) {
+        note("传送失败：目的地被占住了");
+        padCd_[targetIndex] = 3.f;
+        pad.active = false;
+        return;
+    }
+    const float fromX = player_.x;
+    const float fromY = player_.y;
+    player_.x = destX;
+    player_.y = destY;
+    // 落地的那一跳已经用掉了：清掉跳跃计时，免得终点那边又被算一次触发
+    player_.jumpT = 0.f;
+    player_.invuln = std::max(player_.invuln, 0.8f);
+    // 寻路场下一帧会按新位置重建
+    pathTileX_ = 999999;
+    pathTileY_ = 999999;
+    // 出发点与落点各闪一圈紫光
+    AttackFx blink;
+    blink.kind = AttackFxKind::Blink;
+    blink.radius = 26.f;
+    blink.life = 0.3f;
+    blink.maxLife = 0.3f;
+    blink.x = fromX;
+    blink.y = fromY - 8.f;
+    attackFx_.push_back(blink);
+    blink.x = player_.x;
+    blink.y = player_.y - 8.f;
+    attackFx_.push_back(blink);
+    queueSfx(SfxId::Skill);
+    padCd_[targetIndex] = kPadRearmTime;
+    pad.active = false;
+    note(QString("传送 → %1").arg(teleportTargetName(pad.target)));
+}
+
 void Session::spawnSlimeBoss(float hp, float shield, int level) {
     Monster monster;
     monster.id = nextId_++;
@@ -4753,6 +5586,8 @@ void Session::updateCorrosion(float dt) {
 
 // 腐蚀地面打在玩家身上的那一 tick：数值不大，但会打断回血节奏，也可能直接致死
 void Session::hurtPlayerByCorrosion() {
+    // 腐蚀掉血同样算受击：打断抹杀的前摇
+    interruptErase();
     const float tickDamage = kCorrosionTickDamage;
     player_.hp -= tickDamage;
     player_.hurtT = std::max(player_.hurtT, 0.1f);
@@ -5041,7 +5876,7 @@ void Session::onSlimeBossDefeated() {
     triggerShake();
     // 史莱姆 boss 的掉落改成史莱姆核心：这是「史莱姆之躯」流派的门票
     addItem(kItemSlimeCore, 1);
-    note(QString("巨型腐化史莱姆被击败　获得 %1").arg(itemText(kItemSlimeCore).name));
+    note(QString("巨型腐化史莱姆被击败　获得 %1（已放入背包）").arg(itemText(kItemSlimeCore).name));
     restoreSanCap();
     if (sanActive_) {
         sanActive_ = false;

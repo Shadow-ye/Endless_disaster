@@ -76,7 +76,6 @@ struct InputState {
     bool fEdge = false;
     bool cEdge = false;
     bool vEdge = false;
-    bool bEdge = false;
     bool gEdge = false;
     // 史莱姆之躯的拟态技能（左 Ctrl / 触屏按钮）
     bool ctrlEdge = false;
@@ -97,7 +96,6 @@ struct InputState {
         fEdge = false;
         cEdge = false;
         vEdge = false;
-        bEdge = false;
         gEdge = false;
         ctrlEdge = false;
     }

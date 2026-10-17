@@ -1,5 +1,5 @@
 cmake_minimum_required(VERSION 3.21)
-project(EndlessDisaster VERSION 0.6.5 LANGUAGES CXX)
+project(EndlessDisaster VERSION 0.7.0 LANGUAGES CXX)
 
 set(CMAKE_CXX_STANDARD 17)
 set(CMAKE_CXX_STANDARD_REQUIRED ON)
@@ -15,6 +15,8 @@ qt_add_executable(EndlessDisaster
     src/GameWidget.cpp
     src/LoadingWidget.h
     src/LoadingWidget.cpp
+    src/MenuTitle.h
+    src/MenuTitle.cpp
     src/Session.h
     src/Session.cpp
     src/TileMap.h
@@ -95,6 +97,8 @@ add_custom_command(TARGET EndlessDisaster POST_BUILD
     COMMAND ${CMAKE_COMMAND} -E copy_if_different ${CMAKE_SOURCE_DIR}/assets/ui/游戏图标.jpg $<TARGET_FILE_DIR:EndlessDisaster>/assets/ui/游戏图标.jpg
     COMMAND ${CMAKE_COMMAND} -E copy_if_different ${CMAKE_SOURCE_DIR}/assets/ui/游戏图标.jpg $<TARGET_FILE_DIR:EndlessDisaster>/游戏图标.jpg
     COMMAND ${CMAKE_COMMAND} -E copy_directory ${CMAKE_SOURCE_DIR}/assets/character-img $<TARGET_FILE_DIR:EndlessDisaster>/character-img
+    # 背包里的物品图标：仓库根目录 things/ 原样拷到可执行文件旁的 assets/things
+    COMMAND ${CMAKE_COMMAND} -E copy_directory ${CMAKE_SOURCE_DIR}/things $<TARGET_FILE_DIR:EndlessDisaster>/assets/things
     COMMAND ${CMAKE_COMMAND} -E copy_directory ${CMAKE_SOURCE_DIR}/BGM $<TARGET_FILE_DIR:EndlessDisaster>/BGM
     COMMAND ${CMAKE_COMMAND} -E copy_if_different ${CMAKE_SOURCE_DIR}/assets/ART_CREDIT.txt $<TARGET_FILE_DIR:EndlessDisaster>/assets/ART_CREDIT.txt
 )
@@ -117,6 +121,13 @@ if(ANDROID)
         assets/tiles/* assets/sfx/* assets/character-img/*.png BGM/*)
     list(APPEND ED_ANDROID_DATA assets/ui/story_bg.png assets/ui/游戏图标.jpg)
     qt_add_resources(EndlessDisaster gamedata PREFIX / BIG_RESOURCES FILES ${ED_ANDROID_DATA})
+
+    # 背包物品图标：things/ 编进 qrc 的 /assets/things 前缀，运行时与桌面端同一路径（:/assets/things/xxx）
+    file(GLOB ED_THING_ICONS CONFIGURE_DEPENDS ${CMAKE_SOURCE_DIR}/things/*)
+    if(ED_THING_ICONS)
+        qt_add_resources(EndlessDisaster thingicons PREFIX /assets/things BASE ${CMAKE_SOURCE_DIR}/things
+            FILES ${ED_THING_ICONS})
+    endif()
 
     # 覆盖安装要求 versionCode 不减小：由版本号推出（0.3.1 -> 301），本地与 CI 同版本得到相同的值
     set(ED_ANDROID_VERSION_CODE "" CACHE STRING "Override Android versionCode (empty: derived from project version)")
@@ -184,6 +195,7 @@ if(UNIX AND NOT APPLE AND NOT ANDROID)
         DESTINATION ${ED_DATA_DIR}/assets/ui)
     install(FILES assets/ART_CREDIT.txt DESTINATION ${ED_DATA_DIR}/assets)
     install(DIRECTORY assets/character-img DESTINATION ${ED_DATA_DIR})
+    install(DIRECTORY things DESTINATION ${ED_DATA_DIR}/assets)
     install(DIRECTORY BGM DESTINATION ${ED_DATA_DIR})
 
     install(FILES packaging/linux/endless-disaster.desktop

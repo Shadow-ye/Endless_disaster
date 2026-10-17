@@ -10,6 +10,7 @@
 
 class GameWidget;
 class LoadingWidget;
+class MenuTitle;
 class QCheckBox;
 class QComboBox;
 class QGraphicsOpacityEffect;
@@ -37,6 +38,9 @@ private:
     void showMenu();
     void showPrepare();
     void showSettings();
+    void showAchievements();
+    // 按 Storage 里已解锁的成就重建列表（未解锁的成就也列出，只是压暗）
+    void refreshAchievements();
     void startPrepared();
     void continueGame();
     // 开局加载页：把准备步骤摊到多帧执行，参数先记在这里
@@ -79,7 +83,9 @@ private:
     QStackedWidget* stack_ = nullptr;
     QWidget* menu_ = nullptr;
     QLabel* menuBg_ = nullptr;
-    QLabel* menuTitle_ = nullptr;
+    MenuTitle* menuTitle_ = nullptr;
+    // 标题下方的英文副标题：与主标题同一套特效，字号更小
+    MenuTitle* menuSubTitle_ = nullptr;
     QWidget* menuContent_ = nullptr;
     QWidget* menuLinks_ = nullptr;
     QPixmap menuBgPix_;
@@ -95,6 +101,9 @@ private:
     QGraphicsOpacityEffect* prepareMageOpacity_ = nullptr;
     QGraphicsOpacityEffect* prepareSwordOpacity_ = nullptr;
     QWidget* settings_ = nullptr;
+    QWidget* achievements_ = nullptr;
+    QTextBrowser* achievementList_ = nullptr;
+    QLabel* achievementSummary_ = nullptr;
     GameWidget* game_ = nullptr;
     QLabel* recordLabel_ = nullptr;
     QPushButton* continueButton_ = nullptr;
@@ -106,6 +115,9 @@ private:
     QLabel* bgmVolumeLabel_ = nullptr;
     QCheckBox* guideCheck_ = nullptr;
     QCheckBox* showFpsCheck_ = nullptr;
+    QCheckBox* weatherCheck_ = nullptr;
+    QSlider* brightSlider_ = nullptr;
+    QLabel* brightValueLabel_ = nullptr;
     HeroClass hero_ = HeroClass::Warrior;
     QPushButton* heroButton_ = nullptr;
     QLabel* heroStats_ = nullptr;

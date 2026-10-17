@@ -63,6 +63,15 @@ foreach ($dir in @("assets", "BGM", "character-img")) {
     Copy-Item $src -Destination $dst -Recurse -Force
 }
 
+# 背包物品图标在仓库根目录 things/，游戏按 assets/things 读取（与 CMake 的 POST_BUILD 拷贝一致）。
+# 上面重铺 assets 时会把构建目录里的 assets/things 一起删掉，这里补回来，否则发布包里图标会缺。
+$thingsSrc = Join-Path $repo "things"
+if (Test-Path $thingsSrc) {
+    $thingsDst = Join-Path $out "assets\things"
+    if (Test-Path $thingsDst) { Remove-Item $thingsDst -Recurse -Force }
+    Copy-Item $thingsSrc -Destination $thingsDst -Recurse -Force
+}
+
 $zip = Join-Path $repo "dist\EndlessDisaster-windows-x64.zip"
 if (Test-Path $zip) { Remove-Item $zip -Force }
 Compress-Archive -Path $out -DestinationPath $zip

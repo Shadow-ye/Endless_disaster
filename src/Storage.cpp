@@ -3,9 +3,11 @@
 #include <QCoreApplication>
 #include <QDir>
 #include <QFile>
+#include <QJsonArray>
 #include <QJsonDocument>
 #include <QSaveFile>
 #include <QStandardPaths>
+#include <QStringList>
 
 #include <algorithm>
 
@@ -91,6 +93,9 @@ AppSettings Storage::loadSettings() {
     settings.autoAimDesktop = obj.value("autoAimDesktop").toBool(false);
     settings.guideAtStart = obj.value("guideAtStart").toBool(false);
     settings.showFps = obj.value("showFps").toBool(false);
+    // 天气系统：旧设置里没有这一项，按默认打开
+    settings.weather = obj.value("weather").toBool(true);
+    settings.brightness = std::clamp(obj.value("brightness").toInt(100), 50, 150);
     return settings;
 }
 
@@ -104,10 +109,59 @@ void Storage::saveSettings(const AppSettings& settings) {
     obj.insert("autoAimDesktop", settings.autoAimDesktop);
     obj.insert("guideAtStart", settings.guideAtStart);
     obj.insert("showFps", settings.showFps);
+    obj.insert("weather", settings.weather);
+    // 亮度按 50~150 存，超范围一律夹回来（手改 settings.json 也读得回来）
+    obj.insert("brightness", std::clamp(settings.brightness, 50, 150));
     QSaveFile file(dir() + "/settings.json");
     if (!file.open(QIODevice::WriteOnly)) {
         return;
     }
     file.write(QJsonDocument(obj).toJson(QJsonDocument::Indented));
     file.commit();
+}
+
+QSet<QString> Storage::loadAchievements() {
+    QSet<QString> unlocked;
+    QFile file(dir() + "/achievements.json");
+    if (!file.open(QIODevice::ReadOnly)) {
+        return unlocked;
+    }
+    const QJsonObject obj = QJsonDocument::fromJson(file.readAll()).object();
+    for (const QJsonValue& value : obj.value("unlocked").toArray()) {
+        if (value.isString()) {
+            unlocked.insert(value.toString());
+        }
+    }
+    return unlocked;
+}
+
+void Storage::saveAchievements(const QSet<QString>& unlocked) {
+    // 排序后写入：文件内容稳定，方便手改与对比
+    QStringList ids(unlocked.begin(), unlocked.end());
+    ids.sort();
+    QJsonArray array;
+    for (const QString& id : ids) {
+        array.append(id);
+    }
+    QJsonObject obj;
+    obj.insert("unlocked", array);
+    QSaveFile file(dir() + "/achievements.json");
+    if (!file.open(QIODevice::WriteOnly)) {
+        return;
+    }
+    file.write(QJsonDocument(obj).toJson(QJsonDocument::Indented));
+    file.commit();
+}
+
+bool Storage::unlockAchievement(const QString& id) {
+    if (id.isEmpty()) {
+        return false;
+    }
+    QSet<QString> unlocked = loadAchievements();
+    if (unlocked.contains(id)) {
+        return false;
+    }
+    unlocked.insert(id);
+    saveAchievements(unlocked);
+    return true;
 }

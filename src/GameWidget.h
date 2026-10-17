@@ -4,6 +4,7 @@
 #include "Sprites.h"
 
 #include <QVBoxLayout>
+#include <array>
 #include <QColor>
 #include <QElapsedTimer>
 #include <QHash>
@@ -82,7 +83,8 @@ private:
         AutoAim,
         Seek,
         Mimic,
-        MimicSkill
+        MimicSkill,
+        Bag
     };
     struct TouchButton {
         TouchControl control = TouchControl::None;
@@ -103,6 +105,8 @@ private:
     void refreshGuide();
     void leaveToMenu();
     void saveGame();
+    // 解锁成就：首次解锁时在画面上弹一行提示（id 见 Codex.h）
+    void unlockAchievement(const QString& id);
     void askSettle();
     void showVoidPrompt();
     void showRevivePrompt();
@@ -111,6 +115,35 @@ private:
     void toggleMimicPanel();
     void closeMimicPanel();
     void refreshMimicPanel();
+    // 背包：B 键 / 触屏右上角「背包」按钮开关（打开时时停，BGM 同设置界面压低不停播），
+    // 鼠标悬停或触屏点按物品格看详情，触屏另有面板右上角的 ✕ 关闭键
+
+    void toggleBagPanel();
+    void closeBagPanel();
+    // 改天（法师技能）：Session 置起请求后弹出天气选择面板，用 Qt 按钮选一种天气；
+    // 打开时时停，选完 / ✕ / Esc 关闭；取消不消耗 MP 与冷却
+    void openWeatherPanel();
+    void closeWeatherPanel();
+    void refreshWeatherPanel();
+    void pickWeather(WeatherKind kind);
+    // 背包面板的几何：绘制与命中判定共用一份计算
+    struct BagLayout {
+        QRect panel;
+        int cell = 0;
+        int gap = 6;
+        int cols = 5;
+        int rows = 1;
+        int titleH = 0;
+        int pad = 0;
+    };
+    BagLayout bagLayout(const QRect& view) const;
+    // 指针下的背包格子序号；不在任何格子上时返回 -1
+    int bagCellAt(const QPoint& viewPos) const;
+    // 物品图标（things/ 下的文件）；缺图时返回空图，面板退化成文字首字
+    const QImage& itemIcon(int kind);
+    // 指针在控件内的位置；触屏且没接鼠标时返回 (-1,-1)（没有悬停这回事）
+    QPoint pointerLocal() const;
+    void drawBagPanel(QPainter& painter, const QRect& view);
     void layoutOverlays();
     // 有界面弹出时压低 BGM 音量（不停播），全部关掉后恢复；结算面板不算，它配的是 5 号终曲
     void updateBgmDuck();
@@ -124,6 +157,8 @@ private:
     QPointF cameraOrigin() const;
     QPointF mouseWorld() const;
     void drawWorld(QPainter& painter);
+    // 抹杀的法阵：五层从地面铺开的圆盘，逐层更大，带俯视 3D 的柱面光墙
+    void drawEraseCircles(QPainter& painter, const Player& player);
     // 次元斩的画面层：浅蓝滤镜 + 逐道斩出的蓝刃 + 沿刃线把画面切开错位
     void drawDimensionCuts(QPainter& painter);
     void drawBossBar(QPainter& painter, const QRect& view);
@@ -137,6 +172,8 @@ private:
     // 迷宫地图的落点：触屏放雷达左侧，避开右下角的攻击与技能键
     QRect mazeMapRect(const QRect& view) const;
     void drawMazeMap(QPainter& painter, const QRect& view);
+    // 画面外的传送平台：在视口边缘标出它在哪一侧、通往哪里、还有多远
+    void drawTeleportMarkers(QPainter& painter, const QRect& view);
 
     qreal touchUnit() const;
     QPointF stickHome() const;
@@ -158,6 +195,15 @@ private:
     void spawnVfx(const VfxEvent& event);
     void updateParticles(float dt);
     void drawParticles(QPainter& painter);
+    // 天气：按当前天气与强度铺粒子（雨丝 / 雪片 / 冰雹 / 沙线 / 飞叶 / 溅射），
+    // 全部走画布坐标——天气是笼罩整屏的现象，不跟着相机滚动
+    void spawnWeather(float dt);
+    void updateWeather(float dt);
+    // 天气的画面层：大气色调、沙尘横带、暴风雪白幕、粒子、落雷与落雷白闪
+    void drawWeather(QPainter& painter);
+    void drawLightningBolt(QPainter& painter);
+    // 左上角 HUD 里的天气状态条（一行，随天赋面板往下排）
+    void drawWeatherHud(QPainter& painter, int x, int y, int w);
     float vfxRand();
     void drawShadow(QPainter& painter, float x, float y);
     // 拟态成 boss 时的本体（比原 boss 小一圈、不带血条铭牌）；
@@ -185,18 +231,44 @@ private:
         bool glow = false;
     };
 
+    // 天气粒子：单独一套数组，不与战斗特效挤占同一个上限。
+    // style 见 GameWidget.cpp 里的 WeatherLook 常量（雨丝 / 雪片 / 冰雹 / 沙线 / 飞叶 / 溅射）
+    struct WeatherParticle {
+        float x = 0.f;
+        float y = 0.f;
+        float vx = 0.f;
+        float vy = 0.f;
+        float life = 0.f;
+        float maxLife = 1.f;
+        float size = 2.f;
+        float len = 6.f;
+        float spin = 0.f;
+        int style = 0;
+        QRgb color = 0;
+    };
+
     Session session_;
     std::vector<Particle> particles_;
+    // 天气粒子与它的生成节流：生成量按「每秒多少颗 × 当前强度」累积，
+    // 每一种绘制样式各占一个格子（雨丝 / 雪片 / 冰雹 / 沙线 / 飞叶 / 溅射 / 浮尘）
+    std::vector<WeatherParticle> weather_;
+    std::array<float, 7> weatherSpawnAcc_{};
+    // 天气自己的时间线：台风的阵风、雪花的摇摆都按它走
+    float weatherTime_ = 0.f;
     // 独立于 Session 的随机数，避免粒子扰动玩法随机序列
     uint32_t vfxRng_ = 0x9E3779B9u;
     SpriteSet sprites_;
     bool spritesOk_ = false;
     QImage canvas_;
     QImage vignette_;
+    // 灾难滤镜：预先压暗过的地图表贴（地面 / 岩石 / 树木），角色与特效贴图保持原亮度
+    QImage tilesDark_;
     QTimer* timer_ = nullptr;
     QElapsedTimer clock_;
     // 帧率显示：开关来自设置页（settings.json），开局时读一次；统计走固定窗口，避免数字逐帧抖动
     bool showFps_ = false;
+    // 画面亮度百分比（settings.json）：100 为默认，全局叠在游戏画面上，HUD 不受影响
+    int brightness_ = 100;
     int fpsFrames_ = 0;        // 当前统计窗口内累计帧数
     double fpsAccumMs_ = 0.0;  // 当前统计窗口内累计耗时(ms)
     float fpsValue_ = 0.f;     // 结算后的显示用帧率
@@ -242,6 +314,11 @@ private:
     QCheckBox* pauseBgmCheck_ = nullptr;
     QSlider* pauseBgmSlider_ = nullptr;
     QLabel* pauseBgmValue_ = nullptr;
+    // 游戏内设置：画面亮度（同主菜单设置页的那一项）
+    QSlider* pauseBrightSlider_ = nullptr;
+    QLabel* pauseBrightValue_ = nullptr;
+    // 游戏内设置：天气系统开关（同主菜单设置页的那一项），关掉立刻转晴
+    QCheckBox* pauseWeatherCheck_ = nullptr;
     QLabel* guideText_ = nullptr;
     QScrollArea* guideScroll_ = nullptr;
     QWidget* resultPanel_ = nullptr;
@@ -262,4 +339,21 @@ private:
     QRect talentHudRect_;
     // 这次点击落在天赋面板上，抬起时也不当作一次攻击
     bool talentClick_ = false;
+    // 背包面板（B 键 / 触屏右上角按钮）：打开时时停，空背包时提示「空空如也」
+    bool bagOpen_ = false;
+    // 触屏点选的格子（-1 为无），用来在没有鼠标的设备上固定显示物品信息
+    int bagSelected_ = -1;
+    // 上一次画出的面板矩形，作为点击穿透（不触发攻击）的判据
+    QRect bagPanelRect_;
+    // 面板右上角的 ✕ 关闭键：手机没有 B 键，必须有个能点的关闭按钮
+    QRect bagCloseRect_;
+    // 已加载的物品图标缓存，键是 Item::kind
+    QHash<int, QImage> itemIcons_;
+    // 这次点击落在背包面板上，抬起时也不当作一次攻击
+    bool bagClick_ = false;
+    // 改天的天气选择面板：七个按钮（晴 + 六种天灾）
+    QWidget* weatherPanel_ = nullptr;
+    QLabel* weatherLabel_ = nullptr;
+    QVector<QPushButton*> weatherButtons_;
+    bool weatherPickOpen_ = false;
 };

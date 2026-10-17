@@ -5,6 +5,7 @@
 #include "Cursors.h"
 #include "GameWidget.h"
 #include "LoadingWidget.h"
+#include "MenuTitle.h"
 #include "Platform.h"
 #include "Storage.h"
 
@@ -17,8 +18,8 @@
 #include <QEvent>
 #include <QFile>
 #include <QFontMetrics>
+#include <QFontMetricsF>
 #include <QFrame>
-#include <QGraphicsDropShadowEffect>
 #include <QGraphicsOpacityEffect>
 #include <QGridLayout>
 #include <QHBoxLayout>
@@ -52,6 +53,10 @@ QString formatTime(float t) {
 }
 
 constexpr const char* kSlotKeys[4] = {"R", "F", "C", "V"};
+
+// 主菜单标题与英文副标题的字距（em 比例）：收紧后既聚拢，又不会挤成一团
+constexpr qreal kTitleLetterSpacing = 0.12;
+constexpr qreal kSubLetterSpacing = 0.28;
 
 struct HeroInfo {
     HeroClass hero;
@@ -212,7 +217,8 @@ MainWindow::MainWindow(QWidget* parent) : QWidget(parent) {
     menu_ = new QWidget(stack_);
     menu_->setObjectName("menuRoot");
     menu_->setAttribute(Qt::WA_StyledBackground, true);
-    menu_->setStyleSheet("QWidget#menuRoot { background: transparent; }");
+    // 图片完整居中后，上下会各露出一点底色：取贴近战场地面色调的深棕灰
+    menu_->setStyleSheet("QWidget#menuRoot { background: #3b352e; }");
     menuBg_ = new QLabel(menu_);
     menuBg_->setObjectName("menuBg");
     menuBg_->setAlignment(Qt::AlignCenter);
@@ -240,16 +246,23 @@ MainWindow::MainWindow(QWidget* parent) : QWidget(parent) {
     layout->setSpacing(14);
 
     QFont titleFont("KaiTi", 42);
-    // 全局 QSS 的 font-size:15px 会覆盖 setFont；必须在样式表里写字号。
-    menuTitle_ = new QLabel(QStringLiteral("无尽之灾"), menuContent_);
-    menuTitle_->setObjectName("menuHeroTitle");
-    menuTitle_->setAlignment(Qt::AlignCenter);
-    auto* titleShadow = new QGraphicsDropShadowEffect(menuTitle_);
-    titleShadow->setBlurRadius(18);
-    titleShadow->setOffset(0, 6);
-    titleShadow->setColor(QColor(0, 0, 0, 180));
-    menuTitle_->setGraphicsEffect(titleShadow);
-    layout->addWidget(menuTitle_);
+    // 标题自绘（红色辉光 + 深红立体投影 + 故障错位，效果对齐展示页 site/），
+    // 字号与字距由 layoutMenuTitle 按窗口宽度算好再交给它
+    // 标题与英文副标题装进同一个容器：容器内的行距单独收紧（紧贴），
+    // 对外仍是一个整体，和下面的记录条、按钮保持原来的正常间距
+    auto* titleBlock = new QWidget(menuContent_);
+    titleBlock->setObjectName(QStringLiteral("menuTitleBlock"));
+    titleBlock->setAttribute(Qt::WA_TransparentForMouseEvents, true);
+    titleBlock->setStyleSheet(QStringLiteral("QWidget#menuTitleBlock { background: transparent; }"));
+    auto* titleLayout = new QVBoxLayout(titleBlock);
+    titleLayout->setContentsMargins(0, 0, 0, 0);
+    titleLayout->setSpacing(0);
+    menuTitle_ = new MenuTitle(titleBlock);
+    titleLayout->addWidget(menuTitle_);
+    menuSubTitle_ = new MenuTitle(titleBlock);
+    menuSubTitle_->setText(QStringLiteral("ENDLESS DISASTER"));
+    titleLayout->addWidget(menuSubTitle_);
+    layout->addWidget(titleBlock);
 
     recordLabel_ = new QLabel(menuContent_);
     recordLabel_->setObjectName("dim");
@@ -258,9 +271,10 @@ MainWindow::MainWindow(QWidget* parent) : QWidget(parent) {
 
     auto* start = new QPushButton("出发", menuContent_);
     continueButton_ = new QPushButton("继续", menuContent_);
+    auto* achievementsBtn = new QPushButton("成就", menuContent_);
     auto* settingsBtn = new QPushButton("设置", menuContent_);
     auto* quit = new QPushButton("离开", menuContent_);
-    for (QPushButton* btn : {start, continueButton_, settingsBtn, quit}) {
+    for (QPushButton* btn : {start, continueButton_, achievementsBtn, settingsBtn, quit}) {
         btn->setFixedWidth(280);
         layout->addWidget(btn, 0, Qt::AlignHCenter);
     }
@@ -524,13 +538,66 @@ MainWindow::MainWindow(QWidget* parent) : QWidget(parent) {
     showFpsCheck_->setToolTip("开启后游戏画面顶部计时旁显示 FPS、单帧耗时(ms) 与场上怪物/粒子数量，仅在游戏进行时刷新。");
     settingsLayout->addWidget(showFpsCheck_);
 
+    weatherCheck_ = new QCheckBox("天气系统", settingsCard);
+    weatherCheck_->setToolTip("局内每隔一段时间刮起一场天灾：雨天、雷雨天、暴风雪、冰雹、沙尘暴、台风，"
+                              "每场持续半分多钟，之间有一段平静期。\n"
+                              "雷雨天的落雷与冰雹的碎击都只伤怪物，不会伤到你。关掉后本局不再出现任何天气。");
+    settingsLayout->addWidget(weatherCheck_);
+
+    auto* brightRow = new QWidget(settingsCard);
+    auto* brightLayout = new QHBoxLayout(brightRow);
+    brightLayout->setContentsMargins(0, 0, 0, 0);
+    auto* brightLabel = new QLabel("画面亮度", brightRow);
+    brightSlider_ = new QSlider(Qt::Horizontal, brightRow);
+    brightSlider_->setRange(50, 150);
+    brightValueLabel_ = new QLabel(brightRow);
+    brightValueLabel_->setMinimumWidth(40);
+    brightSlider_->setToolTip("整幅游戏画面的明暗，100% 为默认。末世滤镜只压暗地图，角色与特效保持原亮度。");
+    brightRow->setToolTip(brightSlider_->toolTip());
+    brightLayout->addWidget(brightLabel);
+    brightLayout->addWidget(brightSlider_, 1);
+    brightLayout->addWidget(brightValueLabel_);
+    settingsLayout->addWidget(brightRow);
+
     auto* settingsBack = new QPushButton("返回", settingsCard);
     settingsLayout->addWidget(settingsBack);
     settingsOuter->addWidget(settingsCard, 0, Qt::AlignHCenter);
 
+    achievements_ = new QWidget(stack_);
+    auto* achievementsOuter = new QVBoxLayout(achievements_);
+    achievementsOuter->setAlignment(Qt::AlignCenter);
+    auto* achievementsCard = new QFrame(achievements_);
+    achievementsCard->setObjectName("panel");
+    achievementsCard->setFixedWidth(560);
+    auto* achievementsLayout = new QVBoxLayout(achievementsCard);
+    achievementsLayout->setContentsMargins(28, 28, 28, 28);
+    achievementsLayout->setSpacing(12);
+    auto* achievementsTitle = new QLabel("成就", achievementsCard);
+    achievementsTitle->setObjectName("title");
+    achievementsTitle->setAlignment(Qt::AlignCenter);
+    achievementsTitle->setFont(titleFont);
+    achievementsLayout->addWidget(achievementsTitle);
+    achievementSummary_ = new QLabel(achievementsCard);
+    achievementSummary_->setObjectName("dim");
+    achievementSummary_->setAlignment(Qt::AlignCenter);
+    achievementsLayout->addWidget(achievementSummary_);
+    achievementList_ = new QTextBrowser(achievementsCard);
+    achievementList_->setOpenExternalLinks(false);
+    achievementList_->setOpenLinks(false);
+    achievementList_->setMinimumHeight(Platform::touchUi() ? 160 : 260);
+    achievementList_->setStyleSheet("QTextBrowser { background: transparent; border: none; color: #cbbfae; }");
+    if (Platform::touchUi()) {
+        QScroller::grabGesture(achievementList_->viewport(), QScroller::LeftMouseButtonGesture);
+    }
+    achievementsLayout->addWidget(achievementList_, 1);
+    auto* achievementsBack = new QPushButton("返回", achievementsCard);
+    achievementsLayout->addWidget(achievementsBack);
+    achievementsOuter->addWidget(achievementsCard, 0, Qt::AlignHCenter);
+
     stack_->addWidget(menu_);
     stack_->addWidget(prepare_);
     stack_->addWidget(settings_);
+    stack_->addWidget(achievements_);
     stack_->addWidget(game_);
     stack_->addWidget(loading_);
 
@@ -569,6 +636,14 @@ MainWindow::MainWindow(QWidget* parent) : QWidget(parent) {
         Audio::instance().play(SfxId::Ui);
         showMenu();
     });
+    connect(achievementsBtn, &QPushButton::clicked, this, [this] {
+        Audio::instance().play(SfxId::Ui);
+        showAchievements();
+    });
+    connect(achievementsBack, &QPushButton::clicked, this, [this] {
+        Audio::instance().play(SfxId::Ui);
+        showMenu();
+    });
     connect(sfxCheck_, &QCheckBox::toggled, this, [this](bool on) {
         sfxSlider_->setEnabled(on);
         saveSettingsUi();
@@ -598,6 +673,14 @@ MainWindow::MainWindow(QWidget* parent) : QWidget(parent) {
     });
     connect(showFpsCheck_, &QCheckBox::toggled, this, [this](bool on) {
         (void)on;
+        saveSettingsUi();
+    });
+    connect(weatherCheck_, &QCheckBox::toggled, this, [this](bool on) {
+        (void)on;
+        saveSettingsUi();
+    });
+    connect(brightSlider_, &QSlider::valueChanged, this, [this](int value) {
+        brightValueLabel_->setText(QString("%1%").arg(value));
         saveSettingsUi();
     });
     connect(quit, &QPushButton::clicked, this, [] { QApplication::quit(); });
@@ -753,7 +836,7 @@ void MainWindow::refreshPrepareSkills() {
         for (int i = 0; i < 4; ++i) {
             html += line(kSlotKeys[i], skillText(mageSkillBoxes_[i]->currentData().toInt()));
         }
-        html += "<p style='margin:8px 0 0 0; color:#a89888;'>可选技能共六个，带走其中四个。" + guideNote + "</p>";
+        html += "<p style='margin:8px 0 0 0; color:#a89888;'>可选技能共九个，带走其中四个。" + guideNote + "</p>";
     } else {
         const auto& boxes = robot ? robotSkillBoxes_ : warriorSkillBoxes_;
         skillHint_->setText(QString("Q 防御　E 恢复　%1技能栏：R / F / C（自选，不可重复）").arg(info.role));
@@ -799,8 +882,9 @@ void MainWindow::layoutMenuBackground() {
     }
     menuBg_->setGeometry(r);
     if (!menuBgPix_.isNull()) {
-        // Cover-crop: scale to fill, then let QLabel clip to geometry.
-        const QPixmap scaled = menuBgPix_.scaled(r.size(), Qt::KeepAspectRatioByExpanding, Qt::SmoothTransformation);
+        // 完整居中：按窗口等比缩放后整体可见，图里烘焙的顶部横幅不会被裁掉两端的字
+        // （图比窗口「宽」时上下会各露出少量空白，QLabel 按 AlignCenter 居中摆放）
+        const QPixmap scaled = menuBgPix_.scaled(r.size(), Qt::KeepAspectRatio, Qt::SmoothTransformation);
         menuBg_->setPixmap(scaled);
     }
     menuContent_->setGeometry(r);
@@ -818,11 +902,14 @@ void MainWindow::layoutMenuTitle() {
     if (!menuTitle_ || !menu_) {
         return;
     }
-    const int maxW = qMax(120, menu_->width() - 64);
+    // 左右各留 30px：辉光与故障错位都在文字之外，贴着布局边缘会被切
+    const int maxW = qMax(120, menu_->width() - 64 - 60);
     // 目标最大 500px；受窗口宽度限制，尽量撑满。
     const int maxPx = 500;
     const QString text = QStringLiteral("无尽之灾");
-    QFont font(Platform::titleFontFamily());
+    // 标题用界面的无衬线粗体：笔画方正好看，辉光与故障错位也压得住；
+    // 原来的楷体细笔画叠上发光会糊成一团
+    QFont font(Platform::uiFontFamily());
     font.setBold(true);
     font.setStyleStrategy(QFont::PreferAntialias);
 
@@ -842,22 +929,55 @@ void MainWindow::layoutMenuTitle() {
         }
     }
 
+    // 按窗口撑满后收 30%，再按要求整体缩 20%（两次）
+    best = std::max(16, int(best * 0.7 * 0.8 * 0.8));
+    // 字距收紧：汉字 0.12em、英文 0.28em（之前是 0.25em / 0.5em，看着散）
     font.setPixelSize(best);
-    font.setLetterSpacing(QFont::AbsoluteSpacing, qMax(4.0, best * 0.06));
-    menuTitle_->setFont(font);
-    // 样式表字号优先于全局 15px，必须写在这里。
-    menuTitle_->setStyleSheet(QStringLiteral(
-        "QLabel#menuHeroTitle {"
-        "  color: #0a0807;"
-        "  background: transparent;"
-        "  font-family: '%3';"
-        "  font-weight: 700;"
-        "  font-size: %1px;"
-        "  letter-spacing: %2px;"
-        "  padding: 4px 8px;"
-        "}").arg(best).arg(qMax(4, int(best * 0.06))).arg(Platform::titleFontFamily()));
-    const QFontMetrics fm(font);
-    menuTitle_->setFixedHeight(fm.height() + 20);
+    font.setLetterSpacing(QFont::AbsoluteSpacing, std::max(2.0, best * kTitleLetterSpacing));
+
+    // 英文副标题：与主标题同一套特效（辉光 / 立体投影 / 故障错位）。
+    // 间距收紧后英文串变短，两侧就对不齐了，所以字号不再拍比例，
+    // 而是二分到与汉字墨迹同宽——间距小、宽度仍一致
+    const QString subText = QStringLiteral("ENDLESS DISASTER");
+    const qreal titleInk = QFontMetricsF(font).tightBoundingRect(text).width();
+
+    QFont subFont(Platform::uiFontFamily());
+    subFont.setBold(true);
+    subFont.setStyleStrategy(QFont::PreferAntialias);
+    const auto subFontAt = [&](int pixelSize) {
+        QFont probe(subFont);
+        probe.setPixelSize(pixelSize);
+        probe.setLetterSpacing(QFont::AbsoluteSpacing, std::max(2.0, pixelSize * kSubLetterSpacing));
+        return probe;
+    };
+    int subLo = 8;
+    int subHi = std::max(subLo, int(best * 0.6));
+    while (subLo <= subHi) {
+        const int mid = (subLo + subHi) / 2;
+        if (QFontMetricsF(subFontAt(mid)).tightBoundingRect(subText).width() <= titleInk) {
+            subLo = mid + 1;
+        } else {
+            subHi = mid - 1;
+        }
+    }
+    // 字号只能取整数像素，先挑误差最小的一档，剩下的零头用字距找齐，两侧才对得严丝合缝
+    const int below = std::max(8, subHi);
+    const qreal errBelow = titleInk - QFontMetricsF(subFontAt(below)).tightBoundingRect(subText).width();
+    const qreal errAbove = QFontMetricsF(subFontAt(below + 1)).tightBoundingRect(subText).width() - titleInk;
+    subFont = subFontAt(errAbove < errBelow ? below + 1 : below);
+    const qreal leftover = titleInk - QFontMetricsF(subFont).tightBoundingRect(subText).width();
+    if (qAbs(leftover) > 0.5) {
+        subFont.setLetterSpacing(QFont::AbsoluteSpacing,
+            std::max(2.0, subFont.letterSpacing() + leftover / std::max(1, int(subText.size()))));
+    }
+
+    // 高度按墨迹算，不按行高算（行高含 leading，会让两行之间空出很大一块）
+    menuTitle_->setTitleFont(font);
+    menuTitle_->setFixedHeight(int(std::ceil(QFontMetricsF(font).tightBoundingRect(text).height())) + 14);
+
+    menuSubTitle_->setText(subText);
+    menuSubTitle_->setTitleFont(subFont);
+    menuSubTitle_->setFixedHeight(int(std::ceil(QFontMetricsF(subFont).tightBoundingRect(subText).height())) + 6);
 }
 
 void MainWindow::layoutPrepareArt() {
@@ -979,6 +1099,37 @@ void MainWindow::showSettings() {
     stack_->setCurrentWidget(settings_);
 }
 
+void MainWindow::showAchievements() {
+    refreshAchievements();
+    stack_->setCurrentWidget(achievements_);
+}
+
+void MainWindow::refreshAchievements() {
+    const QSet<QString> unlocked = Storage::loadAchievements();
+    const std::vector<AchievementText>& list = achievementTexts();
+    int ownedCount = 0;
+    QString html;
+    for (const AchievementText& text : list) {
+        const bool owned = unlocked.contains(text.id);
+        if (owned) {
+            ++ownedCount;
+        }
+        // 未解锁的也列出来，但条件用问号藏起来，解锁后才显示
+        const QString stateColor = owned ? QStringLiteral("#c45c48") : QStringLiteral("#5c5148");
+        const QString nameColor = owned ? QStringLiteral("#f2e6d8") : QStringLiteral("#8a7b70");
+        const QString detail = owned ? text.detail.toHtmlEscaped() : QStringLiteral("？？？");
+        html += QString("<p style='margin:6px 0 16px 0;'>"
+                        "<span style='color:%1;'>■</span> "
+                        "<b style='color:%2;'>%3</b>"
+                        "<span style='color:%1;'>　%4</span><br>"
+                        "<span style='color:%1;'>%5</span></p>")
+                    .arg(stateColor, nameColor, text.name.toHtmlEscaped(),
+                        owned ? QStringLiteral("已解锁") : QStringLiteral("未解锁"), detail);
+    }
+    achievementList_->setHtml(html);
+    achievementSummary_->setText(QString("已解锁 %1 / %2").arg(ownedCount).arg(int(list.size())));
+}
+
 void MainWindow::loadSettingsUi() {
     const AppSettings settings = Storage::loadSettings();
     QSignalBlocker b1(sfxCheck_);
@@ -987,6 +1138,8 @@ void MainWindow::loadSettingsUi() {
     QSignalBlocker b4(bgmSlider_);
     QSignalBlocker b5(guideCheck_);
     QSignalBlocker b6(showFpsCheck_);
+    QSignalBlocker b7(weatherCheck_);
+    QSignalBlocker b8(brightSlider_);
     sfxCheck_->setChecked(settings.sfxEnabled);
     sfxSlider_->setValue(settings.sfxVolume);
     sfxSlider_->setEnabled(settings.sfxEnabled);
@@ -997,6 +1150,9 @@ void MainWindow::loadSettingsUi() {
     bgmVolumeLabel_->setText(QString("%1%").arg(settings.bgmVolume));
     guideCheck_->setChecked(settings.guideAtStart);
     showFpsCheck_->setChecked(settings.showFps);
+    weatherCheck_->setChecked(settings.weather);
+    brightSlider_->setValue(settings.brightness);
+    brightValueLabel_->setText(QString("%1%").arg(settings.brightness));
     Audio::instance().setSfxEnabled(settings.sfxEnabled);
     Audio::instance().setSfxVolume(settings.sfxVolume);
     Audio::instance().setBgmEnabled(settings.bgmEnabled);
@@ -1011,6 +1167,8 @@ void MainWindow::saveSettingsUi() {
     settings.bgmVolume = bgmSlider_->value();
     settings.guideAtStart = guideCheck_->isChecked();
     settings.showFps = showFpsCheck_->isChecked();
+    settings.weather = weatherCheck_->isChecked();
+    settings.brightness = brightSlider_->value();
     Audio::instance().setSfxEnabled(settings.sfxEnabled);
     Audio::instance().setSfxVolume(settings.sfxVolume);
     Audio::instance().setBgmEnabled(settings.bgmEnabled);
