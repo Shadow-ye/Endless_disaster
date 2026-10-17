@@ -1842,9 +1842,10 @@ function createTalents() {
 const KB_ROWS = [
   { o: 0, keys: ['Esc'] },
   { o: 0, keys: ['Tab', 'Q', 'W', 'E', 'R', 'T'] },
-  { o: 0, keys: ['Shift', 'A', 'S', 'D', 'F', 'G'] },
-  { o: 2.2, keys: ['C', 'V', 'B'] },
-  { o: 0.2, keys: ['CapsLock', 'Ctrl', 'Space'] },
+  // 左侧修饰键按真实键盘自上而下排：Tab → CapsLock → Shift → Ctrl
+  { o: 0, keys: ['CapsLock', 'A', 'S', 'D', 'F', 'G'] },
+  { o: 0, keys: ['Shift', 'C', 'V', 'B'] },
+  { o: 0, keys: ['Ctrl', 'Space'] },
 ];
 const ACTIONS = [
   { keys: ['W', 'A', 'S', 'D'], seq: true, label: '移动', dt: 'W A S D' },
