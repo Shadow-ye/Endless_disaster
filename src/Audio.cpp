@@ -259,13 +259,22 @@ QString Audio::bgmPath(BgmId id) const {
     return {};
 }
 
+// 值没变就别重建：拖动音量条时另一个音量 / 开关也被一起上报，
+// 无脑重建会把整池音效（30 多个 QSoundEffect）逐个 setVolume 一遍，纯属白烧主线程
 void Audio::setSfxEnabled(bool enabled) {
+    if (sfxEnabled_ == enabled) {
+        return;
+    }
     sfxEnabled_ = enabled;
     rebuildSfxVolumes();
 }
 
 void Audio::setSfxVolume(int percent) {
-    sfxVolumePercent_ = std::max(0, std::min(100, percent));
+    percent = std::max(0, std::min(100, percent));
+    if (sfxVolumePercent_ == percent) {
+        return;
+    }
+    sfxVolumePercent_ = percent;
     rebuildSfxVolumes();
 }
 
@@ -281,7 +290,11 @@ void Audio::setBgmEnabled(bool enabled) {
 }
 
 void Audio::setBgmVolume(int percent) {
-    bgmVolumePercent_ = std::max(0, std::min(100, percent));
+    percent = std::max(0, std::min(100, percent));
+    if (bgmVolumePercent_ == percent) {
+        return;
+    }
+    bgmVolumePercent_ = percent;
     rebuildBgmVolume();
 }
 

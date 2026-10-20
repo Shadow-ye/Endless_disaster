@@ -1,18 +1,13 @@
 #include "Cursors.h"
 #include "MainWindow.h"
 #include "Platform.h"
+#include "Storage.h"
 
 #include <QApplication>
-#include <QCheckBox>
 #include <QCoreApplication>
 #include <QDir>
-#include <QEvent>
 #include <QFile>
 #include <QIcon>
-#include <QSlider>
-#include <QStyle>
-#include <QTimer>
-#include <QWidget>
 
 namespace {
 QString findGameIcon() {
@@ -34,38 +29,6 @@ QString findGameIcon() {
     return {};
 }
 
-// 控件点击动效：按下方块按钮（QCheckBox）或滑动条时来一记短促的高亮脉冲，
-// 颜色由全局样式表的 [_pulse=true] 属性选择器驱动，定时回落无需逐控件接线
-class ClickPulse : public QObject {
-public:
-    explicit ClickPulse(QObject* parent) : QObject(parent) {}
-
-protected:
-    bool eventFilter(QObject* watched, QEvent* event) override {
-        if (event->type() != QEvent::MouseButtonPress) {
-            return QObject::eventFilter(watched, event);
-        }
-        if (qobject_cast<QCheckBox*>(watched) || qobject_cast<QSlider*>(watched)) {
-            pulse(qobject_cast<QWidget*>(watched));
-        }
-        return QObject::eventFilter(watched, event);
-    }
-
-private:
-    static void pulse(QWidget* widget) {
-        if (!widget) {
-            return;
-        }
-        widget->setProperty("_pulse", true);
-        widget->style()->unpolish(widget);
-        widget->style()->polish(widget);
-        QTimer::singleShot(160, widget, [widget] {
-            widget->setProperty("_pulse", false);
-            widget->style()->unpolish(widget);
-            widget->style()->polish(widget);
-        });
-    }
-};
 }  // namespace
 
 int main(int argc, char* argv[]) {
@@ -98,9 +61,10 @@ int main(int argc, char* argv[]) {
         "QCheckBox::indicator { width: 14px; height: 14px; border: 1px solid #6a5048; background: #1a1412; }"
         "QCheckBox::indicator:hover { border-color: #c45a48; }"
         "QCheckBox::indicator:checked { background: #8a3a32; border: 1px solid #c45a48; }"
-        "QCheckBox::indicator[_pulse=true] { background: #e8937e; border: 1px solid #f2c0ac; }"
+        // 点击反馈走伪状态而不是动态属性：:pressed 由绘制时解析状态位得到，改状态只需重画这一小块；
+        // 动态属性要配 unpolish/polish 才会重新匹配选择器，那会把整套样式规则重算一遍
+        "QCheckBox::indicator:pressed { background: #e8937e; border: 1px solid #f2c0ac; }"
         "QSlider::groove:horizontal { height: 6px; background: #1a1513; border: 1px solid #3a2c28; }"
-        "QSlider::groove:horizontal[_pulse=true] { background: #2a1c18; border: 1px solid #c45c48; }"
         "QSlider::handle:horizontal { width: 14px; margin: -5px 0; background: #c45c48; border: 1px solid #7a342c; }"
         "QSlider::handle:horizontal:hover { background: #d8735c; border-color: #e8a08c; }"
         "QSlider::handle:horizontal:pressed { background: #f2e6d8; border-color: #c45c48; }"
@@ -109,9 +73,6 @@ int main(int argc, char* argv[]) {
 
     // 光标：先加载资源并装上全局替换规则（按钮手型 / 输入框文本光标）
     Cursors::init();
-    // 控件点击动效：应用级过滤器覆盖设置页与暂停菜单里的方块按钮 / 滑动条
-    ClickPulse clickPulse(&app);
-    app.installEventFilter(&clickPulse);
     MainWindow window;
     // 顶层窗口定成游戏默认箭头，未单独设置光标的子控件照此继承
     window.setCursor(Cursors::arrow());
@@ -123,5 +84,14 @@ int main(int argc, char* argv[]) {
 #else
     window.show();
 #endif
-    return app.exec();
+    // 切后台 / 失活前把手头没落盘的设置写掉：安卓上「退出界面」常常没有可靠的退出回调
+    QObject::connect(&app, &QGuiApplication::applicationStateChanged, &app, [](Qt::ApplicationState state) {
+        if (state != Qt::ApplicationActive) {
+            Storage::flushSettings();
+        }
+    });
+    const int execCode = app.exec();
+    // 桌面关窗 / 进程正常结束前补一次
+    Storage::flushSettings();
+    return execCode;
 }

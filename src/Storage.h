@@ -36,8 +36,15 @@ public:
     static Records loadRecords();
     static void saveRecords(const Records& records);
 
+    // 进程内唯一真源：回填 UI、同步音频、落盘都读这一份（首次才真的读 settings.json）。
+    // 这样「拖动中先不写盘」不会让界面读回旧值，也不会出现滑块显示与实际音量不一致。
     static AppSettings loadSettings();
+    // 改完立刻写文件（复选框、松手、离开界面这些「确定」的时机）
     static void saveSettings(const AppSettings& settings);
+    // 只更新进程内快照、暂不落盘：拖动中的实时预览走这条，安卓上不会因 fsync 卡手
+    static void stageSettings(const AppSettings& settings);
+    // 有暂未落盘的修改才真正写文件（各「离开界面 / 切后台」的兜底）
+    static void flushSettings();
 
     // 成就：已解锁的 id 集合存在 achievements.json（id 定义见 Codex.h）
     static QSet<QString> loadAchievements();
@@ -47,4 +54,6 @@ public:
 
 private:
     static QString dir();
+    static AppSettings readSettingsFile();
+    static void writeSettingsFile(const AppSettings& settings);
 };

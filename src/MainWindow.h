@@ -54,6 +54,8 @@ private:
     void refreshMenu();
     void refreshPrepareSkills();
     void loadSettingsUi();
+    // 把设置页控件的值写回进程内快照；commit=false 时只更新快照不落盘（拖动中）
+    void pushSettingsUi(bool commit);
     void saveSettingsUi();
     void fillSkillBox(QComboBox* box, const int* pool, int poolSize, int selected);
     QPushButton* makeSkillPickButton(QComboBox* box, QWidget* parent);
@@ -82,13 +84,14 @@ private:
 
     QStackedWidget* stack_ = nullptr;
     QWidget* menu_ = nullptr;
-    QLabel* menuBg_ = nullptr;
     MenuTitle* menuTitle_ = nullptr;
     // 标题下方的英文副标题：与主标题同一套特效，字号更小
     MenuTitle* menuSubTitle_ = nullptr;
     QWidget* menuContent_ = nullptr;
     QWidget* menuLinks_ = nullptr;
     QPixmap menuBgPix_;
+    // 安卓首帧只补一次整块重绘，避免每次 show 都多画一帧
+    bool menuFirstPaintDone_ = false;
     QWidget* prepare_ = nullptr;
     QLabel* prepareWarriorArt_ = nullptr;
     QLabel* prepareMageArt_ = nullptr;
@@ -118,6 +121,8 @@ private:
     QCheckBox* weatherCheck_ = nullptr;
     QSlider* brightSlider_ = nullptr;
     QLabel* brightValueLabel_ = nullptr;
+    // 设置页的落盘防抖：拖动滑块时只实时生效，停手后才写 settings.json
+    QTimer* settingsSaveTimer_ = nullptr;
     HeroClass hero_ = HeroClass::Warrior;
     QPushButton* heroButton_ = nullptr;
     QLabel* heroStats_ = nullptr;

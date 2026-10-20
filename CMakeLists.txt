@@ -1,5 +1,5 @@
 cmake_minimum_required(VERSION 3.21)
-project(EndlessDisaster VERSION 0.7.0 LANGUAGES CXX)
+project(EndlessDisaster VERSION 0.7.1 LANGUAGES CXX)
 
 set(CMAKE_CXX_STANDARD 17)
 set(CMAKE_CXX_STANDARD_REQUIRED ON)
@@ -37,6 +37,8 @@ qt_add_executable(EndlessDisaster
     src/Platform.cpp
     src/Cursors.h
     src/Cursors.cpp
+    src/SettingRow.h
+    src/SettingRow.cpp
 )
 
 if(UNIX AND NOT APPLE AND NOT ANDROID)

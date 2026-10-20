@@ -7,6 +7,7 @@
 #include "LoadingWidget.h"
 #include "MenuTitle.h"
 #include "Platform.h"
+#include "SettingRow.h"
 #include "Storage.h"
 
 #include <QApplication>
@@ -26,8 +27,12 @@
 #include <QImage>
 #include <QJsonObject>
 #include <QLabel>
+#include <QLayout>
 #include <QMessageBox>
 #include <QMouseEvent>
+#include <QPainter>
+
+#include <functional>
 #include <QPixmap>
 #include <QPushButton>
 #include <QResizeEvent>
@@ -207,6 +212,58 @@ void swapDuplicate(std::array<QComboBox*, 4>& boxes, std::array<int, 4>& prev, i
     }
     prev[slot] = chosen;
 }
+
+// 主菜单底图由页面自己画，而不是拿一个兄弟 QLabel 垫底。
+// 透明子控件（标题、按钮）压在兄弟控件上时，安卓首帧/脏矩形重绘经常拿不到底图，
+// 旧像素（按钮残影、标题只亮一半）会一直留着；切后台再回来因为后备缓冲被重新分配才正常。
+// 改成父控件自绘后，任何一次重绘都先铺底图、再画子控件，从根上消掉这类残影。
+class MenuPage : public QWidget {
+public:
+    explicit MenuPage(QWidget* parent = nullptr) : QWidget(parent) {
+        // 整块区域每帧都会填满，告诉 Qt 不用再擦一遍，也避免脏矩形里留旧内容
+        setAttribute(Qt::WA_OpaquePaintEvent, true);
+    }
+
+    void setBackdrop(const QPixmap& source) {
+        if (!source.isNull() && source.cacheKey() == source_.cacheKey()) {
+            return;
+        }
+        source_ = source;
+        scaled_ = QPixmap();
+        update();
+    }
+
+    // 叠在底图之上、子控件之下的绘制（安卓：标题必须画在这层不透明底图上，
+    // 单独放在透明子控件里白字会被安卓整层丢掉）
+    void setOverlayPaint(std::function<void(QPainter&)> fn) { overlayPaint_ = std::move(fn); }
+
+protected:
+    void paintEvent(QPaintEvent*) override {
+        QPainter painter(this);
+        painter.fillRect(rect(), QColor(0x3b, 0x35, 0x2e));
+        if (!source_.isNull()) {
+            if (scaled_.isNull()) {
+                // 完整居中：按窗口等比缩放后整体可见，图里烘焙的顶部横幅不会被裁掉两端的字
+                scaled_ = source_.scaled(size(), Qt::KeepAspectRatio, Qt::SmoothTransformation);
+            }
+            painter.drawPixmap(QPoint((width() - scaled_.width()) / 2, (height() - scaled_.height()) / 2), scaled_);
+        }
+        if (overlayPaint_) {
+            overlayPaint_(painter);
+        }
+    }
+
+    void resizeEvent(QResizeEvent* event) override {
+        scaled_ = QPixmap();
+        QWidget::resizeEvent(event);
+    }
+
+private:
+    QPixmap source_;
+    QPixmap scaled_;
+    std::function<void(QPainter&)> overlayPaint_;
+};
+
 }  // namespace
 
 MainWindow::MainWindow(QWidget* parent) : QWidget(parent) {
@@ -214,24 +271,14 @@ MainWindow::MainWindow(QWidget* parent) : QWidget(parent) {
     resize(1100, 700);
 
     stack_ = new QStackedWidget(this);
-    menu_ = new QWidget(stack_);
+    // 底图交给页面自己画（见上面的 MenuPage），不再用兄弟 QLabel 垫底
+    auto* menuPage = new MenuPage(stack_);
+    menu_ = menuPage;
     menu_->setObjectName("menuRoot");
-    menu_->setAttribute(Qt::WA_StyledBackground, true);
-    // 图片完整居中后，上下会各露出一点底色：取贴近战场地面色调的深棕灰
-    menu_->setStyleSheet("QWidget#menuRoot { background: #3b352e; }");
-    menuBg_ = new QLabel(menu_);
-    menuBg_->setObjectName("menuBg");
-    menuBg_->setAlignment(Qt::AlignCenter);
-    menuBg_->setScaledContents(false);
-    menuBg_->setAttribute(Qt::WA_TransparentForMouseEvents, true);
-    menuBg_->setStyleSheet("QLabel#menuBg { background: transparent; border: none; }");
-    menuBg_->lower();
     const QString bgPath = findStoryBackground();
     if (!bgPath.isEmpty()) {
         menuBgPix_ = QPixmap(bgPath);
-        if (!menuBgPix_.isNull()) {
-            menuBg_->setPixmap(menuBgPix_);
-        }
+        menuPage->setBackdrop(menuBgPix_);
     }
 
     menuContent_ = new QWidget(menu_);
@@ -486,12 +533,28 @@ MainWindow::MainWindow(QWidget* parent) : QWidget(parent) {
     game_ = new GameWidget(stack_);
     loading_ = new LoadingWidget(stack_);
 
+    // 普通页面：不接触摸、不自绘、不声明不透明区域。
+    // 这些「安卓优化」曾经把整页的脏矩形上屏搞坏（值在变、画面冻住，点别处才一次性跳过去），
+    // 后台缓冲的刷新交给 Qt 常规路径（和 Windows 完全一致）。
     settings_ = new QWidget(stack_);
+    settings_->setObjectName("settingsRoot");
+    settings_->setAttribute(Qt::WA_StyledBackground, true);
+    settings_->setStyleSheet("QWidget#settingsRoot { background: #0c0a09; }");
     auto* settingsOuter = new QVBoxLayout(settings_);
     settingsOuter->setAlignment(Qt::AlignCenter);
-    auto* settingsCard = new QFrame(settings_);
+    auto* settingsCard = new QWidget(settings_);
     settingsCard->setObjectName("panel");
+    // QWidget 本身不画背景，QSS 的 background / border 需要这个属性才会落到卡片上
+    // （原来这里是 QFrame，换过来后必须补上，否则卡片的底色和边框会整块不画）
+    settingsCard->setAttribute(Qt::WA_StyledBackground, true);
     settingsCard->setFixedWidth(420);
+    // 和暂停菜单里的设置面板用逐字相同的样式表：背景、标签、勾选框走同一条绘制路径，
+    // 滑块拿到的调色板与几何约束也就和游戏内完全一致
+    settingsCard->setStyleSheet(
+        "QWidget#panel { background: #14110f; border: 1px solid #5c3a32; }"
+        "QLabel { background: transparent; color: #d7c7b4; border: none; }"
+        "QLabel#title { color: #e4d4c4; }"
+        "QCheckBox { color: #d7c7b4; }");
     auto* settingsLayout = new QVBoxLayout(settingsCard);
     settingsLayout->setContentsMargins(28, 28, 28, 28);
     settingsLayout->setSpacing(12);
@@ -500,35 +563,24 @@ MainWindow::MainWindow(QWidget* parent) : QWidget(parent) {
     settingsTitle->setAlignment(Qt::AlignCenter);
     settingsTitle->setFont(titleFont);
     settingsLayout->addWidget(settingsTitle);
+    // 音效 / BGM 照「天气系统」+「画面亮度」这两个已经确认正常的控件来搭：
+    // 开关独占一行（与天气系统完全同构），音量滑块单独一行、行内不带开关（与亮度条完全同构）。
+    // 曾经把开关和滑块塞进同一个 row：在这张静止的设置页上，那一行的重绘就是不上屏
+    // （值在变、画面冻住，点别的控件才一次性跳过去），而同样结构在游戏内却没事。
+    // 拆成两个既有形状之后，就没有任何一处是"只有这一行才有"的布局组合了。
     sfxCheck_ = new QCheckBox("开启音效", settingsCard);
     settingsLayout->addWidget(sfxCheck_);
-    auto* volRow = new QWidget(settingsCard);
-    auto* volLayout = new QHBoxLayout(volRow);
-    volLayout->setContentsMargins(0, 0, 0, 0);
-    auto* volLabel = new QLabel("音效音量", volRow);
-    sfxSlider_ = new QSlider(Qt::Horizontal, volRow);
-    sfxSlider_->setRange(0, 100);
-    sfxVolumeLabel_ = new QLabel(volRow);
-    sfxVolumeLabel_->setMinimumWidth(40);
-    volLayout->addWidget(volLabel);
-    volLayout->addWidget(sfxSlider_, 1);
-    volLayout->addWidget(sfxVolumeLabel_);
-    settingsLayout->addWidget(volRow);
+    const SettingRow sfxRow = makeSettingRow(settingsCard, "音效音量", 0, 100, 0, false);
+    sfxSlider_ = sfxRow.slider;
+    sfxVolumeLabel_ = sfxRow.value;
+    settingsLayout->addWidget(sfxRow.row);
 
     bgmCheck_ = new QCheckBox("开启 BGM", settingsCard);
     settingsLayout->addWidget(bgmCheck_);
-    auto* bgmRow = new QWidget(settingsCard);
-    auto* bgmLayout = new QHBoxLayout(bgmRow);
-    bgmLayout->setContentsMargins(0, 0, 0, 0);
-    auto* bgmLabel = new QLabel("BGM 音量", bgmRow);
-    bgmSlider_ = new QSlider(Qt::Horizontal, bgmRow);
-    bgmSlider_->setRange(0, 100);
-    bgmVolumeLabel_ = new QLabel(bgmRow);
-    bgmVolumeLabel_->setMinimumWidth(40);
-    bgmLayout->addWidget(bgmLabel);
-    bgmLayout->addWidget(bgmSlider_, 1);
-    bgmLayout->addWidget(bgmVolumeLabel_);
-    settingsLayout->addWidget(bgmRow);
+    const SettingRow bgmRow = makeSettingRow(settingsCard, "BGM 音量", 0, 100, 0, false);
+    bgmSlider_ = bgmRow.slider;
+    bgmVolumeLabel_ = bgmRow.value;
+    settingsLayout->addWidget(bgmRow.row);
 
     guideCheck_ = new QCheckBox("开局立即获得天赋「世界指引」", settingsCard);
     guideCheck_->setToolTip("开启后新开局直接拥有「世界指引」：按 G（安卓点右上角「寻路」）标出迷宫遗迹方向并画出通路，不必先击杀 20 个入侵怪物。");
@@ -544,26 +596,57 @@ MainWindow::MainWindow(QWidget* parent) : QWidget(parent) {
                               "雷雨天的落雷与冰雹的碎击都只伤怪物，不会伤到你。关掉后本局不再出现任何天气。");
     settingsLayout->addWidget(weatherCheck_);
 
-    auto* brightRow = new QWidget(settingsCard);
-    auto* brightLayout = new QHBoxLayout(brightRow);
-    brightLayout->setContentsMargins(0, 0, 0, 0);
-    auto* brightLabel = new QLabel("画面亮度", brightRow);
-    brightSlider_ = new QSlider(Qt::Horizontal, brightRow);
-    brightSlider_->setRange(50, 150);
-    brightValueLabel_ = new QLabel(brightRow);
-    brightValueLabel_->setMinimumWidth(40);
+    const SettingRow brightRow = makeSettingRow(settingsCard, "画面亮度", 50, 150, 0, false);
+    brightSlider_ = brightRow.slider;
+    brightValueLabel_ = brightRow.value;
     brightSlider_->setToolTip("整幅游戏画面的明暗，100% 为默认。末世滤镜只压暗地图，角色与特效保持原亮度。");
-    brightRow->setToolTip(brightSlider_->toolTip());
-    brightLayout->addWidget(brightLabel);
-    brightLayout->addWidget(brightSlider_, 1);
-    brightLayout->addWidget(brightValueLabel_);
-    settingsLayout->addWidget(brightRow);
+    brightRow.row->setToolTip(brightSlider_->toolTip());
+    settingsLayout->addWidget(brightRow.row);
 
     auto* settingsBack = new QPushButton("返回", settingsCard);
     settingsLayout->addWidget(settingsBack);
+
+    // 安卓上这张静止设置页的局部重绘不一定被提交上屏：只标该控件自己那点脏区时，
+    // 时不时就有某一项一直冻着（数值在变、画面不动），等点了别的控件才一起补画出来；
+    // 而且换一下控件的形状 / 顺序，"冻住的那一项"就换人——说明问题不在控件本身，
+    // 而在这页的局部重绘能不能上屏。所以这里统一兜底：任何一项改值 / 勾选，
+    // 都把整页标脏一次。同一次事件循环里的多次 update() 会被 Qt 合并，
+    // 拖动时约等于每帧一次整页重绘，代价可控。
+    auto nudgePage = [this] {
+        if (settings_) {
+            settings_->update();
+        }
+    };
+    for (QCheckBox* box : {sfxCheck_, bgmCheck_, guideCheck_, showFpsCheck_, weatherCheck_}) {
+        connect(box, &QCheckBox::toggled, this, [nudgePage](bool) { nudgePage(); });
+    }
+    for (QSlider* slider : {sfxSlider_, bgmSlider_, brightSlider_}) {
+        connect(slider, &QSlider::valueChanged, this, [nudgePage](int) { nudgePage(); });
+    }
+
     settingsOuter->addWidget(settingsCard, 0, Qt::AlignHCenter);
 
+    // 拖动音量 / 亮度条时不再逐格写盘：安卓上每次落盘都要 fsync，
+    // 拖动产生的上百个 valueChanged 全去写 settings.json 会把手感拖成一格一顿。
+    // 拖动中只让音量实时生效，停手（或离开设置页）后再统一落盘。
+    settingsSaveTimer_ = new QTimer(this);
+    settingsSaveTimer_->setSingleShot(true);
+    settingsSaveTimer_->setInterval(220);
+    connect(settingsSaveTimer_, &QTimer::timeout, this, [this] {
+        // 到点只把已经暂存的快照写下去（saveSettingsUi 会重新暂存并重启定时器，别在这里绕回去）。
+        // 若此时手还按在滑块上就往后推：拖动途中一次 fsync 就能让手柄顿一格。
+        if ((sfxSlider_ && sfxSlider_->isSliderDown()) || (bgmSlider_ && bgmSlider_->isSliderDown())
+            || (brightSlider_ && brightSlider_->isSliderDown())) {
+            settingsSaveTimer_->start();
+            return;
+        }
+        Storage::flushSettings();
+    });
+
     achievements_ = new QWidget(stack_);
+    achievements_->setObjectName("achievementsRoot");
+    achievements_->setAttribute(Qt::WA_StyledBackground, true);
+    achievements_->setStyleSheet("QWidget#achievementsRoot { background: #0c0a09; }");
     auto* achievementsOuter = new QVBoxLayout(achievements_);
     achievementsOuter->setAlignment(Qt::AlignCenter);
     auto* achievementsCard = new QFrame(achievements_);
@@ -653,8 +736,14 @@ MainWindow::MainWindow(QWidget* parent) : QWidget(parent) {
     });
     connect(sfxSlider_, &QSlider::valueChanged, this, [this](int value) {
         sfxVolumeLabel_->setText(QString("%1%").arg(value));
-        saveSettingsUi();
+        // 拖动中只更新内存快照（零磁盘 I/O）；非拖动改值（点滑槽 / 滚轮 / 键盘）走防抖落盘。
+        // 安卓上一次 QSaveFile::commit 的 fsync 就能卡一下，绝对不能在拖动途中写盘。
+        pushSettingsUi(false);
+        if (!sfxSlider_->isSliderDown()) {
+            settingsSaveTimer_->start();
+        }
     });
+    connect(sfxSlider_, &QSlider::sliderReleased, this, [this] { saveSettingsUi(); });
     connect(bgmCheck_, &QCheckBox::toggled, this, [this](bool on) {
         bgmSlider_->setEnabled(on);
         saveSettingsUi();
@@ -665,8 +754,12 @@ MainWindow::MainWindow(QWidget* parent) : QWidget(parent) {
     });
     connect(bgmSlider_, &QSlider::valueChanged, this, [this](int value) {
         bgmVolumeLabel_->setText(QString("%1%").arg(value));
-        saveSettingsUi();
+        pushSettingsUi(false);
+        if (!bgmSlider_->isSliderDown()) {
+            settingsSaveTimer_->start();
+        }
     });
+    connect(bgmSlider_, &QSlider::sliderReleased, this, [this] { saveSettingsUi(); });
     connect(guideCheck_, &QCheckBox::toggled, this, [this](bool on) {
         (void)on;
         saveSettingsUi();
@@ -681,8 +774,12 @@ MainWindow::MainWindow(QWidget* parent) : QWidget(parent) {
     });
     connect(brightSlider_, &QSlider::valueChanged, this, [this](int value) {
         brightValueLabel_->setText(QString("%1%").arg(value));
-        saveSettingsUi();
+        pushSettingsUi(false);
+        if (!brightSlider_->isSliderDown()) {
+            settingsSaveTimer_->start();
+        }
     });
+    connect(brightSlider_, &QSlider::sliderReleased, this, [this] { saveSettingsUi(); });
     connect(quit, &QPushButton::clicked, this, [] { QApplication::quit(); });
     connect(game_, &GameWidget::returnedToMenu, this, [this] { showMenu(); });
     connect(heroButton_, &QPushButton::clicked, this, [this] {
@@ -873,22 +970,37 @@ void MainWindow::refreshMenu() {
 }
 
 void MainWindow::layoutMenuBackground() {
-    if (!menu_ || !menuBg_ || !menuContent_) {
+    if (!menu_ || !menuContent_) {
         return;
     }
     const QRect r = menu_->rect();
     if (r.width() <= 0 || r.height() <= 0) {
         return;
     }
-    menuBg_->setGeometry(r);
-    if (!menuBgPix_.isNull()) {
-        // 完整居中：按窗口等比缩放后整体可见，图里烘焙的顶部横幅不会被裁掉两端的字
-        // （图比窗口「宽」时上下会各露出少量空白，QLabel 按 AlignCenter 居中摆放）
-        const QPixmap scaled = menuBgPix_.scaled(r.size(), Qt::KeepAspectRatio, Qt::SmoothTransformation);
-        menuBg_->setPixmap(scaled);
+    if (auto* page = dynamic_cast<MenuPage*>(menu_)) {
+        page->setBackdrop(menuBgPix_);
+#ifdef Q_OS_ANDROID
+        // 安卓：标题由菜单页在底图上画（透明子控件上 drawText 会被整层丢掉）
+        page->setOverlayPaint([this](QPainter& painter) {
+            for (MenuTitle* title : {menuTitle_, menuSubTitle_}) {
+                if (!title || !title->isVisible()) {
+                    continue;
+                }
+                painter.save();
+                painter.translate(title->mapTo(menu_, QPoint(0, 0)));
+                title->paintOn(painter);
+                painter.restore();
+            }
+        });
+        if (menuTitle_) {
+            menuTitle_->setHostWidget(menu_);
+        }
+        if (menuSubTitle_) {
+            menuSubTitle_->setHostWidget(menu_);
+        }
+#endif
     }
     menuContent_->setGeometry(r);
-    menuBg_->lower();
     menuContent_->raise();
     if (menuLinks_) {
         const QSize size = menuLinks_->sizeHint();
@@ -896,10 +1008,20 @@ void MainWindow::layoutMenuBackground() {
         menuLinks_->raise();
     }
     layoutMenuTitle();
+    // 标题字号是按窗口宽度算的，setTitleFont / setFixedHeight 会让 LayoutRequest 推迟到
+    // 下一轮事件循环。安卓首次进入时窗口尺寸变化最大，第一帧往往按旧布局先把按钮画出来，
+    // 等布局生效后按钮移到新位置，而透明容器下的背景图是兄弟 QLabel、旧位置的脏矩形不会被它
+    // 重绘，于是留下按钮色的阶梯残影。这里同步跑完布局，再整块重画一遍避开这个首帧竞态。
+    if (QLayout* contentLayout = menuContent_->layout()) {
+        contentLayout->activate();
+    }
+    menu_->update();
 }
 
 void MainWindow::layoutMenuTitle() {
-    if (!menuTitle_ || !menu_) {
+    if (!menuTitle_ || !menu_ || menu_->width() < 320) {
+        // 构造阶段窗口还没拿到真实尺寸，此时按极窄宽度算出来的字号小得离谱，
+        // 会在首帧留下一版错误的标题/布局，等真正 show 后再次变化就成了残影。
         return;
     }
     // 左右各留 30px：辉光与故障错位都在文字之外，贴着布局边缘会被切
@@ -1073,12 +1195,31 @@ void MainWindow::showEvent(QShowEvent* event) {
     QWidget::showEvent(event);
     layoutMenuBackground();
     layoutPrepareArt();
+    // 安卓首次进入：surface 尺寸 / DPR / 字体往往要等这一轮事件循环甚至更久才定下来。
+    // 首帧按旧状态建出来的标题缓存会一直错到切后台再回来（resume 会重新走一遍 show + 布局）。
+    // 这里在排布稳定前后各重排一次，并强制整块重画，等价于把 resume 时做的事情提前做掉。
+    if (!menuFirstPaintDone_) {
+        menuFirstPaintDone_ = true;
+        QTimer::singleShot(0, this, [this] {
+            layoutMenuBackground();
+            layoutPrepareArt();
+        });
+        QTimer::singleShot(150, this, [this] {
+            layoutMenuBackground();
+            layoutPrepareArt();
+            if (menu_ && menu_->isVisible()) {
+                menu_->repaint();
+            }
+        });
+    }
 }
 
 void MainWindow::showMenu() {
     if (picker_) {
         picker_->hide();
     }
+    // 离开设置页 / 从游戏回主菜单：把没落盘的设置补写
+    Storage::flushSettings();
     refreshMenu();
     stack_->setCurrentWidget(menu_);
     layoutMenuBackground();
@@ -1095,6 +1236,8 @@ void MainWindow::showPrepare() {
 }
 
 void MainWindow::showSettings() {
+    // 快照已经是最新的（拖动中也是先写快照），这里只把还没落盘的补写一次
+    Storage::flushSettings();
     loadSettingsUi();
     stack_->setCurrentWidget(settings_);
 }
@@ -1160,6 +1303,25 @@ void MainWindow::loadSettingsUi() {
 }
 
 void MainWindow::saveSettingsUi() {
+    // 拖动途中一律不落盘：安卓上一次 QSaveFile::commit 的 fsync 就能把主线程卡一下，
+    // 被防抖定时器撞上就是一格一顿。这里只把当前值存进快照，停手 / 离开界面时再补写。
+    if ((sfxSlider_ && sfxSlider_->isSliderDown()) || (bgmSlider_ && bgmSlider_->isSliderDown())
+        || (brightSlider_ && brightSlider_->isSliderDown())) {
+        pushSettingsUi(false);
+        if (settingsSaveTimer_) {
+            settingsSaveTimer_->start();
+        }
+        return;
+    }
+    if (settingsSaveTimer_) {
+        settingsSaveTimer_->stop();
+    }
+    pushSettingsUi(true);
+}
+
+void MainWindow::pushSettingsUi(bool commit) {
+    // 从快照出发再覆盖本页字段：其它字段（autoAim / showFps…）不会被默认值冲掉，
+    // 也能把游戏内刚改过、还没落盘的值原样带过去。
     AppSettings settings = Storage::loadSettings();
     settings.sfxEnabled = sfxCheck_->isChecked();
     settings.sfxVolume = sfxSlider_->value();
@@ -1169,11 +1331,25 @@ void MainWindow::saveSettingsUi() {
     settings.showFps = showFpsCheck_->isChecked();
     settings.weather = weatherCheck_->isChecked();
     settings.brightness = brightSlider_->value();
-    Audio::instance().setSfxEnabled(settings.sfxEnabled);
-    Audio::instance().setSfxVolume(settings.sfxVolume);
-    Audio::instance().setBgmEnabled(settings.bgmEnabled);
-    Audio::instance().setBgmVolume(settings.bgmVolume);
-    Storage::saveSettings(settings);
+    if (commit) {
+        // 只有确定下来（松手 / 勾选开关 / 离开页面）才动音频：安卓上一次 setSfxVolume 会逐池
+        // 刷几十个 QSoundEffect，拖动中每帧来一遍会把主线程占住，画面要等松手才刷得出来
+        // （亮度条不碰音频，所以它一直是正常的）。
+        Audio::instance().setSfxEnabled(settings.sfxEnabled);
+        Audio::instance().setSfxVolume(settings.sfxVolume);
+        Audio::instance().setBgmEnabled(settings.bgmEnabled);
+        Audio::instance().setBgmVolume(settings.bgmVolume);
+        // 落盘一律推给防抖定时器：QSaveFile::commit 里的 fsync 在安卓上要十几毫秒，
+        // 直接写在点击回调里，开关自己那格的重绘就得排在它后面——手感跟拖滑块一个样。
+        // 定时器到点写的是这份快照；切后台 / 退出前 main() 里还有 flushSettings 兜底。
+        Storage::stageSettings(settings);
+        if (settingsSaveTimer_) {
+            settingsSaveTimer_->start();
+        }
+    } else {
+        // 拖动中的预览只更新进程内快照与界面，零音频调用、零磁盘 I/O
+        Storage::stageSettings(settings);
+    }
 }
 
 void MainWindow::startPrepared() {

@@ -4,6 +4,7 @@
 #include "Codex.h"
 #include "Cursors.h"
 #include "Platform.h"
+#include "SettingRow.h"
 #include "Storage.h"
 #include "TileMap.h"
 
@@ -470,46 +471,26 @@ GameWidget::GameWidget(QWidget* parent) : QWidget(parent) {
     pauseSettingsTitle->setAlignment(Qt::AlignCenter);
     pauseLayout->addWidget(pauseSettingsTitle);
 
-    auto* sfxRow = new QWidget(pausePanel_);
-    auto* sfxLayout = new QHBoxLayout(sfxRow);
-    sfxLayout->setContentsMargins(0, 8, 0, 0);
-    pauseSfxCheck_ = new QCheckBox("音效", sfxRow);
-    pauseSfxSlider_ = new QSlider(Qt::Horizontal, sfxRow);
-    pauseSfxSlider_->setRange(0, 100);
-    pauseSfxValue_ = new QLabel(sfxRow);
-    pauseSfxValue_->setMinimumWidth(36);
-    sfxLayout->addWidget(pauseSfxCheck_);
-    sfxLayout->addWidget(pauseSfxSlider_, 1);
-    sfxLayout->addWidget(pauseSfxValue_);
-    pauseLayout->addWidget(sfxRow);
+    // 一行一个设置项：开关 + 滑块 + 数值。主菜单设置页用的是同一个 makeSettingRow，
+    // 两处的控件类型、父容器、尺寸约束完全一致，安卓上的拖动手感才对得上。
+    const SettingRow sfxRow = makeSettingRow(pausePanel_, "音效", 0, 100, 8);
+    pauseSfxCheck_ = sfxRow.check;
+    pauseSfxSlider_ = sfxRow.slider;
+    pauseSfxValue_ = sfxRow.value;
+    pauseLayout->addWidget(sfxRow.row);
 
-    auto* bgmRow = new QWidget(pausePanel_);
-    auto* bgmLayout = new QHBoxLayout(bgmRow);
-    bgmLayout->setContentsMargins(0, 4, 0, 0);
-    pauseBgmCheck_ = new QCheckBox("BGM", bgmRow);
-    pauseBgmSlider_ = new QSlider(Qt::Horizontal, bgmRow);
-    pauseBgmSlider_->setRange(0, 100);
-    pauseBgmValue_ = new QLabel(bgmRow);
-    pauseBgmValue_->setMinimumWidth(36);
-    bgmLayout->addWidget(pauseBgmCheck_);
-    bgmLayout->addWidget(pauseBgmSlider_, 1);
-    bgmLayout->addWidget(pauseBgmValue_);
-    pauseLayout->addWidget(bgmRow);
+    const SettingRow bgmRow = makeSettingRow(pausePanel_, "BGM", 0, 100, 4);
+    pauseBgmCheck_ = bgmRow.check;
+    pauseBgmSlider_ = bgmRow.slider;
+    pauseBgmValue_ = bgmRow.value;
+    pauseLayout->addWidget(bgmRow.row);
 
     // 画面亮度：和主菜单设置页共用 settings.json 里的同一个值
-    auto* brightRow = new QWidget(pausePanel_);
-    auto* brightLayout = new QHBoxLayout(brightRow);
-    brightLayout->setContentsMargins(0, 4, 0, 0);
-    auto* brightLabel = new QLabel("亮度", brightRow);
-    pauseBrightSlider_ = new QSlider(Qt::Horizontal, brightRow);
-    pauseBrightSlider_->setRange(50, 150);
+    const SettingRow brightRow = makeSettingRow(pausePanel_, "亮度", 50, 150, 4, false);
+    pauseBrightSlider_ = brightRow.slider;
+    pauseBrightValue_ = brightRow.value;
     pauseBrightSlider_->setToolTip("整幅游戏画面的明暗，100% 为默认。");
-    pauseBrightValue_ = new QLabel(brightRow);
-    pauseBrightValue_->setMinimumWidth(36);
-    brightLayout->addWidget(brightLabel);
-    brightLayout->addWidget(pauseBrightSlider_, 1);
-    brightLayout->addWidget(pauseBrightValue_);
-    pauseLayout->addWidget(brightRow);
+    pauseLayout->addWidget(brightRow.row);
 
     // 天气系统开关：和主菜单设置页共用 settings.json 里的同一个值，关掉立刻转晴
     auto* weatherRow = new QWidget(pausePanel_);
@@ -534,7 +515,11 @@ GameWidget::GameWidget(QWidget* parent) : QWidget(parent) {
         pauseBrightValue_->setText(QString("%1%").arg(settings.brightness));
         pauseWeatherCheck_->setChecked(settings.weather);
     };
-    auto applyPauseAudio = [this](bool playUi) {
+    // 应用方式：Preview=拖动途中（只进内存快照）；Live=点了开关（立即生效，落盘交给防抖定时器）；
+    // Persist=交互收尾（立即生效并落盘，一次 fsync）
+    enum class PauseApply { Preview, Live, Persist };
+    auto applyPauseAudio = [this](bool playUi, PauseApply mode) {
+        // 快照从 Storage 读，其它字段（autoAim / showFps…）不会被默认值冲掉。
         AppSettings settings = Storage::loadSettings();
         settings.sfxEnabled = pauseSfxCheck_->isChecked();
         settings.sfxVolume = pauseSfxSlider_->value();
@@ -547,15 +532,25 @@ GameWidget::GameWidget(QWidget* parent) : QWidget(parent) {
         pauseBgmSlider_->setEnabled(settings.bgmEnabled);
         pauseBgmValue_->setText(QString("%1%").arg(settings.bgmVolume));
         pauseBrightValue_->setText(QString("%1%").arg(settings.brightness));
-        Audio::instance().setSfxEnabled(settings.sfxEnabled);
-        Audio::instance().setSfxVolume(settings.sfxVolume);
-        Audio::instance().setBgmEnabled(settings.bgmEnabled);
-        Audio::instance().setBgmVolume(settings.bgmVolume);
+        if (mode != PauseApply::Preview) {
+            // 拖动中不碰音频：安卓上 setSfxVolume 要逐池刷几十个 QSoundEffect，
+            // 每帧来一遍会把主线程占住（亮度 / 天气这些便宜的效果照旧实时生效）
+            Audio::instance().setSfxEnabled(settings.sfxEnabled);
+            Audio::instance().setSfxVolume(settings.sfxVolume);
+            Audio::instance().setBgmEnabled(settings.bgmEnabled);
+            Audio::instance().setBgmVolume(settings.bgmVolume);
+        }
         // 亮度立刻生效：画面每帧都会重绘，改完就能在暂停菜单背后看到差别
         brightness_ = settings.brightness;
         // 天气同样立刻生效：关掉时当前这一场直接收场，打开时按平静期节奏重新排下一场
         session_.setWeatherEnabled(settings.weather);
-        Storage::saveSettings(settings);
+        if (mode == PauseApply::Persist) {
+            Storage::saveSettings(settings);
+        } else {
+            // 没有 fsync：QSaveFile::commit 在安卓上要十几毫秒，点一下开关就同步写盘的话，
+            // 开关自己那格的重绘得排在它后面，手感跟拖滑块时一个样
+            Storage::stageSettings(settings);
+        }
         if (playUi && settings.sfxEnabled) {
             Audio::instance().play(SfxId::Ui);
         }
@@ -566,17 +561,51 @@ GameWidget::GameWidget(QWidget* parent) : QWidget(parent) {
     {
         syncPauseAudioUi(Storage::loadSettings());
     }
-    connect(pauseSfxCheck_, &QCheckBox::toggled, this, [applyPauseAudio](bool) { applyPauseAudio(true); });
-    connect(pauseSfxSlider_, &QSlider::valueChanged, this, [applyPauseAudio](int) { applyPauseAudio(false); });
-    connect(pauseBgmCheck_, &QCheckBox::toggled, this, [this, applyPauseAudio](bool on) {
-        applyPauseAudio(false);
+    // 落盘防抖：滑块拖动中绝不写盘（安卓上一次 fsync 就能让手柄顿一格）；开关点击也走这里，
+    // 点击本身只把值暂存并立即生效，220ms 后才真正写文件。
+    auto* pauseSaveTimer = new QTimer(this);
+    pauseSaveTimer->setSingleShot(true);
+    pauseSaveTimer->setInterval(220);
+    connect(pauseSaveTimer, &QTimer::timeout, this, [applyPauseAudio] { applyPauseAudio(false, PauseApply::Persist); });
+    auto onPauseToggle = [applyPauseAudio, pauseSaveTimer](bool playUi) {
+        applyPauseAudio(playUi, PauseApply::Live);
+        pauseSaveTimer->start();
+    };
+    connect(pauseSfxCheck_, &QCheckBox::toggled, this, [onPauseToggle](bool) { onPauseToggle(true); });
+    connect(pauseSfxSlider_, &QSlider::valueChanged, this, [this, applyPauseAudio, pauseSaveTimer](int) {
+        applyPauseAudio(false, PauseApply::Preview);
+        if (!pauseSfxSlider_->isSliderDown()) {
+            pauseSaveTimer->start();
+        }
+    });
+    connect(pauseSfxSlider_, &QSlider::sliderReleased, this, [applyPauseAudio] {
+        applyPauseAudio(false, PauseApply::Persist);
+    });
+    connect(pauseBgmCheck_, &QCheckBox::toggled, this, [this, onPauseToggle](bool on) {
+        onPauseToggle(false);
         if (on && running_ && !session_.ended()) {
             Audio::instance().ensureBgmLoop();
         }
     });
-    connect(pauseBgmSlider_, &QSlider::valueChanged, this, [applyPauseAudio](int) { applyPauseAudio(false); });
-    connect(pauseBrightSlider_, &QSlider::valueChanged, this, [applyPauseAudio](int) { applyPauseAudio(false); });
-    connect(pauseWeatherCheck_, &QCheckBox::toggled, this, [applyPauseAudio](bool) { applyPauseAudio(true); });
+    connect(pauseBgmSlider_, &QSlider::valueChanged, this, [this, applyPauseAudio, pauseSaveTimer](int) {
+        applyPauseAudio(false, PauseApply::Preview);
+        if (!pauseBgmSlider_->isSliderDown()) {
+            pauseSaveTimer->start();
+        }
+    });
+    connect(pauseBgmSlider_, &QSlider::sliderReleased, this, [applyPauseAudio] {
+        applyPauseAudio(false, PauseApply::Persist);
+    });
+    connect(pauseBrightSlider_, &QSlider::valueChanged, this, [this, applyPauseAudio, pauseSaveTimer](int) {
+        applyPauseAudio(false, PauseApply::Preview);
+        if (!pauseBrightSlider_->isSliderDown()) {
+            pauseSaveTimer->start();
+        }
+    });
+    connect(pauseBrightSlider_, &QSlider::sliderReleased, this, [applyPauseAudio] {
+        applyPauseAudio(false, PauseApply::Persist);
+    });
+    connect(pauseWeatherCheck_, &QCheckBox::toggled, this, [onPauseToggle](bool) { onPauseToggle(true); });
 
     guideText_ = new QLabel(pausePanel_);
     guideText_->setWordWrap(true);
@@ -849,6 +878,8 @@ GameWidget::GameWidget(QWidget* parent) : QWidget(parent) {
 }
 
 void GameWidget::leaveToMenu() {
+    // 回主菜单前把没落盘的设置补写（拖动被打断时可能还留在快照里）
+    Storage::flushSettings();
     running_ = false;
     session_.setPaused(false);
     // 回主菜单：次元斩的配音收掉，BGM 归位
@@ -1235,6 +1266,10 @@ void GameWidget::setPaused(bool paused) {
         pausePanel_->raise();
         layoutOverlays();
     }
+    if (!paused) {
+        // 离开暂停菜单：拖动途中被切后台 / 被别的面板顶掉、没等到 sliderReleased 的改动，在这里补写
+        Storage::flushSettings();
+    }
     // 取消暂停不走 layoutOverlays，这里单独同步一次
     updateBgmDuck();
 }
@@ -1290,6 +1325,8 @@ void GameWidget::askSettle() {
     if (session_.ended() || (voidPanel_ && voidPanel_->isVisible())) {
         return;
     }
+    // 主动结算会收起暂停菜单，先把没落盘的设置补写
+    Storage::flushSettings();
     pausePanel_->hide();
     confirmPanel_->show();
     confirmPanel_->raise();

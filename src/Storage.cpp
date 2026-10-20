@@ -11,6 +11,24 @@
 
 #include <algorithm>
 
+namespace {
+// settings.json 的进程内唯一真源。UI 回填、Audio 同步、落盘都读这一份：
+// 拖动时先不写盘的话，界面回填仍能拿到最新值（以前每次回填都重读文件，
+// 一旦落盘被推迟，滑块就会弹回旧位置、音量还会被旧值当场覆盖）。
+AppSettings& settingsSnapshot() {
+    static AppSettings settings;
+    return settings;
+}
+bool& settingsSnapshotValid() {
+    static bool valid = false;
+    return valid;
+}
+bool& settingsPending() {
+    static bool pending = false;
+    return pending;
+}
+}  // namespace
+
 QString Storage::dir() {
     const QString path = QStandardPaths::writableLocation(QStandardPaths::AppDataLocation);
     QDir().mkpath(path);
@@ -79,6 +97,36 @@ void Storage::saveRecords(const Records& records) {
 }
 
 AppSettings Storage::loadSettings() {
+    if (!settingsSnapshotValid()) {
+        settingsSnapshot() = readSettingsFile();
+        settingsSnapshotValid() = true;
+        settingsPending() = false;
+    }
+    return settingsSnapshot();
+}
+
+void Storage::saveSettings(const AppSettings& settings) {
+    settingsSnapshot() = settings;
+    settingsSnapshotValid() = true;
+    settingsPending() = false;
+    writeSettingsFile(settings);
+}
+
+void Storage::stageSettings(const AppSettings& settings) {
+    settingsSnapshot() = settings;
+    settingsSnapshotValid() = true;
+    settingsPending() = true;
+}
+
+void Storage::flushSettings() {
+    if (!settingsPending()) {
+        return;
+    }
+    settingsPending() = false;
+    writeSettingsFile(settingsSnapshot());
+}
+
+AppSettings Storage::readSettingsFile() {
     AppSettings settings;
     QFile file(dir() + "/settings.json");
     if (!file.open(QIODevice::ReadOnly)) {
@@ -99,7 +147,7 @@ AppSettings Storage::loadSettings() {
     return settings;
 }
 
-void Storage::saveSettings(const AppSettings& settings) {
+void Storage::writeSettingsFile(const AppSettings& settings) {
     QJsonObject obj;
     obj.insert("sfxEnabled", settings.sfxEnabled);
     obj.insert("sfxVolume", std::clamp(settings.sfxVolume, 0, 100));
