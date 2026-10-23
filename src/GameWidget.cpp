@@ -460,7 +460,11 @@ GameWidget::GameWidget(QWidget* parent) : QWidget(parent) {
     auto addButton = [this](QWidget* panel, QVBoxLayout* layout, const QString& text, auto slot) {
         auto* button = new QPushButton(text, panel);
         layout->addWidget(button);
-        connect(button, &QPushButton::clicked, this, slot);
+        // 暂停菜单里的按钮统一补一记 UI 音，和主菜单按钮一致
+        connect(button, &QPushButton::clicked, this, [this, slot] {
+            Audio::instance().play(SfxId::Ui);
+            slot();
+        });
     };
     addButton(pausePanel_, pauseLayout, "继续", [this] { setPaused(false); setFocus(); });
     addButton(pausePanel_, pauseLayout, "存档", [this] { saveGame(); });
@@ -571,7 +575,17 @@ GameWidget::GameWidget(QWidget* parent) : QWidget(parent) {
         applyPauseAudio(playUi, PauseApply::Live);
         pauseSaveTimer->start();
     };
-    connect(pauseSfxCheck_, &QCheckBox::toggled, this, [onPauseToggle](bool) { onPauseToggle(true); });
+    connect(pauseSfxCheck_, &QCheckBox::toggled, this, [this, onPauseToggle](bool on) {
+        if (!on) {
+            // 关掉音效的那一下也要听得见：先把这一声放出去，等它响完再真正静音
+            //（applyPauseAudio 会把所有音效音量刷成 0，紧接着静音就听不到点击了）
+            Audio::instance().play(SfxId::Ui);
+            QTimer::singleShot(140, this, [onPauseToggle] { onPauseToggle(true); });
+            return;
+        }
+        // 打开时反过来：先开再响，否则 play 被开关挡住
+        onPauseToggle(true);
+    });
     connect(pauseSfxSlider_, &QSlider::valueChanged, this, [this, applyPauseAudio, pauseSaveTimer](int) {
         applyPauseAudio(false, PauseApply::Preview);
         if (!pauseSfxSlider_->isSliderDown()) {
@@ -582,7 +596,7 @@ GameWidget::GameWidget(QWidget* parent) : QWidget(parent) {
         applyPauseAudio(false, PauseApply::Persist);
     });
     connect(pauseBgmCheck_, &QCheckBox::toggled, this, [this, onPauseToggle](bool on) {
-        onPauseToggle(false);
+        onPauseToggle(true);
         if (on && running_ && !session_.ended()) {
             Audio::instance().ensureBgmLoop();
         }
@@ -3525,6 +3539,157 @@ void GameWidget::drawEraseCircles(QPainter& painter, const Player& player) {
     }
 }
 
+// 蜂群锁定：四角括号从外圈收拢到目标身上，咬住后转成呼吸光框，
+// 起手瞬间再拉一条流动虚线数据链、扫一道横线，做出机载火控咬住目标的观感
+void GameWidget::drawDroneLock(QPainter& painter) {
+    const float fade = session_.droneLockFade();
+    if (fade <= 0.01f) {
+        return;
+    }
+    const Monster* target = session_.droneLockTarget();
+    float x = 0.f;
+    float y = 0.f;
+    session_.droneLockPos(x, y);
+    // 目标体积差别很大：杂兵按贴图框一圈，两只 boss 要放大，框小了像贴纸
+    float halfW = 15.f;
+    float halfH = 17.f;
+    float cy = y - 14.f;
+    if (target) {
+        switch (target->kind) {
+        case MonsterKind::Eye:
+            halfW = 44.f;
+            halfH = 46.f;
+            cy = y - 36.f;
+            break;
+        case MonsterKind::SlimeBoss:
+            halfW = 32.f;
+            halfH = 26.f;
+            cy = y - 30.f;
+            break;
+        case MonsterKind::Mushroom:
+        case MonsterKind::Caster:
+            halfW = 18.f;
+            halfH = 19.f;
+            cy = y - 16.f;
+            break;
+        case MonsterKind::Killbot:
+            halfW = 17.f;
+            halfH = 18.f;
+            cy = y - 15.f;
+            break;
+        case MonsterKind::Flyer:
+            halfH = 16.f;
+            cy = y - 20.f;
+            break;
+        default:
+            break;
+        }
+    }
+
+    const float age = session_.droneLockAge();
+    // 目标没了就按「已咬住」的紧贴尺寸往外散，不再重新收拢一遍
+    const float t = target ? std::clamp(age / 0.26f, 0.f, 1.f) : 1.f;
+    const float ease = 1.f - (1.f - t) * (1.f - t) * (1.f - t);  // easeOutCubic
+    const bool locked = target && t >= 0.999f;
+    const float pulse = 0.5f + 0.5f * std::sin(age * 10.f);
+    const QColor core(110, 236, 255);
+    const QColor white(224, 252, 255);
+
+    painter.save();
+    painter.setBrush(Qt::NoBrush);
+
+    // 地面刻度环：压扁成椭圆扣在脚下，分段旋转，锁定后改成呼吸亮度
+    painter.save();
+    painter.translate(x, y + 2.f);
+    painter.scale(1.f, 0.34f);
+    const float ringR = halfW + 5.f + 4.f * (1.f - ease);
+    constexpr int kLockSegs = 8;
+    for (int i = 0; i < kLockSegs; ++i) {
+        const float a0 = age * 1.6f + 6.2831853f * float(i) / float(kLockSegs);
+        painter.setPen(QPen(withAlpha(core, int((locked ? 130.f + 90.f * pulse : 120.f) * fade)),
+            locked ? 1.5f : 2.f, Qt::SolidLine, Qt::RoundCap));
+        painter.drawPath(arcPath(0.f, 0.f, ringR, a0, a0 + 0.5f));
+    }
+    painter.restore();
+
+    // 数据链：起手那半秒从机器人肩头拉一条流动虚线到目标，之后收掉
+    if (target && age < 0.5f) {
+        const Player& player = session_.player();
+        const float a = (1.f - age / 0.5f) * fade;
+        QPen link(withAlpha(core, int(110.f * a)), 1.f, Qt::CustomDashLine);
+        link.setDashPattern({3.0, 4.0});
+        link.setDashOffset(age * 46.f);
+        painter.setPen(link);
+        painter.drawLine(QPointF(player.x, player.y - 18.f), QPointF(x, cy));
+    }
+
+    // 四角括号：spread 从 3 倍收拢到 1 倍，收拢途中带一点高频抖动
+    const float spread = 1.f + 2.2f * (1.f - ease);
+    const float bw = halfW * spread;
+    const float bh = halfH * spread;
+    const float arm = std::clamp(std::min(halfW, halfH) * 0.55f, 5.f, 15.f);
+    const float jitter = locked ? 0.f : std::sin(age * 74.f) * 1.3f;
+    QPainterPath brackets;
+    for (int sx = -1; sx <= 1; sx += 2) {
+        for (int sy = -1; sy <= 1; sy += 2) {
+            const float px = x + float(sx) * bw + jitter * float(sx);
+            const float py = cy + float(sy) * bh + jitter * float(sy);
+            brackets.moveTo(px - float(sx) * arm, py);
+            brackets.lineTo(px, py);
+            brackets.lineTo(px, py - float(sy) * arm);
+        }
+    }
+    strokeGlow(painter, withAlpha(core, int(235.f * fade)), 1.7f, [&] { painter.drawPath(brackets); });
+
+    if (target && !locked) {
+        // 扫描线：还没咬住时从框底扫到框顶，扫完正好锁定
+        const float scanY = cy + bh - bh * 2.f * ease;
+        painter.setPen(QPen(withAlpha(white, int(210.f * fade * (0.35f + 0.65f * ease))), 1.2f));
+        painter.drawLine(QPointF(x - bw, scanY), QPointF(x + bw, scanY));
+        painter.setPen(Qt::NoPen);
+        painter.setBrush(withAlpha(white, int(160.f * fade)));
+        painter.drawEllipse(QRectF(x - bw - 1.f, scanY - 1.f, 2.5f, 2.5f));
+        painter.drawEllipse(QRectF(x + bw - 1.f, scanY - 1.f, 2.5f, 2.5f));
+    } else if (locked) {
+        // 咬住那一拍：一圈压扁的方框往外弹开
+        const float since = age - 0.26f;
+        if (since < 0.3f) {
+            const float k = since / 0.3f;
+            const float rx = halfW * (1.2f + 1.f * k);
+            const float ry = halfH * (1.2f + 1.f * k);
+            painter.setPen(QPen(withAlpha(white, int(230.f * (1.f - k) * fade)), 2.f * (1.f - k) + 0.6f));
+            painter.drawRect(QRectF(x - rx, cy - ry, rx * 2.f, ry * 2.f));
+        }
+    }
+
+    // 中心准点：四向短刻线夹住一个缓慢自转的小方框
+    const float gap = std::clamp(std::min(halfW, halfH) * 0.28f, 3.f, 10.f);
+    painter.setPen(QPen(withAlpha(white, int(200.f * fade)), 1.f));
+    painter.drawLine(QPointF(x - gap * 1.9f, cy), QPointF(x - gap, cy));
+    painter.drawLine(QPointF(x + gap, cy), QPointF(x + gap * 1.9f, cy));
+    painter.drawLine(QPointF(x, cy - gap * 1.9f), QPointF(x, cy - gap));
+    painter.drawLine(QPointF(x, cy + gap), QPointF(x, cy + gap * 1.9f));
+    painter.save();
+    painter.translate(x, cy);
+    painter.rotate(age * 70.f);
+    painter.setPen(QPen(withAlpha(core, int((150.f + 80.f * pulse) * fade)), 1.f));
+    const float dot = gap * 0.62f;
+    painter.drawRect(QRectF(-dot, -dot, dot * 2.f, dot * 2.f));
+    painter.restore();
+
+    // 咬住后的铭牌：贴在括号右外侧，随呼吸闪一下
+    if (locked) {
+        const QString label = QStringLiteral("LOCKED");
+        const QRectF box(x + halfW + 5.f, cy - 5.f, 46.f, 10.f);
+        painter.setFont(QFont(Platform::uiFontFamily(), 7, QFont::Bold));
+        painter.setPen(withAlpha(QColor(4, 26, 32), int(200.f * fade)));
+        painter.drawText(box.translated(1.f, 1.f), Qt::AlignLeft | Qt::AlignVCenter, label);
+        painter.setPen(withAlpha(QColor(168, 250, 255), int((140.f + 100.f * pulse) * fade)));
+        painter.drawText(box, Qt::AlignLeft | Qt::AlignVCenter, label);
+    }
+    painter.restore();
+}
+
 void GameWidget::drawWorld(QPainter& painter) {
     const Player& player = session_.player();
     const QPointF camera = cameraOrigin();
@@ -4765,9 +4930,15 @@ void GameWidget::drawWorld(QPainter& painter) {
                 painter.drawEllipse(QRectF(fx.x - capR, capY - capR * 0.62f, capR * 2.f, capR * 1.24f));
             });
         } else if (fx.kind == AttackFxKind::Grid) {
-            // 蓄力：一道扫描环由内向外推开，紫网格跟着亮起来，扫过之后再暗回去
+            // 蓄力：一道扫描带由内向外推开，紫网格跟着亮起来，扫过之后再暗回去。
+            // 原来 4 秒只扫一轮；现在一轮扫完立刻从中心重来，而且一轮比一轮快，一直到蓄力结束
             const float step = float(kTile) * 2.f;
-            const float scan = fx.radius * grow;
+            const float elapsed = std::max(0.f, fx.maxLife - fx.life);
+            // 累计圈数按时间二次增长：越往后每轮越短，后段慢慢加速（首轮约 1 秒，末轮约 0.5 秒）
+            const float cycles = elapsed * 1.0f + 0.14f * elapsed * elapsed;
+            const float scan = fx.radius * (cycles - std::floor(cycles));
+            // 起手快速淡入，末尾随技能一起收掉；中间保持原亮度，保证多轮扫描都看得清
+            const float fade = std::min(1.f, elapsed * 5.f) * std::min(1.f, fx.life / 0.5f);
             const int lines = int(fx.radius / step);
             painter.setPen(Qt::NoPen);
             for (int i = -lines; i <= lines; ++i) {
@@ -4780,8 +4951,7 @@ void GameWidget::drawWorld(QPainter& painter) {
                 if (lit <= 0.03f) {
                     continue;
                 }
-                const QColor line = withAlpha(fxColor(fx, QColor(166, 96, 248)),
-                    int(190.f * lit * std::min(1.f, u * 2.2f)));
+                const QColor line = withAlpha(fxColor(fx, QColor(166, 96, 248)), int(190.f * lit * fade));
                 painter.fillRect(QRectF(fx.x + off - 0.75f, fx.y - fx.radius, 1.5f, fx.radius * 2.f), line);
                 painter.fillRect(QRectF(fx.x - fx.radius, fx.y + off - 0.75f, fx.radius * 2.f, 1.5f), line);
             }
@@ -4880,6 +5050,8 @@ void GameWidget::drawWorld(QPainter& painter) {
             painter.drawEllipse(QRectF(bolt.x - 3, bolt.y - 3, 6, 6));
         }
     }
+    // 锁定准星压在无人机下面：蜂群扑进准星里，视觉上才是「咬住这个目标」
+    drawDroneLock(painter);
     constexpr float kDroneLift = 16.f;
     constexpr int kDroneFrame = 16;
     for (const Drone& drone : session_.drones()) {

@@ -8,6 +8,7 @@
 #include <QElapsedTimer>
 #include <QFileInfo>
 #include <QMediaPlayer>
+#include <QRandomGenerator>
 #include <QSoundEffect>
 #include <QTimer>
 #include <QUrl>
@@ -18,6 +19,10 @@
 
 namespace {
 constexpr int kVoices = 3;
+// 雷声三种音色（thunder1..3.wav）；每条留两个声部就够——
+// 普通落雷间隔 4~8 秒，雷罚 1.4~2.4 秒一次，第二次来时上一条往往还没响完，别直接掐断
+constexpr int kThunderVariants = 3;
+constexpr int kThunderVoices = 2;
 // 界面弹出时 BGM 保留的音量比例（压低但不停播）
 constexpr float kBgmDuckScale = 0.35f;
 // 次元斩打完：配音停下后先空这么久，再让 BGM 渐渐回来
@@ -51,8 +56,22 @@ const char* sfxFile(SfxId id) {
         return "level.wav";
     case SfxId::Explode:
         return "explode.wav";
+    case SfxId::LockOn:
+        return "lock.wav";
     default:
         return "ui.wav";
+    }
+}
+
+// 雷声不走 sfxFile（一个 SfxId 对三条文件），单独一张表
+const char* thunderFile(int variant) {
+    switch (variant) {
+    case 0:
+        return "thunder1.wav";
+    case 1:
+        return "thunder2.wav";
+    default:
+        return "thunder3.wav";
     }
 }
 
@@ -63,6 +82,10 @@ struct AudioState {
     float bgmRestoreDelay = 0.f;
     std::array<std::vector<QSoundEffect*>, int(SfxId::Count)> pools{};
     std::array<int, int(SfxId::Count)> cursor{};
+    // 三条雷声各自一个声部，随机取一条播；lastThunder 记住上一条，避免连着两次重样
+    std::array<std::vector<QSoundEffect*>, kThunderVariants> thunderPools{};
+    std::array<int, kThunderVariants> thunderCursor{};
+    int lastThunder = -1;
     QMediaPlayer* bgm = nullptr;
     QAudioOutput* bgmOut = nullptr;
     QMediaPlayer* burialVoice = nullptr;
@@ -157,12 +180,28 @@ void Audio::load(const QString& assetDir) {
         for (int i = 0; i < int(SfxId::Count); ++i) {
             state().pools[i].clear();
             state().cursor[i] = 0;
+            // 雷声一个 SfxId 对三条文件，池子在下面单独建
+            if (SfxId(i) == SfxId::Thunder) {
+                continue;
+            }
             const QUrl url = Platform::mediaUrl(sfxDir + "/" + sfxFile(SfxId(i)));
             for (int v = 0; v < kVoices; ++v) {
                 auto* effect = new QSoundEffect(QCoreApplication::instance());
                 effect->setSource(url);
                 effect->setLoopCount(1);
                 state().pools[i].push_back(effect);
+            }
+        }
+        state().lastThunder = -1;
+        for (int v = 0; v < kThunderVariants; ++v) {
+            state().thunderPools[v].clear();
+            state().thunderCursor[v] = 0;
+            const QUrl url = Platform::mediaUrl(sfxDir + "/" + thunderFile(v));
+            for (int voice = 0; voice < kThunderVoices; ++voice) {
+                auto* effect = new QSoundEffect(QCoreApplication::instance());
+                effect->setSource(url);
+                effect->setLoopCount(1);
+                state().thunderPools[v].push_back(effect);
             }
         }
         state().bgmOut = new QAudioOutput(QCoreApplication::instance());
@@ -307,6 +346,13 @@ void Audio::rebuildSfxVolumes() {
             }
         }
     }
+    for (auto& pool : state().thunderPools) {
+        for (QSoundEffect* effect : pool) {
+            if (effect) {
+                effect->setVolume(vol);
+            }
+        }
+    }
     if (state().burialOut) {
         state().burialOut->setVolume(vol);
     }
@@ -336,6 +382,10 @@ void Audio::play(SfxId id) {
     if (!loaded_ || !sfxEnabled_ || sfxVolumePercent_ <= 0) {
         return;
     }
+    if (id == SfxId::Thunder) {
+        playThunder();
+        return;
+    }
     const int index = int(id);
     if (index < 0 || index >= int(SfxId::Count)) {
         return;
@@ -346,6 +396,46 @@ void Audio::play(SfxId id) {
     }
     int& cursor = state().cursor[index];
     QSoundEffect* effect = pool[cursor % int(pool.size())];
+    cursor = (cursor + 1) % int(pool.size());
+    if (effect->isPlaying()) {
+        effect->stop();
+    }
+    effect->play();
+}
+
+// 雷声：三条音色随机取一条。上一次播的那条这次排除掉，
+// 免得同一条连响两次（雷雨天的落雷间隔 4~8 秒，很容易听出来）。
+void Audio::playThunder() {
+    if (!loaded_ || !sfxEnabled_ || sfxVolumePercent_ <= 0) {
+        return;
+    }
+    const int variants = int(state().thunderPools.size());
+    if (variants <= 0) {
+        return;
+    }
+    auto& random = *QRandomGenerator::global();
+    int pick = int(random.bounded(variants));
+    if (variants > 1 && pick == state().lastThunder) {
+        // 在「除上一条以外」的候选里再取一次，保证不重样
+        pick = (pick + 1 + int(random.bounded(variants - 1))) % variants;
+    }
+    state().lastThunder = pick;
+    auto& pool = state().thunderPools[pick];
+    if (pool.empty() || !pool.front()) {
+        return;
+    }
+    // 优先用空闲声部，免得把上一条还没响完的雷声掐断；全都占着就顶掉游标指的那条
+    QSoundEffect* effect = nullptr;
+    for (QSoundEffect* candidate : pool) {
+        if (candidate && !candidate->isPlaying()) {
+            effect = candidate;
+            break;
+        }
+    }
+    int& cursor = state().thunderCursor[pick];
+    if (!effect) {
+        effect = pool[cursor % int(pool.size())];
+    }
     cursor = (cursor + 1) % int(pool.size());
     if (effect->isPlaying()) {
         effect->stop();

@@ -14,6 +14,10 @@ enum class SfxId {
     Death,
     Level,
     Explode,
+    // 雷雨天落雷：对应 assets/sfx 下的三份雷声，播放时随机取一条（一次落雷只响一次）
+    Thunder,
+    // 机甲人蜂群锁定目标：三声短促的「嘀嘀嘀」，最后一声拔高表示已经咬住
+    LockOn,
     Count
 };
 
@@ -52,6 +56,8 @@ public:
 
     void play(SfxId id);
     void playBurialVoice();
+    // 雷声：三种音色随机播一条，避免连着两次同一段
+    void playThunder();
     // 隐藏连招「次元斩」的配音：起配音时把 BGM 静音（不停播）。
     // finishDimensionVoice() 用于次元斩正常打完（停配音，隔一拍再让 BGM 渐入），
     // stopDimensionVoice() 用于判定失败 / 换曲等需要立刻把 BGM 交回来的场合。

@@ -159,6 +159,8 @@ private:
     void drawWorld(QPainter& painter);
     // 抹杀的法阵：五层从地面铺开的圆盘，逐层更大，带俯视 3D 的柱面光墙
     void drawEraseCircles(QPainter& painter, const Player& player);
+    // 蜂群锁定的准星：四角括号收拢、扫描线、咬住后的呼吸光框与数据链
+    void drawDroneLock(QPainter& painter);
     // 次元斩的画面层：浅蓝滤镜 + 逐道斩出的蓝刃 + 沿刃线把画面切开错位
     void drawDimensionCuts(QPainter& painter);
     void drawBossBar(QPainter& painter, const QRect& view);

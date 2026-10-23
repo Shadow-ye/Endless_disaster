@@ -56,6 +56,8 @@ private:
     Tile surfaceTile(int x, int y) const;
     // 不含任何 boss 房覆盖层的地形（烧焦 / 迷宫清空带 / 程序化地表）
     Tile baseTile(int x, int y) const;
+    // 瓦片坐标 → 64 位键：高 32 位 x、低 32 位 y。覆盖层（烧焦 / 腐蚀）都用它做键，
+    // 与 PathField::keyOf 的位布局一致，一次整数比较即可判定同一格。
     static int64_t tileKey(int x, int y) { return (int64_t(x) << 32) ^ int64_t(uint32_t(y)); }
 
     uint32_t seed_;

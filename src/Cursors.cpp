@@ -24,13 +24,15 @@
 namespace {
 // 光标按 32 逻辑像素显示：乘上屏幕缩放比，高清屏上不至于糊成一团
 constexpr int kCursorLogicalSize = 32;
+// 局内准星再放大一圈：要在一片怪物和特效里一眼找到指针
+constexpr int kCrosshairLogicalSize = 40;
 
-int cursorPixelSize() {
+int cursorPixelSize(int logicalSize) {
     qreal dpr = 1.0;
     if (const QScreen* screen = QGuiApplication::primaryScreen()) {
         dpr = screen->devicePixelRatio();
     }
-    return std::max(16, int(std::lround(kCursorLogicalSize * dpr)));
+    return std::max(16, int(std::lround(logicalSize * dpr)));
 }
 
 // .cur 与 .ico 同源：文件头里每个图标的 wPlanes / wBitCount 两个字段在光标格式里被复用成热点坐标。
@@ -54,7 +56,7 @@ bool readCurHotspot(const QString& path, int* hotX, int* hotY) {
     return true;
 }
 
-QCursor loadCursor(const QString& file) {
+QCursor loadCursor(const QString& file, int logicalSize = kCursorLogicalSize) {
     const QString path = Platform::assetDir() + QStringLiteral("/cursor/") + file;
     const QImage image = QImageReader(path).read();
     if (image.isNull()) {
@@ -66,7 +68,7 @@ QCursor loadCursor(const QString& file) {
     if (readCurHotspot(path, &hotX, &hotY)) {
         hotspot = QPoint(hotX, hotY);
     }
-    const int size = cursorPixelSize();
+    const int size = cursorPixelSize(logicalSize);
     const QPixmap pixmap = QPixmap::fromImage(image).scaled(size, size, Qt::KeepAspectRatio, Qt::SmoothTransformation);
     // 热点要跟着缩放一起换算，否则指针会"点偏"
     const QPoint scaled(qRound(qreal(hotspot.x()) * pixmap.width() / image.width()),
@@ -161,7 +163,9 @@ QCursor Cursors::text() {
     return *cursor;
 }
 
+// 局内瞄准：默认那套 precision 准星太细，压在草地 / 沙地 / 特效上几乎看不见，
+// 换成自己画的粗描边准星（黑描边 + 白芯刻度 + 青色环），任何底色下都能一眼找到
 QCursor Cursors::crosshair() {
-    static const QCursor* cursor = new QCursor(loadCursor(QStringLiteral("precision.cur")));
+    static const QCursor* cursor = new QCursor(loadCursor(QStringLiteral("aim.cur"), kCrosshairLogicalSize));
     return *cursor;
 }

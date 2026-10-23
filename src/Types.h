@@ -3,16 +3,20 @@
 #include <cstdint>
 #include <cmath>
 
-inline constexpr int kTile = 16;
-inline constexpr int kFrame = 64;
-inline constexpr int kViewW = 480;
-inline constexpr int kViewH = 270;
-inline constexpr float kSimDt = 1.f / 60.f;
+inline constexpr int kTile = 16;            // 一个瓦片 16 px：寻路 / 迷宫 / 扫雷等网格算法的离散单位
+inline constexpr int kFrame = 64;           // 精灵帧边长（像素）
+inline constexpr int kViewW = 480;          // 逻辑视口宽（像素）
+inline constexpr int kViewH = 270;          // 逻辑视口高（像素）
+inline constexpr float kSimDt = 1.f / 60.f; // 固定模拟步长：1/60 s
 
+// 世界坐标 → 瓦片坐标：向下取整，负数也会正确落到左侧 / 上侧那一格。
 inline int tileOf(float v) {
     return static_cast<int>(std::floor(v / float(kTile)));
 }
 
+// 32 位整数混合（murmur 风格）。全项目唯一的「随机源」，同时扮演两个角色：
+//   1. 无状态噪声：mixHash(seed ^ ... ^ 坐标) 直接当「坐标 → 伪随机值」用；
+//   2. 状态式 PRNG：下一状态 = mixHash(状态 + 常数)，同种子必得同序列。
 inline uint32_t mixHash(uint32_t x) {
     x ^= x >> 16;
     x *= 0x7feb352du;
@@ -23,7 +27,12 @@ inline uint32_t mixHash(uint32_t x) {
 }
 
 // 4-dir sheet rows: 0 down, 1 left, 2 right, 3 up.
+// 中文：4 方向图集的行序为 0 下、1 左、2 右、3 上。
 // 8-dir Puny rows (clockwise from south): 0 S, 1 SE, 2 E, 3 NE, 4 N, 5 NW, 6 W, 7 SW.
+// 中文：8 方向 Puny 图集的行序（从正南起顺时针）为 0 南、1 东南、2 东、3 东北、
+//       4 北、5 西北、6 西、7 西南。
+// 输入是朝向向量，输出是图集行号。
+// 4 方向用「绝对分量谁大」判定；8 方向用 atan2 除以 45° 再四舍五入到 0..7。
 inline int facingDir(float fx, float fy, int dirs = 4) {
     if (dirs >= 8) {
         float a = std::atan2(fx, fy);

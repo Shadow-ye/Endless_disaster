@@ -110,8 +110,9 @@ inline constexpr float kAtomicHalfH = 135.f;
 // 引爆把地表烧成沙地的半径（格），以及顺带炸塌迷宫墙的作用半径
 inline constexpr int kAtomicScorchTiles = 7;
 inline constexpr float kAtomicWallBreak = 112.f;
-// 蓄力时那圈紫色网格的扫描半径
-inline constexpr float kAtomicGridRange = 190.f;
+// 蓄力时那圈紫色网格的扫描半径：要盖住整个视野（480×270），
+// 扫描带会一圈圈由内向外反复推出去，直到蓄力结束
+inline constexpr float kAtomicGridRange = 360.f;
 // 吟唱字幕的时间轴：I 亮 1 秒、空 1 秒、am 亮 1 秒、再空 1 秒（正好铺满 4 秒蓄力），
 // 引爆瞬间甩出 atomic，停 2 秒
 inline constexpr float kAtomicChantWord = 1.f;
@@ -546,6 +547,14 @@ public:
     const std::vector<Monster>& monsters() const { return monsters_; }
     const std::vector<Bolt>& bolts() const { return bolts_; }
     const std::vector<Drone>& drones() const { return drones_; }
+    // 蜂群锁定的目标：起手时钉住它，准星画在它身上；目标死了 / 无人机散尽后返回 nullptr
+    const Monster* droneLockTarget() const;
+    // 锁定准星的进度：0 = 刚起手正在收拢，数值越大越接近「已咬住」（绘制层自己钳制）
+    float droneLockAge() const { return droneLockAge_; }
+    // 目标丢失后的余辉 0..1：准星停在最后的位置上散掉
+    float droneLockFade() const { return droneLockFade_; }
+    // 准星位置：锁定时跟随目标，丢失后就停在最后的位置
+    void droneLockPos(float& x, float& y) const { x = droneLockX_; y = droneLockY_; }
     const std::vector<Drop>& drops() const { return drops_; }
     const std::vector<FloatText>& floatTexts() const { return floats_; }
     const std::vector<AttackFx>& attackFx() const { return attackFx_; }
@@ -715,6 +724,8 @@ private:
     void breakMazeWallsRadius(float x, float y, float radius);
     void breakMazeWallsBeam(float range, float halfWidth);
     void applyEyeLevel();
+    // 分轴移动：先试 X 轴、再试 Y 轴，被拒绝的只有撞墙的那个分量，另一个仍生效，
+    // 于是斜向撞墙时会沿墙滑行而不是卡死。moved 非空时累加实际位移（用于判断「有没有动」）。
     void tryMove(float& x, float& y, float vx, float vy, float dt, float radius, int pass, float* moved);
     int playerPass() const;
     // 脚下这格不可走（岩石 / 灌木 / 水）时，给出朝玩家更近一格的可走邻格
@@ -787,6 +798,12 @@ private:
     void explodeBolt(const Bolt& bolt);
     void castSwarm();
     void updateDrones(float dt);
+    // 蜂群锁定用的目标筛选：玩家周围 range 内最近的活怪
+    const Monster* nearestMonster(float range) const;
+    // 钉住一个目标：重置准星动画，并在换目标时播锁定音
+    void acquireDroneLock(const Monster& target);
+    // 每帧推进准星：跟着目标走，目标没了就退回余辉
+    void updateDroneLock(float dt);
     void explodeDrone(const Drone& drone, bool harmful);
     void updateKillbot(Monster& monster, float dt, float dist);
     bool rangedHero() const { return player_.hero == HeroClass::Mage || player_.hero == HeroClass::Robot; }
@@ -865,11 +882,21 @@ private:
     TileMap map_{1};
     MazeRuin ruin_;
     ShallowPool pool_;
+    // 怪物寻路流场：以玩家所在瓦片为源点，全场怪物共享同一张父指针表。
+    // 属于纯派生状态，不进存档 —— 读档后按玩家位置重建一次即可。
     PathField paths_;
     Player player_;
     std::vector<Monster> monsters_;
     std::vector<Bolt> bolts_;
     std::vector<Drone> drones_;
+    // 蜂群锁定：id 为 -1 表示没锁；age / fade 供绘制层做收拢与余辉动画
+    int droneLockId_ = -1;
+    float droneLockAge_ = 0.f;
+    float droneLockFade_ = 0.f;
+    float droneLockX_ = 0.f;
+    float droneLockY_ = 0.f;
+    // 换目标时锁定音的最短间隔，免得一瞬间刷出好几声
+    float droneRelockCd_ = 0.f;
     std::vector<Drop> drops_;
     std::vector<FloatText> floats_;
     std::vector<AttackFx> attackFx_;
@@ -879,6 +906,8 @@ private:
     float baseMaxMp_ = 80.f;
     float baseArmor_ = 10.f;
     int nextId_ = 1;
+    // 上一次重建流场时玩家所在的瓦片。和当前瓦片不同就说明场已过期，需要重建。
+    // 初值 / 传送后置为 999999 这个「不可能坐标」哨兵，保证下一帧必定重建。
     int pathTileX_ = 999999;
     int pathTileY_ = 999999;
     float time_ = 0.f;

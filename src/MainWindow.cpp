@@ -729,10 +729,16 @@ MainWindow::MainWindow(QWidget* parent) : QWidget(parent) {
     });
     connect(sfxCheck_, &QCheckBox::toggled, this, [this](bool on) {
         sfxSlider_->setEnabled(on);
-        saveSettingsUi();
-        if (on) {
+        if (!on) {
+            // 关掉音效的那一下也要听得见：先把这一声放出去，等它响完再真正静音
+            //（saveSettingsUi 会把所有音效音量刷成 0，紧接着静音就听不到点击了）
             Audio::instance().play(SfxId::Ui);
+            QTimer::singleShot(140, this, [this] { saveSettingsUi(); });
+            return;
         }
+        // 打开时反过来：先开再响，否则 play 被开关挡住
+        saveSettingsUi();
+        Audio::instance().play(SfxId::Ui);
     });
     connect(sfxSlider_, &QSlider::valueChanged, this, [this](int value) {
         sfxVolumeLabel_->setText(QString("%1%").arg(value));
@@ -745,6 +751,7 @@ MainWindow::MainWindow(QWidget* parent) : QWidget(parent) {
     });
     connect(sfxSlider_, &QSlider::sliderReleased, this, [this] { saveSettingsUi(); });
     connect(bgmCheck_, &QCheckBox::toggled, this, [this](bool on) {
+        Audio::instance().play(SfxId::Ui);
         bgmSlider_->setEnabled(on);
         saveSettingsUi();
         if (on) {
@@ -762,14 +769,17 @@ MainWindow::MainWindow(QWidget* parent) : QWidget(parent) {
     connect(bgmSlider_, &QSlider::sliderReleased, this, [this] { saveSettingsUi(); });
     connect(guideCheck_, &QCheckBox::toggled, this, [this](bool on) {
         (void)on;
+        Audio::instance().play(SfxId::Ui);
         saveSettingsUi();
     });
     connect(showFpsCheck_, &QCheckBox::toggled, this, [this](bool on) {
         (void)on;
+        Audio::instance().play(SfxId::Ui);
         saveSettingsUi();
     });
     connect(weatherCheck_, &QCheckBox::toggled, this, [this](bool on) {
         (void)on;
+        Audio::instance().play(SfxId::Ui);
         saveSettingsUi();
     });
     connect(brightSlider_, &QSlider::valueChanged, this, [this](int value) {

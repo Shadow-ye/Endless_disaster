@@ -238,10 +238,15 @@ Tile TileMap::baseTile(int x, int y) const {
     return Tile::Grass;
 }
 
+// 寻路流场专用的「格级」通行判定，等价于 pass=0（地面单位视角）。
 bool TileMap::walkable(int x, int y) const {
     return !blocks(x, y, 0);
 }
 
+// 三级通行语义（pass 越大越自由）：
+//   0 = 地面（默认）  水 / 岩石 / 灌木 / 迷宫墙 全部阻挡
+//   1 = 跳跃 / 画面外 水 / 迷宫墙阻挡，岩石与灌木可过
+//   2 = 飞行          只有迷宫墙阻挡
 bool TileMap::blocks(int x, int y, int pass) const {
     const Tile tile = at(x, y);
     // 迷宫墙任何通行等级都过不去，包括跳跃、飞行和飞行怪。
@@ -256,18 +261,23 @@ bool TileMap::blocks(int x, int y, int pass) const {
     if (tile == Tile::Corroded) {
         return false;
     }
+    // pass >= 2（跳跃 / 飞行）：水、岩石、灌木都不再阻挡
     if (pass >= 2) {
         return false;
     }
     if (tile == Tile::Water) {
-        return true;
+        return true; // 水只挡地面单位
     }
     if (tile == Tile::Rock || tile == Tile::Bush) {
-        return pass == 0;
+        return pass == 0; // 岩石 / 灌木挡地面单位，但 pass=1 可踩过去
     }
-    return false;
+    return false; // 草地 / 沙地 / 迷宫地板 / 广场一律可走
 }
 
+// 圆形碰撞体的 5 点采样近似：中心 + 上下左右各偏移一个半径。
+// 把「圆 vs 网格」的判定降级成 5 次 O(1) 的格查询 —— 怪物每帧要调用好几次，
+// 这样比精确求交便宜得多，误差在 16 px 的格宽下可以接受。
+// pass 直接透传给 blocks，所以同一个函数能同时服务地面 / 跳跃 / 飞行单位。
 bool TileMap::blockedAt(float x, float y, float radius, int pass) const {
     const float points[5][2] = {
         {x, y},

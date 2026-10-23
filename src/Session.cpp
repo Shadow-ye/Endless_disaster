@@ -9,6 +9,8 @@
 namespace {
 constexpr float kPi = 3.14159265f;
 
+// 碰撞半径（像素）：配合 TileMap::blockedAt 的 5 点采样，把圆形身体近似成网格判定。
+// 寻路流场是格级的（16 px），真正决定「能不能挪过去」的是这里的物理半径。
 constexpr float kPlayerRadius = 7.f;
 constexpr float kMonsterRadius = 7.f;
 
@@ -400,6 +402,10 @@ void Session::newGameStepReset(uint32_t seed, uint32_t runId, HeroClass hero, in
     monsters_.clear();
     bolts_.clear();
     drones_.clear();
+    droneLockId_ = -1;
+    droneLockAge_ = 0.f;
+    droneLockFade_ = 0.f;
+    droneRelockCd_ = 0.f;
     drops_.clear();
     floats_.clear();
     attackFx_.clear();
@@ -446,6 +452,7 @@ void Session::newGameStepSpawns() {
             spawnMonster(MonsterKind::Slime, x, y);
         }
     }
+    // 开局就把场建好：否则怪物第一帧查不到方向，会在原地发呆一下。
     paths_.rebuild(map_, tileOf(player_.x), tileOf(player_.y));
     pathTileX_ = tileOf(player_.x);
     pathTileY_ = tileOf(player_.y);
@@ -613,6 +620,8 @@ bool Session::loadFrom(const QJsonObject& game) {
         monster.poise = float(m.value("poise").toDouble(monster.maxPoise));
         monsters_.push_back(monster);
     }
+    // 读档后立刻按玩家位置重建一次场。场本身不进存档（它是纯派生状态），
+    // 靠这一次重建恢复到与存档一致的行为。
     paths_.rebuild(map_, tileOf(player_.x), tileOf(player_.y));
     pathTileX_ = tileOf(player_.x);
     pathTileY_ = tileOf(player_.y);
@@ -1642,6 +1651,9 @@ bool Session::breakMazeWallTile(int tileX, int tileY) {
     return true;
 }
 
+// 玩家打穿迷宫墙后的收尾：把破坏结果同步进地形，并强制重建寻路流场。
+// 这一步不能省 —— 地形变了但玩家位置没变，只靠「跨瓦片」判据不会触发重建，
+// 流场里仍会认为那堵墙存在，怪物就会一直绕远路。
 void Session::commitBrokenWalls(bool broken) {
     if (!broken) {
         return;
@@ -1764,7 +1776,13 @@ int Session::playerPass() const {
     return 2;
 }
 
+// 流场兜底第二步：把怪物「挪回寻路图上」。
+// 用于 nextTile 查不到的情况（画面外踩在岩石上、被击退到灌木丛里等）。
+// 只在 4 邻格里挑「曼哈顿距离玩家比当前格更近」的可走格，因此：
+//   1. 每一步都单调靠近玩家，不会来回横跳；
+//   2. 找不到更近的邻格就返回 false，交回给上层的侧移 / 后退逻辑。
 bool Session::nearestWalkableTile(int tileX, int tileY, int& outX, int& outY) const {
+    // 基准分 = 当前格到玩家（流场源点）的曼哈顿距离，邻格必须更小才会被选中。
     int best = std::abs(tileX - pathTileX_) + std::abs(tileY - pathTileY_);
     bool found = false;
     const int dirs[4][2] = {{1, 0}, {-1, 0}, {0, 1}, {0, -1}};
@@ -1785,6 +1803,11 @@ bool Session::nearestWalkableTile(int tileX, int tileY, int& outX, int& outY) co
     return found;
 }
 
+// 带碰撞的位移：分轴独立判定，先 X 后 Y。
+// 斜向撞墙时只有一个分量被拒绝，另一个仍然生效 —— 这就是「贴墙滑行」，
+// 怪物会顺着墙面滑走，而不是顶着墙原地抖动。
+// 顺序固定（先 X 后 Y）保证同一帧率下结果可复现。
+// radius 是碰撞半径，pass 是通行等级（0 地面 / 1 跳跃 / 2 飞行）。
 void Session::tryMove(float& x, float& y, float vx, float vy, float dt, float radius, int pass, float* moved) {
     const float beforeX = x;
     const float beforeY = y;
@@ -1793,6 +1816,7 @@ void Session::tryMove(float& x, float& y, float vx, float vy, float dt, float ra
         x = nx;
     }
     const float ny = y + vy * dt;
+    // 注意用的是更新后的 x：Y 轴判定基于「X 已经移动过」的位置，避免穿过斜角。
     if (!map_.blockedAt(x, ny, radius, pass)) {
         y = ny;
     }
@@ -1948,6 +1972,11 @@ constexpr float kDroneAttackSpeed = 230.f;
 constexpr float kDroneMaxAccel = 900.f;
 constexpr float kDroneNeighbor = 36.f;
 constexpr float kDroneSeparation = 12.f;
+// 锁定准星：从外圈收拢到咬住用多久，目标丢失后余辉散掉用多久，
+// 以及换目标时两次锁定音的最短间隔
+constexpr float kDroneLockRamp = 0.26f;
+constexpr float kDroneLockFade = 0.32f;
+constexpr float kDroneRelockGap = 0.45f;
 }
 
 void Session::fireRobotShot(float angleOffset, float baseDamage) {
@@ -2042,23 +2071,91 @@ void Session::castSwarm() {
     }
     pushFx(AttackFxKind::Ring, 22.f, 0.7f, 0.25f, 0x60E0D0);
     queueSfx(SfxId::Skill);
+    // 起手先挑最近的怪钉住，准星立刻收拢过去；没有目标就等无人机自己找
+    droneLockId_ = -1;
+    droneLockFade_ = 0.f;
+    droneRelockCd_ = 0.f;
+    if (const Monster* lock = nearestMonster(kDroneSeekRange)) {
+        acquireDroneLock(*lock);
+    }
 }
 
-// 鸟群算法：分离 + 对齐 + 聚拢，再叠加目标牵引（有怪追最近的怪，没怪绕玩家盘旋）
-void Session::updateDrones(float dt) {
-    if (drones_.empty()) {
-        return;
-    }
-    const Monster* target = nullptr;
-    float best = kDroneSeekRange;
+const Monster* Session::nearestMonster(float range) const {
+    const Monster* best = nullptr;
+    float bestDist = range;
     for (const Monster& monster : monsters_) {
         if (monster.state == ActorState::Dead) {
             continue;
         }
         const float dist = lengthOf(monster.x - player_.x, monster.y - player_.y);
-        if (dist < best) {
-            best = dist;
-            target = &monster;
+        if (dist < bestDist) {
+            bestDist = dist;
+            best = &monster;
+        }
+    }
+    return best;
+}
+
+const Monster* Session::droneLockTarget() const {
+    if (droneLockId_ < 0) {
+        return nullptr;
+    }
+    for (const Monster& monster : monsters_) {
+        if (monster.id == droneLockId_) {
+            return monster.state == ActorState::Dead ? nullptr : &monster;
+        }
+    }
+    return nullptr;
+}
+
+void Session::acquireDroneLock(const Monster& target) {
+    droneLockId_ = target.id;
+    droneLockAge_ = 0.f;
+    droneLockFade_ = 1.f;
+    droneLockX_ = target.x;
+    droneLockY_ = target.y;
+    // 同一瞬间连续换目标只响一声，避免听感上糊成一片
+    if (droneRelockCd_ <= 0.f) {
+        queueSfx(SfxId::LockOn);
+        droneRelockCd_ = kDroneRelockGap;
+    }
+}
+
+void Session::updateDroneLock(float dt) {
+    if (droneRelockCd_ > 0.f) {
+        droneRelockCd_ = std::max(0.f, droneRelockCd_ - dt);
+    }
+    const Monster* target = droneLockTarget();
+    if (target && !drones_.empty()) {
+        droneLockX_ = target->x;
+        droneLockY_ = target->y;
+        droneLockAge_ += dt;
+        droneLockFade_ = 1.f;
+        return;
+    }
+    // 目标死了 / 无人机散尽：准星留在原地收掉
+    droneLockAge_ = 0.f;
+    droneLockFade_ = std::max(0.f, droneLockFade_ - dt / kDroneLockFade);
+    if (droneLockFade_ <= 0.f) {
+        droneLockId_ = -1;
+    }
+}
+
+// 鸟群算法：分离 + 对齐 + 聚拢，再叠加目标牵引（有锁定目标就咬住它，没怪绕玩家盘旋）
+void Session::updateDrones(float dt) {
+    updateDroneLock(dt);
+    if (drones_.empty()) {
+        return;
+    }
+    // 咬住已锁定的目标，不会在两个怪之间来回跳；它死了或者跑出追击范围才重新挑最近的
+    const Monster* target = droneLockTarget();
+    if (target && lengthOf(target->x - player_.x, target->y - player_.y) >= kDroneSeekRange) {
+        target = nullptr;
+    }
+    if (!target) {
+        target = nearestMonster(kDroneSeekRange);
+        if (target) {
+            acquireDroneLock(*target);
         }
     }
 
@@ -3233,6 +3330,9 @@ void Session::update(float dt, const InputState& input, float mouseX, float mous
     }
     updatePlayer(dt, input, mouseX, mouseY);
     trackHpForBgm();
+    // 怪物寻路流场的重建时机：只有玩家跨瓦片才重建。
+    // 玩家约 96 px/s、瓦片 16 px，所以最多 6 次/秒（60 Hz 下平均每 10 帧一次）。
+    // 放在 updatePlayer 之后、updateMonsters 之前，怪物当帧就能用上最新的场。
     const int tx = tileOf(player_.x);
     const int ty = tileOf(player_.y);
     if (tx != pathTileX_ || ty != pathTileY_) {
@@ -3930,6 +4030,12 @@ void Session::updateBolts(float dt) {
     bolts_.erase(std::remove_if(bolts_.begin(), bolts_.end(), [](const Bolt& bolt) { return bolt.life <= 0.f; }), bolts_.end());
 }
 
+// 画面外追击：怪物离开视口外一小段距离后切换到这套逻辑。
+// 与视口内的策略正好互补 —— 视口内「以流场为主」，视口外「以直冲为主、流场为辅」：
+//   1. 默认朝玩家直线冲，速度随「离画面多远」线性加快，保证追得上不减速的玩家；
+//   2. 直冲方向被挡时才查流场绕行，流场也没有再退到贪心邻格；
+//   3. 四周全堵时按 ±45°/±90°/180° 侧移或后退，避免嵌在凹角里。
+// 返回 true 表示本帧已经处理完这只怪物，调用方直接 continue。
 bool Session::chaseOffscreen(Monster& monster, float dt) {
     const float dx = player_.x - monster.x;
     const float dy = player_.y - monster.y;
@@ -4030,6 +4136,12 @@ bool Session::chaseOffscreen(Monster& monster, float dt) {
     return true;
 }
 
+// 怪物主循环。每只怪物的处理顺序：
+//   1. 计时器衰减 → 死亡结算 → 求到玩家的距离与朝向；
+//   2. 选通行等级 pass（0 地面 / 1 跳跃 / 2 飞行），并按需放宽以脱离非法站位；
+//   3. 玩家近战命中判定（必须排在 Boss 分派之前）；
+//   4. 按种类分派：Boss 走各自剧本，普通怪走「画面外追击 → 流场追击」；
+//   5. 最后统一做两两互推分离，避免怪物叠在一起。
 void Session::updateMonsters(float dt) {
     for (Monster& monster : monsters_) {
         monster.animT += dt;
@@ -4109,6 +4221,7 @@ void Session::updateMonsters(float dt) {
             continue;
         }
 
+        // 画面外：走「直冲 + 加速 + 地形放宽」那一套；返回 true 表示本帧已处理完。
         if (chaseOffscreen(monster, dt)) {
             continue;
         }
@@ -4148,6 +4261,7 @@ void Session::updateMonsters(float dt) {
                 int ny = 0;
                 const int tx = tileOf(monster.x);
                 const int ty = tileOf(monster.y);
+                // 只在远距离才用流场靠近；dist < 64 时 gx/gy 已被改成「后退点」，保持射击间距。
                 if (dist >= 64.f && paths_.nextTile(tx, ty, nx, ny)) {
                     gx = (nx + 0.5f) * kTile;
                     gy = (ny + 0.5f) * kTile;
@@ -4221,6 +4335,11 @@ void Session::updateMonsters(float dt) {
             continue;
         }
 
+        // 选本帧的目标点，优先级从高到低：
+        //   1. 流场父格中心 —— 一次 O(1) 查表就拿到「离玩家更近一格」；
+        //   2. 贪心邻格 —— 流场查不到时把怪挪回寻路图上；
+        //   3. 玩家坐标 —— 两者都失败就直接冲，保证任何情况都不会站着不动。
+        // 飞行怪跳过前两级：它 pass=2 能飞过岩石和灌木，按地面流场绕行反而显得不会飞。
         int nx = 0;
         int ny = 0;
         const int tx = tileOf(monster.x);
@@ -4228,6 +4347,7 @@ void Session::updateMonsters(float dt) {
         float gx = player_.x;
         float gy = player_.y;
         if (monster.kind != MonsterKind::Flyer && paths_.nextTile(tx, ty, nx, ny)) {
+            // 走父格的「中心」而不是格角：避免贴着障碍擦角，成对出现也更稳。
             gx = (nx + 0.5f) * kTile;
             gy = (ny + 0.5f) * kTile;
         } else if (monster.kind != MonsterKind::Flyer && dist > 20.f && nearestWalkableTile(tx, ty, nx, ny)) {
@@ -4237,6 +4357,8 @@ void Session::updateMonsters(float dt) {
         const float mx = gx - monster.x;
         const float my = gy - monster.y;
         const float md = lengthOf(mx, my);
+        // 基础速度按种类分档（32~48 px/s），玩家是 96 px/s：
+        // 视口内怪物常态追不上玩家，是玩法设定；追击压力由画面外加速补上。
         float speed = 40.f;
         if (monster.kind == MonsterKind::Skeleton) {
             speed = 36.f;
@@ -4248,8 +4370,11 @@ void Session::updateMonsters(float dt) {
         // 浅水：对生物略微减速，史莱姆和飞行单位免疫
         speed *= shallowMoveMul(monster.x, monster.y,
             monster.kind == MonsterKind::Slime || monster.kind == MonsterKind::Flyer);
+        // 已经贴到近战距离就停下（飞行 / 史莱姆 / 施法怪除外，它们有各自的攻击距离）。
         const bool closeEnough = monster.kind != MonsterKind::Flyer && monster.kind != MonsterKind::Slime && monster.kind != MonsterKind::Caster && dist < 28.f;
+        // 死区 md > 2：目标点极近时不再挪动，免得在格中心附近左右抖。
         if (md > 2.f && !closeEnough) {
+            // 朝目标点按当前速度走一步；撞墙时 tryMove 内部会分轴滑行。
             tryMove(monster.x, monster.y, mx / md * speed, my / md * speed, dt, kMonsterRadius, pass, nullptr);
             monster.state = ActorState::Run;
         } else if (monster.state != ActorState::Attack) {
@@ -4341,6 +4466,7 @@ void Session::updateKillbot(Monster& monster, float dt, float dist) {
         float gy = player_.y;
         int nx = 0;
         int ny = 0;
+        // dist > 96 才需要靠近：优先用流场绕障碍，查不到就直接冲玩家坐标。
         if (paths_.nextTile(tileOf(monster.x), tileOf(monster.y), nx, ny)) {
             gx = (nx + 0.5f) * kTile;
             gy = (ny + 0.5f) * kTile;
@@ -4958,9 +5084,10 @@ void Session::strikeLightning(int count) {
             }
         }
     }
-    // 白闪 / 音效 / 震屏一轮只来一次，三道雷不会叠成三份
+    // 白闪 / 雷声 / 震屏一轮只来一次，三道雷不会叠成三份；
+    // 雷声由 Audio 在三条音色里随机取一条
     lightningFlash_ = 1.f;
-    queueSfx(SfxId::Explode);
+    queueSfx(SfxId::Thunder);
     triggerShake();
 }
 
