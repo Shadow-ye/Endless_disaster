@@ -1,0 +1,86 @@
+﻿================================================================
+无尽之灾（Endless Disaster）Windows 编译说明
+版本 0.7.2    引擎 Qt6 Widgets + Multimedia    语言 C++17
+================================================================
+
+一、运行环境（编译产物的目标平台）
+    Windows 10 / 11 x64，解压即玩，无需安装。
+
+二、编译所需环境（Windows 编译器套件）
+    CMake   >= 3.21
+    Ninja   任意版本
+    Qt      6.8.3 win64_mingw（必须包含 qtmultimedia 模块）
+    MinGW   GCC 13.1（Qt 官方配套的 qt.tools.win64_mingw1310）
+
+    用 aqtinstall 免登录安装（示例装到 E:\Qt）：
+        aqt install-qt   windows desktop 6.8.3 win64_mingw -m qtmultimedia -O E:\Qt
+        aqt install-tool windows desktop tools_mingw1310 qt.tools.win64_mingw1310 -O E:\Qt
+
+    装好后应存在：
+        <Qt>\6.8.3\mingw_64\bin\windeployqt.exe
+        <Qt>\6.8.3\mingw_64\bin\avcodec-61.dll        （Qt 自带的精简 LGPL FFmpeg）
+        <Qt>\Tools\mingw1310_64\bin\g++.exe
+
+三、一键构建（推荐）
+    在解压后的工程根目录（含 CMakeLists.txt 的那一层）依次执行：
+
+        Set-ExecutionPolicy -Scope Process Bypass -Force
+        .\packaging\windows\build-windows.ps1 -QtDir "E:\Qt\6.8.3\mingw_64" -MinGWDir "E:\Qt\Tools\mingw1310_64"
+
+    说明：
+    * 第一行只对当前 PowerShell 窗口放行脚本执行，关掉窗口即恢复；若系统
+      执行策略本就允许运行脚本，可省略这一行。
+    * 第二行的 -QtDir / -MinGWDir 请指向你自己安装的位置；装在其他盘或
+      其他版本时务必改，否则脚本会报「找不到官方 Qt」。
+    * 可选参数：-BuildDir <构建目录名，默认 build-windows>
+
+    产物：
+        dist\EndlessDisaster\EndlessDisaster.exe        解压即玩的目录（约 100 MB）
+        dist\EndlessDisaster-windows-x64.zip            可分发的压缩包（约 66 MB）
+
+    脚本自动完成：CMake 配置 → 编译 → 拷贝 assets/ things/ BGM/ 等资源
+    → windeployqt 部署 Qt 与 FFmpeg 运行库 → 打包 zip。
+
+四、等价的手动构建（不使用脚本时）
+    cmake -S . -B build-windows -G Ninja -DCMAKE_BUILD_TYPE=Release ^
+          -DCMAKE_PREFIX_PATH=<Qt>\6.8.3\mingw_64 ^
+          -DCMAKE_CXX_COMPILER=<Qt>\Tools\mingw1310_64\bin\g++.exe
+    cmake --build build-windows
+
+    运行库由 CMakeLists.txt 里的 POST_BUILD 步骤用 windeployqt 自动部署，
+    因此需要 windeployqt 在 PATH 中，或与编译使用同一套 Qt。
+
+五、注意事项
+    1. 请不要使用 MSYS2 的 Qt。它的 FFmpeg 是 GPL 全功能版，依赖约 70 个额外 DLL
+       （约 200 MB），漏拷任何一个都会导致背景音乐无声。请用 Qt 官方安装包。
+    2. 构建脚本会把 PATH 限制为「MinGW + 官方 Qt + 系统目录」，这是刻意为之：
+       避免混入其他来源的 libstdc++-6.dll / Qt6*.dll。
+    3. 资源目录 assets/、things/、BGM/ 是编译流程的一部分（POST_BUILD 逐目录拷贝），
+       裁剪或删除会导致构建失败。
+    4. 需 PowerShell 5.1 以上（脚本末尾用 Compress-Archive 打 zip）。
+    5. POST_BUILD 里只用 ASCII 文件名（story_bg.png、game_icon.jpg）：CMake 会把
+       这些命令写进 UTF-8 的 post-build.bat，而 cmd.exe 按控制台代码页解读它。
+       若改用中文文件名，在 GBK(936) 控制台下路径会变成乱码、构建会在拷贝资源
+       这一步失败——所以不要随意改回中文资源名。
+
+六、常见问题
+    * 提示「无法加载文件 ... 因为在此系统上禁止运行脚本」：
+      执行第三部分第一条 Set-ExecutionPolicy（只影响当前窗口）。
+    * 背景音乐无声：确认 exe 同级目录下存在 avcodec-61.dll、avformat-61.dll、
+      avutil-59.dll、swresample-5.dll、swscale-8.dll。
+    * 启动报 "no Qt platform plugin"：确认 exe 同级有 platforms\qwindows.dll。
+    * 启动报 0xc000007b：多半是 PATH 里混入了别处的 DLL，清理后重新执行脚本。
+    * 最后打 zip 报「文件正被另一进程使用」：杀毒软件或资源管理器缩略图瞬时占用了
+      刚复制过去的图片，重跑一次脚本即可。
+    * 中文显示为方块：Windows 自带字体即可正常显示，无需额外安装字体。
+
+================================================================
+工程结构（简要）
+    src/         游戏逻辑与界面（33 个文件）
+    assets/      角色、怪物、方块、音效、光标、UI
+    things/      背包物品图标（运行时按 assets/things 读取）
+    BGM/         背景音乐
+    site/        在线展示页源码（与编译无关）
+    packaging/   各平台打包脚本
+    CMakeLists.txt  构建定义与资源拷贝
+================================================================

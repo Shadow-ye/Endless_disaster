@@ -131,20 +131,25 @@ aqt install-tool windows desktop tools_mingw1310 qt.tools.win64_mingw1310 -O E:\
 
 ## 编译运行
 
-在仓库根目录执行：
+在仓库根目录执行（`Set-ExecutionPolicy` 只对当前窗口生效，系统执行策略已允许运行脚本时可省略）：
 
 ```powershell
-.\packaging\windows\build-windows.ps1
+Set-ExecutionPolicy -Scope Process Bypass -Force
+.\packaging\windows\build-windows.ps1 -QtDir "E:\Qt\6.8.3\mingw_64" -MinGWDir "E:\Qt\Tools\mingw1310_64"
 ```
 
-脚本会用 `E:\Qt\6.8.3\mingw_64` 与 `E:\Qt\Tools\mingw1310_64` 编译到 `build-windows/`（路径可用 `-QtDir`、`-MinGWDir` 参数修改），构建后步骤复制资源（`assets/`、`things/`（背包物品图标）、`BGM/`、`character-img/`、故事背景与图标）并用同一套 Qt 的 `windeployqt` 部署运行库（含 FFmpeg），最后生成：
+脚本会用 `E:\Qt\6.8.3\mingw_64` 与 `E:\Qt\Tools\mingw1310_64` 编译到 `build-windows/`（路径可用 `-QtDir`、`-MinGWDir` 参数修改，Qt 装在别处时务必改），构建后步骤复制资源（`assets/`、`things/`（背包物品图标）、`BGM/`、`character-img/`、`assets/ui/story_bg.png` 与 `assets/ui/game_icon.jpg`）并用同一套 Qt 的 `windeployqt` 部署运行库（含 FFmpeg），最后生成：
 
 ```text
-dist/EndlessDisaster/EndlessDisaster.exe      # 解压即玩的目录（约 102 MB）
-dist/EndlessDisaster-windows-x64.zip           # 用于发布（约 68 MB）
+dist/EndlessDisaster/EndlessDisaster.exe      # 解压即玩的目录（约 100 MB）
+dist/EndlessDisaster-windows-x64.zip           # 用于发布（约 66 MB）
 ```
 
 脚本运行时会把 `PATH` 限定为官方 Qt 与 MinGW，避免混入 MSYS2 等其他 Qt 的 DLL。
+
+POST_BUILD 里的拷贝命令只使用 ASCII 文件名（`story_bg.png`、`game_icon.jpg`），因为 CMake 会把它们写进 UTF-8 的 `post-build.bat`，而 `cmd.exe` 按控制台代码页解读该文件——用中文文件名时，GBK(936) 控制台下路径会变成乱码、导致构建在「拷贝资源」一步失败。改中文文件名前请先确认这一点。
+
+若末尾打 zip 报 `Compress-Archive`「文件正被另一进程使用」，是杀毒软件或资源管理器缩略图瞬时占用了刚复制过去的图片，重跑一次脚本即可。
 
 ### Linux 编译与打包
 
