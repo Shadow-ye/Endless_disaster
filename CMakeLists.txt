@@ -94,10 +94,12 @@ add_custom_command(TARGET EndlessDisaster POST_BUILD
     COMMAND ${CMAKE_COMMAND} -E copy_directory ${CMAKE_SOURCE_DIR}/assets/sfx $<TARGET_FILE_DIR:EndlessDisaster>/assets/sfx
     COMMAND ${CMAKE_COMMAND} -E copy_directory ${CMAKE_SOURCE_DIR}/assets/cursor $<TARGET_FILE_DIR:EndlessDisaster>/assets/cursor
     COMMAND ${CMAKE_COMMAND} -E make_directory $<TARGET_FILE_DIR:EndlessDisaster>/assets/ui
+    # 这里只用 ASCII 文件名：POST_BUILD 的命令会被写进 post-build.bat（UTF-8），
+    # 而 cmd.exe 按控制台代码页解读它——GBK(936) 控制台下中文路径会变成乱码，
+    # 导致 copy_if_different 找不到源文件、整个构建失败。运行时 main.cpp /
+    # MainWindow.cpp 的候选列表里已有 story_bg.png、game_icon.jpg 这两个 ASCII 回退项。
     COMMAND ${CMAKE_COMMAND} -E copy_if_different ${CMAKE_SOURCE_DIR}/assets/ui/story_bg.png $<TARGET_FILE_DIR:EndlessDisaster>/assets/ui/story_bg.png
-    COMMAND ${CMAKE_COMMAND} -E copy_if_different ${CMAKE_SOURCE_DIR}/assets/ui/story_bg.png $<TARGET_FILE_DIR:EndlessDisaster>/故事背景.png
-    COMMAND ${CMAKE_COMMAND} -E copy_if_different ${CMAKE_SOURCE_DIR}/assets/ui/游戏图标.jpg $<TARGET_FILE_DIR:EndlessDisaster>/assets/ui/游戏图标.jpg
-    COMMAND ${CMAKE_COMMAND} -E copy_if_different ${CMAKE_SOURCE_DIR}/assets/ui/游戏图标.jpg $<TARGET_FILE_DIR:EndlessDisaster>/游戏图标.jpg
+    COMMAND ${CMAKE_COMMAND} -E copy_if_different ${CMAKE_SOURCE_DIR}/assets/ui/game_icon.jpg $<TARGET_FILE_DIR:EndlessDisaster>/assets/ui/game_icon.jpg
     COMMAND ${CMAKE_COMMAND} -E copy_directory ${CMAKE_SOURCE_DIR}/assets/character-img $<TARGET_FILE_DIR:EndlessDisaster>/character-img
     # 背包里的物品图标：仓库根目录 things/ 原样拷到可执行文件旁的 assets/things
     COMMAND ${CMAKE_COMMAND} -E copy_directory ${CMAKE_SOURCE_DIR}/things $<TARGET_FILE_DIR:EndlessDisaster>/assets/things
